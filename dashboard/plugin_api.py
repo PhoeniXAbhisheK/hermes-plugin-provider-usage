@@ -40,6 +40,7 @@ All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -205,6 +206,54 @@ def fetch_opencode_go():
     if not windows:
         raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
+
+
+def _opencode_db_uri():
+    """Read-only URI for the OpenCode CLI ledger (spaces percent-encoded;
+    sqlite URIs reject raw spaces and backslashes on Windows)."""
+    db = HOME / ".local/share/opencode/opencode.db"
+    if not db.exists():
+        return None
+    return "file:" + db.as_posix().replace(" ", "%20") + "?mode=ro"
+
+
+def _month_start_ms():
+    """Epoch milliseconds at 00:00 local time on the first of this month."""
+    return datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+
+
+def fetch_opencode_zen():
+    """OpenCode Zen = metered API -> actual dollar spend, nothing else.
+
+    Zen exposes no spend/usage HTTP endpoint (all zen/v1 paths are 403
+    or a 'Not Found' catch-all; upstream anomalyco/opencode#44189 tracks
+    an official balance API). The OpenCode CLI's local SQLite ledger is
+    the grounded source: session.cost is the metered price OpenCode
+    charged per session, and its provider model JSON carries
+    providerID 'opencode' == Zen. Free Zen models have cost 0.0, so the
+    sum is real spend -- $0.00 here is measured, never fabricated.
+    """
+    uri = _opencode_db_uri()
+    if uri is None:
+        raise _Skip("opencode-zen")
+    month_start = _month_start_ms()
+    con = sqlite3.connect(uri, uri=True, timeout=2.0)
+    try:
+        spend = con.execute(
+            "select coalesce(sum(cost), 0.0) from session "
+            "where json_extract(model, '$.providerID') = 'opencode' "
+            "and time_created >= ?",
+            (month_start,),
+        ).fetchone()[0]
+    except sqlite3.Error as exc:
+        raise RuntimeError("OpenCode ledger unreadable: %s" % exc)
+    finally:
+        con.close()
+    return {
+        "id": "opencode-zen",
+        "status": "ok",
+        "money": [{"label": "Spend (month)", "left": round(float(spend), 2), "cur": "USD"}],
+    }
 
 
 def fetch_openai_codex():

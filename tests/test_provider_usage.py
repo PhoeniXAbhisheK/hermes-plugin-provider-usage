@@ -126,3 +126,50 @@ class GoFetcherTest(unittest.TestCase):
         self.assertEqual(p["id"], "opencode-go")
         self.assertEqual(p["windows"][0]["label"], "5h")
         self.assertEqual(p["windows"][0]["percent"], 12.5)
+
+class ZenFetcherTest(unittest.TestCase):
+    def setUp(self):
+        import sqlite3, tempfile, datetime
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        db_dir = self.home / ".local" / "share" / "opencode"
+        db_dir.mkdir(parents=True)
+        con = sqlite3.connect(db_dir / "opencode.db")
+        con.execute("create table session (model text, cost real, time_created integer)")
+        now_ms = int(datetime.datetime.now().timestamp() * 1000)
+        zen = '{"providerID":"opencode","id":"x"}'
+        con.executemany(
+            "insert into session values (?,?,?)",
+            [
+                (zen, 1.00, now_ms),                                  # Zen, this month
+                (zen, 2.50, now_ms - 60_000),                         # Zen, this month
+                (zen, 0.00, now_ms - 120_000),                        # Zen free model
+                (zen, 99.00, now_ms - 40 * 86_400_000),               # Zen, previous months
+                ('{"providerID":"anthropic","id":"y"}', 7.00, now_ms),  # not Zen
+                (None, 5.00, now_ms),                                 # unparseable model json
+            ],
+        )
+        con.commit()
+        con.close()
+        self._orig_home = API.HOME
+        API.HOME = self.home
+
+    def tearDown(self):
+        API.HOME = self._orig_home
+        self._tmp.cleanup()
+
+    def test_month_to_date_zen_spend_only(self):
+        p = API.fetch_opencode_zen()
+        self.assertEqual(p["id"], "opencode-zen")
+        self.assertEqual(p["status"], "ok")
+        row = p["money"][0]
+        self.assertEqual(row["label"], "Spend (month)")
+        self.assertEqual(row["left"], 3.50)   # 1.00 + 2.50 + 0.00, excludes other months/providers
+        self.assertEqual(row["cur"], "USD")
+        self.assertNotIn("total", row)        # pure spend row, no quota bar
+
+    def test_missing_db_skips(self):
+        API.HOME = self.home.parent / "nope"
+        with self.assertRaises(API._Skip):
+            API.fetch_opencode_zen()
