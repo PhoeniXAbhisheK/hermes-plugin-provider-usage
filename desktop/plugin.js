@@ -103,7 +103,8 @@ const CUR = { USD: '$', CNY: '\u00a5' }
 const money = (v, cur) => (CUR[cur] || '$') + Number(v).toFixed(2)
 const pct = v => Math.round(Number(v) || 0) + '%'
 const CODE = {
-  'opencode-go': 'opencode',
+  'opencode-zen': 'zen',
+  'opencode-go': 'go',
   'openai-codex': 'codex',
   openrouter: 'openrouter',
   anthropic: 'claude',
