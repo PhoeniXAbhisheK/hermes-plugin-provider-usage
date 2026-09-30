@@ -11,8 +11,14 @@ credential CLIs.
 
 Credential sources (read-only):
 
-- OpenCode: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
-  back to ``~/.local/share/opencode/auth.json`` (the OpenCode CLI's store).
+- OpenCode Zen: no metered-spend HTTP endpoint exists, so cost comes
+  read-only from the local OpenCode CLI ledger
+  (``~/.local/share/opencode/opencode.db``, ``session.cost`` sums for
+  provider ``opencode``, calendar month to date).
+- OpenCode Go: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope,
+  falling back to the ``opencode-go`` entry of
+  ``~/.local/share/opencode/auth.json`` (never the Zen key); a 403
+  means no Go subscription and hides the provider.
 - OpenAI Codex: Hermes' Codex sign-in via the account-usage helper, falling
   back to ``~/.codex/auth.json`` (expired token surfaces as unavailable;
   re-auth in the Codex CLI).
@@ -25,7 +31,7 @@ Credential sources (read-only):
 
 Endpoints hit (GET, machine credentials attached):
 
-- https://opencode.ai/zen/go/v1/usage
+- https://opencode.ai/zen/go/v1/usage (Go only; Zen cost is read from the local ledger)
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
 - https://api.anthropic.com/api/oauth/usage (via Hermes)
@@ -63,7 +69,8 @@ class _Skip(Exception):
     """Provider has no usable credentials -> omitted from the payload."""
 
 PROVIDER_META = {
-    "opencode-go": {"name": "OpenCode", "tag": "Zen / Go"},
+    "opencode-zen": {"name": "OpenCode Zen", "tag": "API"},
+    "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
     "openai-codex": {"name": "OpenAI Codex", "tag": "Plus"},
     "openrouter": {"name": "OpenRouter", "tag": "Credits"},
     "anthropic": {"name": "Anthropic", "tag": "Claude Code"},
@@ -77,7 +84,7 @@ PROVIDER_META = {
 
 # Display and fetch order for the panel.
 FETCH_ORDER = (
-    "opencode-go",
+    "opencode-zen", "opencode-go",
     "openai-codex",
     "openrouter",
     "anthropic",
@@ -577,6 +584,7 @@ def fetch_minimax():
 
 
 FETCHERS = {
+    "opencode-zen": fetch_opencode_zen,
     "opencode-go": fetch_opencode_go,
     "openai-codex": fetch_openai_codex,
     "openrouter": fetch_openrouter,
