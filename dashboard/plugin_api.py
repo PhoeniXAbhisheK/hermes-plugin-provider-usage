@@ -162,27 +162,48 @@ def _http_json(url, headers, *, timeout=12.0):
 
 
 def fetch_opencode_go():
-    # Hermes settings first (secret scope, .env fallback), then the CLI store.
+    """OpenCode Go = subscription plan -> quota windows.
+
+    Key resolution must NEVER fall back to the Zen API key (auth.json
+    entry 'opencode'): the Go endpoint answers those requests with
+    403 EntitlementError, which used to render a red error card for
+    every Zen-only user. No Go credential, or 403 with one, means
+    'no Go subscription' -> hide the provider (module contract:
+    unconfigured providers are omitted, never shown as errors).
+    """
     key = _secret("OPENCODE_GO_API_KEY")
     if not key:
         try:
             d = json.loads((HOME / ".local/share/opencode/auth.json").read_text())
-            key = (d.get("opencode-go") or {}).get("key") or (d.get("opencode") or {}).get("key")
+            entry = d.get("opencode-go")
+            if isinstance(entry, dict):
+                key = entry.get("key")
         except (OSError, ValueError):
             pass
     if not key:
         raise _Skip("opencode-go")
-    d = _http_json("https://opencode.ai/zen/go/v1/usage", {"Authorization": "Bearer " + key, "Accept": "application/json"})
+    try:
+        d = _http_json(
+            "https://opencode.ai/zen/go/v1/usage",
+            {"Authorization": "Bearer " + key, "Accept": "application/json"},
+        )
+    except PermissionError:
+        raise _Skip("opencode-go")  # entitlement error: no Go plan on this account
     u = d.get("usage") or {}
     windows = []
     for wid, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "Monthly")):
         w = u.get(wid) or {}
+        percent = _num(w.get("percent"))
+        if percent is None:
+            continue  # missing metric: never render a fabricated 0% bar
         windows.append({
             "label": label,
-            "percent": w.get("percent"),
+            "percent": percent,
             "resets_at": w.get("resetsAt"),
             "status": w.get("status", "ok"),
         })
+    if not windows:
+        raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
