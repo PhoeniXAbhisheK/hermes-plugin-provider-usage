@@ -59,9 +59,8 @@ is set: Zen has no key-authenticated balance API, so the number is scraped
 read-only from OpenCode's login-gated console billing RPC
 (`GET https://opencode.ai/_server`). To capture the cookie: log into
 `https://opencode.ai`, open DevTools → Application → Cookies, copy the value
-of the `auth` cookie, and add `OPENCODE_CONSOLE_COOKIE=<value>` to
-`$HERMES_HOME/.env` (on this machine
-`__HERMES_HOME__/.env`). The console
+of the `auth` cookie, and add `OPENCODE_CONSOLE_COOKIE=<value>` to your
+Hermes profile's `.env` (`$HERMES_HOME/.env`). The console
 workspace id is auto-discovered from the local `opencode.db`; override with
 `OPENCODE_WORKSPACE_ID` if you have several.
 
@@ -107,6 +106,15 @@ readout (its usage windows are shown separately, not as a dollar figure).
   including Hermes' normal credential upkeep).
 - **No subprocesses.** Every provider call is an in-process `httpx` request;
   nothing is shelled out, and no helper process ever sees a credential.
+- **Credentials never enter a URL or an error message.** Keys and the console
+  cookie travel only in request headers, never in a query string, so they
+  cannot leak through access logs, proxies, or a redirect. Provider response
+  bodies are not echoed into errors that reach the panel: `_decode_json_body`
+  reports only the status, byte count, and first few characters of a
+  non-JSON body, so a provider that reflects a rejected credential back
+  cannot surface it in the UI.
+- **Read-only local ledgers.** Hermes `state.db` and the OpenCode CLI
+  `opencode.db` are opened with `mode=ro`; the plugin never writes to either.
 - **Client identity disclosure.** The GitHub Copilot check queries GitHub's
   internal Copilot usage endpoint presenting the VS Code / Copilot client
   identity (`Editor-Version`, `User-Agent`), the same identity the Copilot

@@ -9,7 +9,7 @@ environment assumptions. Keep every recorded command executable and verified.
 - Hermes venv Python for backend/tests (system `python3` may be missing on
   this Windows host): `HV="$HOME/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"`.
 - `node` for the desktop JS syntax check; `lliki` CLI for wiki mechanics.
-- User home contains a space (`__USERPROFILE__`): quote every path.
+- On Windows the user home may contain a space: quote every path.
   Native tools (git, node, python) need `C:/...` forward-slash paths, not
   MSYS `/c/...` paths.
 

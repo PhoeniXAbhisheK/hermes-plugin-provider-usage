@@ -163,10 +163,19 @@ def _decode_json_body(resp):
     Some OpenCode endpoints are catch-alls: HTTP 200 with the literal
     text "Not Found". resp.json() on that raises a bare JSONDecodeError;
     we surface a clear provider error instead.
+
+    The body is NOT echoed into the error. _collect() turns exceptions into
+    {"error": str(exc)[:160]} and the panel renders that, so a provider that
+    reflects a rejected credential back ("unknown key sk-...") would put a
+    live secret in the UI. Report the shape only; the response never leaves
+    this function.
     """
     text = (resp.text or "").lstrip()
     if not text.startswith(("{", "[")):
-        raise ValueError("non-JSON response (HTTP %d): %s" % (resp.status_code, text[:60] or "<empty>"))
+        raise ValueError(
+            "non-JSON response (HTTP %d, %d bytes, starts %r)"
+            % (resp.status_code, len(text), text[:12])
+        )
     return json.loads(text) or {}
 
 

@@ -3,7 +3,7 @@
 Last reviewed: 2026-10-01
 
 Durable record of the Hermes host settings applied to this machine's
-`AppData/Local/hermes/config.yaml` on 2026-10-01 for context-compression and
+`$HERMES_HOME/config.yaml` on 2026-10-01 for context-compression and
 agent-loop behavior. These are host-level settings, not repository
 configuration; the file is the authority and this page records the intent.
 
@@ -24,9 +24,9 @@ Pre-existing unchanged context: `compression.enabled: true`,
 
 ## Evidence
 
-- Source: `__HERMES_HOME__/config.yaml`
+- Source: `$HERMES_HOME/config.yaml`
   (lines for `agent.max_turns`, `compression.*`, `auxiliary.compression`)
-- Backup of prior state: `config.yaml.bak-20260930T200554Z`
+- Backup of prior state: `$HERMES_HOME/config.yaml.bak-<timestamp>`
 - Validated by re-reading config.yaml on 2026-10-01.
 
 ## Related

@@ -3,9 +3,31 @@ __pycache__/
 node_modules/
 .DS_Store
 
+# Editor / tool backups and OS cruft
+*.bak
+*.bak.*
+*.orig
+*.rej
+*~
+docs-index.md.bak.*
+
+# Agent scratch: plans, QA dossiers and transcripts are per-machine working
+# notes, not repo content. The tracked .hermes.md at the root is the contract.
+.hermes/plans/
+.hermes/qa/
+
 # Lliki local LLM handover state
 /wiki/tasks/scratchpad.md
 # Lliki generated task backups
 /wiki/tasks/.backup/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
