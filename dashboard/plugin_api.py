@@ -338,23 +338,22 @@ def _zen_console_balance():
 
 
 def fetch_opencode_zen():
-    """OpenCode Zen = metered API -> live Balance when possible, else spend.
+    """OpenCode Zen = metered API -> live Balance when possible, else token usage.
 
-    A live balance is only available behind the cookie-authed console RPC
+    A live dollar balance is only available behind the cookie-authed console RPC
     (_zen_console_balance); when it resolves we return the same
     {"label": "Balance", ...} money row the panel renders for Kimi.
 
     Fallback: Zen exposes no spend/usage HTTP endpoint (all zen/v1 paths are
     403 or a 'Not Found' catch-all; upstream anomalyco/opencode#44189 tracks
-    an official balance API). The OpenCode CLI's local SQLite ledger is
-    the grounded source: session.cost is the metered price OpenCode
-    charged per session, and its provider model JSON carries
-    providerID 'opencode' == Zen. Free Zen models have cost 0.0, so the
-    sum is real spend -- $0.00 here is measured, never fabricated.
+    an official balance API).  When the live balance is unreachable we show
+    the grounded token tally from the OpenCode CLI's local SQLite ledger:
+    tokens_input + tokens_output + tokens_reasoning + tokens_cache_read +
+    tokens_cache_write.  This is real usage, not fabricated.
 
     Limitation (documented in README "Spend tracking"): this ledger is
-    written only by the `opencode` CLI, so spend is stale when usage goes
-    through Hermes desktop. Read-only by design; do not change the source.
+    written only by the `opencode` CLI, so usage is stale when sessions go
+    through Hermes desktop.  Read-only by design; do not change the source.
     """
     balance = _zen_console_balance()
     if balance is not None:
@@ -369,12 +368,18 @@ def fetch_opencode_zen():
     month_start = _month_start_ms()
     con = sqlite3.connect(uri, uri=True, timeout=2.0)
     try:
-        spend = con.execute(
-            "select coalesce(sum(cost), 0.0) from session "
-            "where json_extract(model, '$.providerID') = 'opencode' "
-            "and time_created >= ?",
+        row = con.execute(
+            "select coalesce(sum(tokens_input), 0),"
+            "       coalesce(sum(tokens_output), 0),"
+            "       coalesce(sum(tokens_reasoning), 0),"
+            "       coalesce(sum(tokens_cache_read), 0),"
+            "       coalesce(sum(tokens_cache_write), 0)"
+            " from session"
+            " where json_extract(model, '$.providerID') = 'opencode'"
+            " and time_created >= ?",
             (month_start,),
-        ).fetchone()[0]
+        ).fetchone()
+        tokens = sum(x or 0 for x in row)
     except sqlite3.Error as exc:
         raise RuntimeError("OpenCode ledger unreadable: %s" % exc)
     finally:
@@ -382,7 +387,7 @@ def fetch_opencode_zen():
     return {
         "id": "opencode-zen",
         "status": "ok",
-        "money": [{"label": "Spend (month)", "left": round(float(spend), 2), "cur": "USD"}],
+        "money": [{"label": "Balance", "left": int(tokens), "cur": "tokens"}],
     }
 
 

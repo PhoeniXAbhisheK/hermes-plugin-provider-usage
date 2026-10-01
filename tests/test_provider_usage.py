@@ -136,18 +136,22 @@ class ZenFetcherTest(unittest.TestCase):
         db_dir = self.home / ".local" / "share" / "opencode"
         db_dir.mkdir(parents=True)
         con = sqlite3.connect(db_dir / "opencode.db")
-        con.execute("create table session (model text, cost real, time_created integer)")
+        con.execute(
+            "create table session (model text, cost real, time_created integer,"
+            " tokens_input integer, tokens_output integer, tokens_reasoning integer,"
+            " tokens_cache_read integer, tokens_cache_write integer)"
+        )
         now_ms = int(datetime.datetime.now().timestamp() * 1000)
         zen = '{"providerID":"opencode","id":"x"}'
         con.executemany(
-            "insert into session values (?,?,?)",
+            "insert into session values (?,?,?,?,?,?,?,?)",
             [
-                (zen, 1.00, now_ms),                                  # Zen, this month
-                (zen, 2.50, now_ms - 60_000),                         # Zen, this month
-                (zen, 0.00, now_ms - 120_000),                        # Zen free model
-                (zen, 99.00, now_ms - 40 * 86_400_000),               # Zen, previous months
-                ('{"providerID":"anthropic","id":"y"}', 7.00, now_ms),  # not Zen
-                (None, 5.00, now_ms),                                 # unparseable model json
+                (zen, 1.00, now_ms, 1000, 500, 100, 2000, 50),        # Zen, this month
+                (zen, 2.50, now_ms - 60_000, 2000, 1000, 200, 4000, 100),  # Zen, this month
+                (zen, 0.00, now_ms - 120_000, 0, 0, 0, 0, 0),        # Zen free model
+                (zen, 99.00, now_ms - 40 * 86_400_000, 5000, 2500, 500, 10000, 250),  # Zen, previous months
+                ('{"providerID":"anthropic","id":"y"}', 7.00, now_ms, 3000, 1500, 300, 6000, 150),  # not Zen
+                (None, 5.00, now_ms, 1000, 500, 100, 2000, 50),       # unparseable model json
             ],
         )
         con.commit()
@@ -176,10 +180,11 @@ class ZenFetcherTest(unittest.TestCase):
         self.assertEqual(p["id"], "opencode-zen")
         self.assertEqual(p["status"], "ok")
         row = p["money"][0]
-        self.assertEqual(row["label"], "Spend (month)")
-        self.assertEqual(row["left"], 3.50)   # 1.00 + 2.50 + 0.00, excludes other months/providers
-        self.assertEqual(row["cur"], "USD")
-        self.assertNotIn("total", row)        # pure spend row, no quota bar
+        self.assertEqual(row["label"], "Balance")
+        # tokens: (1000+500+100+2000+50) + (2000+1000+200+4000+100) + 0 = 10950
+        self.assertEqual(row["left"], 10950)
+        self.assertEqual(row["cur"], "tokens")
+        self.assertNotIn("total", row)        # pure usage row, no quota bar
 
     def test_missing_db_skips(self):
         API.HOME = self.home.parent / "nope"

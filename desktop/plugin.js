@@ -99,8 +99,12 @@ function useUsage() {
 
 /* ---------- formatting / prediction helpers ---------- */
 
-const CUR = { USD: '$', CNY: '\u00a5' }
-const money = (v, cur) => (CUR[cur] || '$') + Number(v).toFixed(2)
+const CUR = { USD: '$', CNY: '\u00a5', tokens: '' }
+const money = (v, cur) => {
+  const sym = CUR[cur] || '$'
+  if (cur === 'tokens') return Number(v).toLocaleString() + ' tokens'
+  return sym + Number(v).toFixed(2)
+}
 const pct = v => Math.round(Number(v) || 0) + '%'
 const CODE = {
   'opencode-zen': 'zen',
