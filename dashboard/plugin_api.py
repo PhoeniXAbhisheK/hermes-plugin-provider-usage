@@ -57,6 +57,7 @@ All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -71,6 +72,7 @@ import httpx
 from fastapi import APIRouter
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 TTL = 300.0
 HOME = Path.home()
@@ -357,7 +359,8 @@ def _zen_workspace_id():
             return row[0] if row else None
         finally:
             con.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _log.debug("zen ledger %s unreadable: %s", uri, exc)
         return None
 
 
@@ -450,7 +453,7 @@ def _zen_ledger_rows(since_ms=None):
     ``session`` table (sessions run outside Hermes).  Session ids do not
     overlap, so summing them does not double-count.
 
-    Returns [(model, source, inp, out, reasoning, cache_read, cache_write)].
+    Returns [(model, source, inp, out, reasoning, cache_read, cache_write, seen_ms)].
     """
     rows = []
     uri = _hermes_state_db_uri()
@@ -459,7 +462,7 @@ def _zen_ledger_rows(since_ms=None):
         try:
             cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _HERMES_TOKEN_COLS)
             sql = (
-                "select model, " + cols_sql
+                "select model, " + cols_sql + ", last_seen * 1000"
                 + " from session_model_usage"
                 + " where billing_provider = 'opencode-zen'"
             )
@@ -467,12 +470,12 @@ def _zen_ledger_rows(since_ms=None):
             if since_ms is not None:
                 sql += " and last_seen >= ?"
                 params = (since_ms / 1000.0,)
-            # group by matters twice over: it keeps one row per model, and it
-            # makes an empty window return zero rows instead of one all-NULL
-            # aggregate row, which would read as "usage exists".
-            sql += " group by model"
+            # Retain timestamps for splitting month/all-time from one scan;
+            # grouping also keeps an empty window from returning a NULL row.
+            sql += " group by model, last_seen"
             rows += [(m, "hermes") + tuple(v) for m, *v in con.execute(sql, params)]
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            _log.debug("zen ledger %s unreadable: %s", uri, exc)
             pass
         finally:
             con.close()
@@ -483,7 +486,7 @@ def _zen_ledger_rows(since_ms=None):
         try:
             cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _TOKEN_COLS)
             sql = (
-                "select json_extract(model, '$.id'), " + cols_sql
+                "select json_extract(model, '$.id'), " + cols_sql + ", time_created"
                 + " from session"
                 + " where json_extract(model, '$.providerID') = 'opencode'"
             )
@@ -491,50 +494,55 @@ def _zen_ledger_rows(since_ms=None):
             if since_ms is not None:
                 sql += " and time_created >= ?"
                 params = (since_ms,)
-            sql += " group by 1"
+            sql += " group by 1, time_created"
             rows += [(m, "opencode-cli") + tuple(v) for m, *v in con.execute(sql, params)]
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            _log.debug("zen ledger %s unreadable: %s", uri, exc)
             pass
         finally:
             con.close()
     return rows
 
 
-def _zen_estimated_cost(since_ms=None):
+def _zen_estimated_cost(ledger):
     """Estimated USD Zen spend from local ledgers * Models.dev pricing.
 
-    Reads both local ledgers (see ``_zen_ledger_rows``) and prices each
+    Takes rows from both local ledgers (see ``_zen_ledger_rows``) and prices each
     model's token counts with public Models.dev rates.  Hermes' own
     ``estimated_cost_usd`` is not usable: it has no pricing entry for
     ``opencode-zen`` and stores 0 for every such row.
 
     Returns (cost_usd, details_dict) or (None, None) when no ledger or no
     catalog is reachable.  ``details`` breaks the cost down per model and
-    per source.  ``since_ms`` bounds the scan; None scans all history.
+    per source.  The caller selects the window from the supplied rows.
     """
     catalog = _fetch_models_dev_catalog()
     if catalog is None:
         return None, None
     oc_models = catalog.get("opencode", {}).get("models", {})
-    ledger = _zen_ledger_rows(since_ms)
     if not ledger:
         return None, None
 
     total = 0.0
     details = {}
-    for model_id, source, inp, out, rea, cr, cw in ledger:
+    for model_id, source, inp, out, rea, cr, cw, seen_ms in ledger:
         model_id = model_id or "unknown"
         price = _model_price(model_id, oc_models)
         cost = _price_tokens(inp, out, rea, cr, cw, price)
         total += cost
         key = "%s [%s]" % (model_id, source)
-        details[key] = {
+        detail = details.setdefault(key, {
             "source": source,
             "model": model_id,
-            "tokens": {"input": inp, "output": out, "reasoning": rea, "cache_read": cr, "cache_write": cw},
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0},
             "price": {k: v for k, v in price.items() if isinstance(v, (int, float))},
-            "cost_usd": round(cost, 4),
-        }
+            "cost_usd": 0.0,
+        })
+        for token, value in zip(detail["tokens"], (inp, out, rea, cr, cw)):
+            detail["tokens"][token] += value or 0
+        detail["cost_usd"] += cost
+    for detail in details.values():
+        detail["cost_usd"] = round(detail["cost_usd"], 4)
     return round(total, 2), details
 
 
@@ -550,9 +558,8 @@ def fetch_opencode_zen():
     for each model.  This is grounded in real token counts and public
     pricing, not fabricated.  Reads Hermes' own state.db and the opencode
     CLI's opencode.db, which are disjoint (no shared session ids).  Scans
-    the current month first, then all history when the month has no Zen
-    sessions yet -- a bare $0 hides real spend, which is worse than a
-    wider window.
+    all history once and selects the current month when it has Zen tokens,
+    widening to all history when the month is empty or its estimate is None.
 
     Fallback 2: If Models.dev is unreachable, fall back to raw token counts.
 
@@ -569,12 +576,18 @@ def fetch_opencode_zen():
         }
 
     # Fallback 1: estimated cost from Models.dev pricing, month then all-time
-    est, details = _zen_estimated_cost(_month_start_ms())
+    ledger = _zen_ledger_rows(None)
+    month_start = _month_start_ms()
+    month_rows = [row for row in ledger if row[-1] is not None and row[-1] >= month_start]
+    def _token_sum(rows):
+        return sum(sum(v or 0 for v in row[2:-1]) for row in rows)
+
+    month_tokens = _token_sum(month_rows)
+    est, details = _zen_estimated_cost(month_rows)
     window = "month"
-    # Test the computed cost, not the row count: a model row can exist with
-    # every token column at zero, and that is still an empty window.
-    if not est:
-        est, details = _zen_estimated_cost(None)
+    # Free tokens are real usage even when their estimated cost is zero.
+    if month_tokens <= 0 or est is None:
+        est, details = _zen_estimated_cost(ledger)
         window = "all-time"
     if est is not None:
         return {
@@ -585,17 +598,11 @@ def fetch_opencode_zen():
         }
 
     # Fallback 2: raw token counts, same month then all-time widening
-    def _token_sum(window_ms):
-        return sum(
-            sum(v or 0 for v in row[2:])
-            for row in _zen_ledger_rows(window_ms)
-        )
-
     if _hermes_state_db_uri() is None and _opencode_db_uri() is None:
         raise _Skip("opencode-zen")
-    tokens = _token_sum(_month_start_ms())
+    tokens = month_tokens
     if not tokens:
-        tokens = _token_sum(None)
+        tokens = _token_sum(ledger)
     if not tokens:
         raise _Skip("opencode-zen")
     return {

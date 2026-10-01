@@ -40,7 +40,7 @@ const INTERVALS = [
 
 /* Plugin-local state: poll cadence + value mode. Persisted via ctx.storage
  * (namespaced under hermes.plugin.provider-usage.*) so they survive restarts. */
-const $interval = atom(300000)
+const $interval = atom(60000)
 const $mode = atom('used') // 'used' | 'remaining'
 /* Which providers appear in the status bar. null = default (first provider
  * only); an array of ids = an explicit choice from the panel's eye toggles. */

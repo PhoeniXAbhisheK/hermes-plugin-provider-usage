@@ -254,6 +254,40 @@ class ZenFetcherTest(unittest.TestCase):
         self.assertNotIn("y", {v["model"] for v in p["meta"]["models"].values()})
         self.assertIn("month", p["meta"]["source"])
 
+    def test_free_month_does_not_widen_to_paid_history(self):
+        import sqlite3
+        from contextlib import closing
+        from unittest.mock import patch
+        month_start = API._month_start_ms()
+        with closing(sqlite3.connect(self.home / "state.db")) as con:
+            con.execute("update session_model_usage set last_seen = ?", (month_start / 1000 - 1,))
+            con.execute(
+                "insert into session_model_usage values (?,?,?,?,?,?,?,?,?,?)",
+                ("free-month", "free", "opencode-zen", 1, 1000, 500, 0, 0, 0, month_start / 1000),
+            )
+            con.commit()
+        with closing(sqlite3.connect(self.home / ".local" / "share" / "opencode" / "opencode.db")) as con:
+            con.execute("update session set time_created = ?", (month_start - 1,))
+            con.execute(
+                "insert into session values (?,?,?,?,?,?,?)",
+                ('{"providerID":"opencode","id":"free"}', month_start, 2000, 1000, 0, 0, 0),
+            )
+            con.commit()
+        catalog = {"opencode": {"models": {
+            "free": {"cost": {"input": 0.0, "output": 0.0}},
+            "x": {"cost": {"input": 10.0, "output": 20.0}},
+            "cli": {"cost": {"input": 10.0, "output": 20.0}},
+        }}}
+        with patch.object(API, "_fetch_models_dev_catalog", return_value=catalog), \
+                patch.object(API, "_zen_ledger_rows", wraps=API._zen_ledger_rows) as scan:
+            p = API.fetch_opencode_zen()
+        scan.assert_called_once_with(None)
+        self.assertEqual(p["money"], [{"label": "Balance", "left": 0.0, "cur": "USD"}])
+        self.assertEqual(p["meta"]["source"], "models.dev estimate (month)")
+        self.assertEqual(set(p["meta"]["models"]), {"free [hermes]", "free [opencode-cli]"})
+        self.assertEqual(p["meta"]["models"]["free [hermes]"]["tokens"]["input"], 1000)
+        self.assertEqual(p["meta"]["models"]["free [opencode-cli]"]["tokens"]["input"], 2000)
+
     def test_all_time_fallback_when_month_is_empty(self):
         import sqlite3, time as _time
         orig = API._models_dev_cache.copy()
