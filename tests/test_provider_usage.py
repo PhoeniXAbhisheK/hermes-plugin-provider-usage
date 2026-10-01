@@ -154,10 +154,22 @@ class ZenFetcherTest(unittest.TestCase):
         con.close()
         self._orig_home = API.HOME
         API.HOME = self.home
+        # ledger tests exercise the spend fallback; the cookie-scrape seam is
+        # forced off here and covered in ZenConsoleBalanceTest
+        self._orig_console = API._zen_console_balance
+        API._zen_console_balance = lambda: None
 
     def tearDown(self):
         API.HOME = self._orig_home
+        API._zen_console_balance = self._orig_console
         self._tmp.cleanup()
+
+    def test_console_balance_preferred_as_balance_row(self):
+        API._zen_console_balance = lambda: 4.32
+        p = API.fetch_opencode_zen()
+        self.assertEqual(p["id"], "opencode-zen")
+        self.assertEqual(p["status"], "ok")
+        self.assertEqual(p["money"], [{"label": "Balance", "left": 4.32, "cur": "USD"}])
 
     def test_month_to_date_zen_spend_only(self):
         p = API.fetch_opencode_zen()
@@ -173,6 +185,47 @@ class ZenFetcherTest(unittest.TestCase):
         API.HOME = self.home.parent / "nope"
         with self.assertRaises(API._Skip):
             API.fetch_opencode_zen()
+
+
+class ZenConsoleBalanceTest(unittest.TestCase):
+    """Cookie-scrape helpers: pure parsing/envelope tests plus the no-network
+    guards (unit tests never hit the console and never carry a real cookie)."""
+
+    def setUp(self):
+        self._orig_secret = API._secret
+        self._orig_home = API.HOME
+
+    def tearDown(self):
+        API._secret = self._orig_secret
+        API.HOME = self._orig_home
+
+    def test_seroval_args_payload_shape(self):
+        got = API._seroval_args("ws_abc")
+        self.assertEqual(
+            got,
+            '{"t":{"t":0,"i":0,"l":1,"a":[{"t":1,"s":"ws_abc"}],"o":0},"f":0,"m":[]}',
+        )
+
+    def test_balance_parsed_from_rpc_text(self):
+        # 4.32 USD carried as micro-cents inside an arbitrary minified envelope
+        text = 'x{"balance":432000000,"monthlyLimit":1000000000}y'
+        self.assertAlmostEqual(API._zen_balance_from_text(text), 4.32)
+
+    def test_balance_absent_or_bogus_returns_none(self):
+        self.assertIsNone(API._zen_balance_from_text("Not Found"))
+        self.assertIsNone(API._zen_balance_from_text('{"balance":"x"}'))
+        self.assertIsNone(API._zen_balance_from_text(None))
+
+    def test_console_balance_none_without_cookie(self):
+        API._secret = lambda *names: None
+        self.assertIsNone(API._zen_console_balance())
+
+    def test_console_balance_none_without_workspace(self):
+        API._secret = lambda *names: "fake-cookie" if "CONSOLE_COOKIE" in names[0] else None
+        import tempfile
+        from pathlib import Path
+        API.HOME = Path(tempfile.mkdtemp()) / "nope"  # no opencode.db anywhere
+        self.assertIsNone(API._zen_console_balance())
 
 CODING_URL = "https://api.kimi.com/coding/v1/usages"
 AI_URL = "https://api.moonshot.ai/v1/users/me/balance"

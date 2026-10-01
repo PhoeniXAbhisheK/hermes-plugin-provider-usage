@@ -52,9 +52,11 @@ All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -235,11 +237,110 @@ def _month_start_ms():
     return datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
 
 
-def fetch_opencode_zen():
-    """OpenCode Zen = metered API -> actual dollar spend, nothing else.
+OPENCODE_CONSOLE_BASE = "https://opencode.ai"
+# queryBillingInfo server-fn content-hash, captured 2026-04-30 from a console
+# HAR (same value openusage pins). Rotates on OpenCode backend deploys: when
+# the RPC stops returning a balance the card silently falls back to ledger
+# spend. Re-capture: log into https://opencode.ai/workspace/<id>/billing,
+# DevTools -> Network, copy the ?id= hash of the /_server request whose
+# response contains "balance".
+OPENCODE_BILLING_FN_ID = (
+    "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d"
+)
+_BALANCE_RE = re.compile(r'"balance"\s*:\s*(\d+)')
 
-    Zen exposes no spend/usage HTTP endpoint (all zen/v1 paths are 403
-    or a 'Not Found' catch-all; upstream anomalyco/opencode#44189 tracks
+
+def _seroval_args(*args):
+    """SolidStart server-fn args envelope (seroval tagged unions).
+
+    Strings serialize as {t:1,s:value}, numbers as {t:0,s:value}; matches the
+    payload the console browser sends (port of openusage console_rpc.go).
+    """
+    parts = [
+        {"t": 1, "s": a} if isinstance(a, str) else {"t": 0, "s": a}
+        for a in args
+    ]
+    call = {"t": 0, "i": 0, "l": len(parts), "a": parts, "o": 0}
+    return json.dumps({"t": call, "f": 0, "m": []}, separators=(",", ":"))
+
+
+def _zen_balance_from_text(text):
+    """USD balance from a console billing body, or None.
+
+    The console carries balance as an integer micro-dollar value (divide by
+    1e8). Regex over the raw body on purpose: the envelope is a minified JS
+    serialization that changes between deploys, and a miss degrades to the
+    spend fallback instead of crashing.
+    """
+    m = _BALANCE_RE.search(text or "")
+    if m is None:
+        return None
+    try:
+        return int(m.group(1)) / 1e8
+    except ValueError:
+        return None
+
+
+def _zen_workspace_id():
+    """Console workspace id: OPENCODE_WORKSPACE_ID secret, else local CLI db."""
+    ws = _secret("OPENCODE_WORKSPACE_ID")
+    if ws:
+        return ws
+    uri = _opencode_db_uri()
+    if uri is None:
+        return None
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            row = con.execute(
+                "select id from workspace order by time_created limit 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def _zen_console_balance():
+    """USD balance via the cookie-authed console RPC, or None (never raises).
+
+    Zen has no key-auth balance endpoint (anomalyco/opencode#10447/#10448/
+    #44189); the only live number sits behind opencode.ai's login-gated
+    SolidStart server functions. The user supplies their console session
+    cookie as OPENCODE_CONSOLE_COOKIE; this is a read-only GET to opencode.ai
+    and nothing else. Any failure (missing cookie, expired session, rotated
+    fn hash, changed envelope) returns None so the caller falls back to the
+    local ledger.
+    """
+    cookie = _secret("OPENCODE_CONSOLE_COOKIE")
+    ws = _zen_workspace_id()
+    if not cookie or not ws:
+        return None
+    url = "%s/_server?id=%s&args=%s" % (
+        OPENCODE_CONSOLE_BASE,
+        OPENCODE_BILLING_FN_ID,
+        urllib.parse.quote(_seroval_args(ws), safe=""),
+    )
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"Cookie": "auth=" + cookie})
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    return _zen_balance_from_text(resp.text)
+
+
+def fetch_opencode_zen():
+    """OpenCode Zen = metered API -> live Balance when possible, else spend.
+
+    A live balance is only available behind the cookie-authed console RPC
+    (_zen_console_balance); when it resolves we return the same
+    {"label": "Balance", ...} money row the panel renders for Kimi.
+
+    Fallback: Zen exposes no spend/usage HTTP endpoint (all zen/v1 paths are
+    403 or a 'Not Found' catch-all; upstream anomalyco/opencode#44189 tracks
     an official balance API). The OpenCode CLI's local SQLite ledger is
     the grounded source: session.cost is the metered price OpenCode
     charged per session, and its provider model JSON carries
@@ -250,6 +351,13 @@ def fetch_opencode_zen():
     written only by the `opencode` CLI, so spend is stale when usage goes
     through Hermes desktop. Read-only by design; do not change the source.
     """
+    balance = _zen_console_balance()
+    if balance is not None:
+        return {
+            "id": "opencode-zen",
+            "status": "ok",
+            "money": [{"label": "Balance", "left": round(float(balance), 2), "cur": "USD"}],
+        }
     uri = _opencode_db_uri()
     if uri is None:
         raise _Skip("opencode-zen")
