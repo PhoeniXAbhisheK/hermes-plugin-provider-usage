@@ -337,19 +337,104 @@ def _zen_console_balance():
     return _zen_balance_from_text(resp.text)
 
 
+# In-memory cache for Models.dev pricing (refreshed on first use per process).
+_models_dev_cache = {"at": 0.0, "catalog": None}
+_MODELS_DEV_TTL = 900.0  # 15 min
+
+
+def _fetch_models_dev_catalog():
+    """Fetch Models.dev pricing catalog; return dict or None."""
+    now = time.time()
+    if _models_dev_cache["catalog"] is not None and (now - _models_dev_cache["at"]) < _MODELS_DEV_TTL:
+        return _models_dev_cache["catalog"]
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get("https://models.dev/api.json?type=all")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        _models_dev_cache["catalog"] = data
+        _models_dev_cache["at"] = now
+        return data
+    except Exception:
+        return _models_dev_cache["catalog"]  # stale fallback
+
+
+def _zen_estimated_cost():
+    """Estimated USD spend from local DB token counts * Models.dev pricing.
+
+    Returns (cost_usd, details_dict) or (None, None) when the DB or catalog
+    is unreachable.  Details contains per-model breakdown for diagnostics.
+    """
+    uri = _opencode_db_uri()
+    if uri is None:
+        return None, None
+    catalog = _fetch_models_dev_catalog()
+    if catalog is None:
+        return None, None
+    oc_models = catalog.get("opencode", {}).get("models", {})
+    month_start = _month_start_ms()
+    con = sqlite3.connect(uri, uri=True, timeout=2.0)
+    try:
+        rows = con.execute(
+            "select json_extract(model, '$.id') as model_id,"
+            "       coalesce(sum(tokens_input), 0),"
+            "       coalesce(sum(tokens_output), 0),"
+            "       coalesce(sum(tokens_reasoning), 0),"
+            "       coalesce(sum(tokens_cache_read), 0),"
+            "       coalesce(sum(tokens_cache_write), 0)"
+            " from session"
+            " where json_extract(model, '$.providerID') = 'opencode'"
+            " and time_created >= ?"
+            " group by model_id",
+            (month_start,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None, None
+    finally:
+        con.close()
+
+    total = 0.0
+    details = {}
+    for model_id, inp, out, rea, cr, cw in rows:
+        model_id = model_id or "unknown"
+        price = oc_models.get(model_id, {}).get("cost", {})
+        if not price:
+            # try stripping known suffixes
+            for suffix in ("-free", "-contributor-free", "-sol"):
+                alt = model_id.replace(suffix, "")
+                if alt in oc_models:
+                    price = oc_models[alt].get("cost", {})
+                    break
+        cost = 0.0
+        cost += (inp or 0) * price.get("input", 0)
+        cost += (out or 0) * price.get("output", 0)
+        cost += (rea or 0) * price.get("reasoning", price.get("output", 0))
+        cost += (cr or 0) * price.get("cache_read", 0)
+        cost += (cw or 0) * price.get("cache_write", 0)
+        cost /= 1_000_000.0
+        total += cost
+        details[model_id] = {
+            "tokens": {"input": inp, "output": out, "reasoning": rea, "cache_read": cr, "cache_write": cw},
+            "price": {k: v for k, v in price.items() if isinstance(v, (int, float))},
+            "cost_usd": round(cost, 4),
+        }
+    return round(total, 2), details
+
+
 def fetch_opencode_zen():
-    """OpenCode Zen = metered API -> live Balance when possible, else token usage.
+    """OpenCode Zen = metered API -> live Balance when possible, else estimated cost.
 
     A live dollar balance is only available behind the cookie-authed console RPC
     (_zen_console_balance); when it resolves we return the same
     {"label": "Balance", ...} money row the panel renders for Kimi.
 
-    Fallback: Zen exposes no spend/usage HTTP endpoint (all zen/v1 paths are
-    403 or a 'Not Found' catch-all; upstream anomalyco/opencode#44189 tracks
-    an official balance API).  When the live balance is unreachable we show
-    the grounded token tally from the OpenCode CLI's local SQLite ledger:
-    tokens_input + tokens_output + tokens_reasoning + tokens_cache_read +
-    tokens_cache_write.  This is real usage, not fabricated.
+    Fallback 1: If the console cookie is missing, estimate spend from the
+    OpenCode CLI's local SQLite ledger using Models.dev pricing:
+    tokens * price_per_1M / 1_000_000 for each model.  This is grounded in
+    real token counts and public pricing, not fabricated.
+
+    Fallback 2: If Models.dev is unreachable, fall back to raw token counts.
 
     Limitation (documented in README "Spend tracking"): this ledger is
     written only by the `opencode` CLI, so usage is stale when sessions go
@@ -362,6 +447,18 @@ def fetch_opencode_zen():
             "status": "ok",
             "money": [{"label": "Balance", "left": round(float(balance), 2), "cur": "USD"}],
         }
+
+    # Fallback 1: estimated cost from Models.dev pricing
+    est, details = _zen_estimated_cost()
+    if est is not None:
+        return {
+            "id": "opencode-zen",
+            "status": "ok",
+            "money": [{"label": "Balance", "left": est, "cur": "USD"}],
+            "meta": {"source": "models.dev estimate", "models": details},
+        }
+
+    # Fallback 2: raw token counts
     uri = _opencode_db_uri()
     if uri is None:
         raise _Skip("opencode-zen")

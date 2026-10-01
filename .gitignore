@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 node_modules/
 .DS_Store
+
+# Lliki local LLM handover state
+/wiki/tasks/scratchpad.md
+# Lliki generated task backups
+/wiki/tasks/.backup/
+# CocoIndex Code (ccc)
+/.cocoindex_code/

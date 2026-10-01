@@ -176,15 +176,30 @@ class ZenFetcherTest(unittest.TestCase):
         self.assertEqual(p["money"], [{"label": "Balance", "left": 4.32, "cur": "USD"}])
 
     def test_month_to_date_zen_spend_only(self):
+        # Mock Models.dev catalog so the estimator has pricing for model "x"
+        import time as _time
+        orig = API._models_dev_cache.copy()
+        API._models_dev_cache["catalog"] = {
+            "opencode": {
+                "models": {
+                    "x": {"cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.1}}
+                }
+            }
+        }
+        API._models_dev_cache["at"] = _time.time()
         p = API.fetch_opencode_zen()
+        API._models_dev_cache.clear()
+        API._models_dev_cache.update(orig)
         self.assertEqual(p["id"], "opencode-zen")
         self.assertEqual(p["status"], "ok")
         row = p["money"][0]
         self.assertEqual(row["label"], "Balance")
-        # tokens: (1000+500+100+2000+50) + (2000+1000+200+4000+100) + 0 = 10950
-        self.assertEqual(row["left"], 10950)
-        self.assertEqual(row["cur"], "tokens")
+        self.assertEqual(row["cur"], "USD")
         self.assertNotIn("total", row)        # pure usage row, no quota bar
+        # Estimated cost: (1000*1 + 500*2 + 100*2 + 2000*0.5 + 50*0.1 +
+        #                  2000*1 + 1000*2 + 200*2 + 4000*0.5 + 100*0.1) / 1M
+        # = (3205 + 6410) / 1M = 0.009615
+        self.assertAlmostEqual(row["left"], 0.01, places=2)
 
     def test_missing_db_skips(self):
         API.HOME = self.home.parent / "nope"

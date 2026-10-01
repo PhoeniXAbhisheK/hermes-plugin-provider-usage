@@ -1,0 +1,9 @@
+# Docs Index
+
+<!-- lliki:generated:start id=folder-index -->
+
+- [[docs/development-workflow|Development Workflow and Commands]]
+- [[docs/project-overview|Project Overview]]
+- [[docs/repository-rules|Repository Rules and Protected Paths]]
+
+<!-- lliki:generated:end id=folder-index -->
