@@ -23,7 +23,7 @@ consumed directly by Hermes.
 Verified 2026-10-01:
 
 - `"$HV" -m unittest discover -s tests` — full suite (also
-  `"$HV" -m unittest tests.test_provider_usage`; 12 tests, OK).
+  `"$HV" -m unittest tests.test_provider_usage`; 39 tests, OK).
 - `node --check desktop/plugin.js`
 - `"$HV" -m json.tool dashboard/manifest.json`
 - `lliki doctor` — wiki lint (expects 0 errors).

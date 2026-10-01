@@ -2,7 +2,7 @@
 id: "LLIKI-001"
 type: task
 title: "OpenCode Zen/Go billing split in Provider Usage"
-status: in_progress
+status: completed
 priority: normal
 created: "2026-10-01"
 updated: "2026-10-01"
@@ -67,4 +67,8 @@ JSON-body guard). Key sites: `dashboard/plugin_api.py:172`
 
 # Result
 
-Pending final e2e verification (t_4bbce823).
+Closed 2026-10-01. Zen/Go split shipped in v0.2.0 (`858d5a6`); live
+verification (t_4bbce823) and its follow-ups completed. Superseded scope:
+the `Spend (month)` ledger design was replaced by the Balance/estimate chain
+in v0.4.0 — see [[tasks/LLIKI-002-opencode-zen-balance-chain|LLIKI-002]] and
+DEC entries in [[decisions]].

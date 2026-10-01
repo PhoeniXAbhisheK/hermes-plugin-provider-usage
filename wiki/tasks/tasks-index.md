@@ -4,7 +4,7 @@
 
 ## Active
 
-- [[tasks/LLIKI-001-opencode-zen-go-billing-split-in-provider-usage|LLIKI-001 - OpenCode Zen/Go billing split in Provider Usage]]
+- None.
 
 ## Blocked
 
@@ -16,7 +16,8 @@
 
 ## Closed
 
-- None.
+- [[tasks/LLIKI-001-opencode-zen-go-billing-split-in-provider-usage|LLIKI-001]]
+- [[tasks/LLIKI-002-opencode-zen-balance-chain|LLIKI-002]]
 
 ## Current Task
 
