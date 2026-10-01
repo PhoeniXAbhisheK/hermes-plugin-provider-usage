@@ -173,3 +173,237 @@ class ZenFetcherTest(unittest.TestCase):
         API.HOME = self.home.parent / "nope"
         with self.assertRaises(API._Skip):
             API.fetch_opencode_zen()
+
+CODING_URL = "https://api.kimi.com/coding/v1/usages"
+AI_URL = "https://api.moonshot.ai/v1/users/me/balance"
+CN_URL = "https://api.moonshot.cn/v1/users/me/balance"
+
+class KimiFetcherTest(unittest.TestCase):
+    """fetch_kimi() with mocked endpoints (unit tests never hit the network
+    and never carry a real credential)."""
+
+    BALANCE_AI = {"code": 0, "scode": "0x0", "status": True,
+                  "data": {"available_balance": 18.02331,
+                           "voucher_balance": 0, "cash_balance": 18.02331}}
+
+    def setUp(self):
+        self._orig_secret = API._secret
+        self._orig_http = API._http_json
+        self.calls = []
+        self.headers_seen = []
+
+    def tearDown(self):
+        API._secret = self._orig_secret
+        API._http_json = self._orig_http
+
+    def _routes(self, routes):
+        def fake(url, headers, **kw):
+            self.calls.append(url)
+            self.headers_seen.append(dict(headers))
+            handler = routes.get(url, "MISS")
+            if handler == "MISS":
+                raise AssertionError("unexpected url: " + url)
+            if isinstance(handler, Exception):
+                raise handler
+            return handler
+        API._http_json = fake
+
+    def _key(self, value="fake-key"):
+        API._secret = lambda *names: value
+
+    def test_reads_both_env_var_names(self):
+        seen = []
+        def fake_secret(*names):
+            seen.append(names)
+            return None
+        API._secret = fake_secret
+        with self.assertRaises(API._Skip):
+            API.fetch_kimi()
+        self.assertIn("KIMI_API_KEY", seen[0])
+        self.assertIn("MOONSHOT_API_KEY", seen[0])
+
+    def test_moonshot_env_var_alone_suffices(self):
+        # users whose setup only provisioned MOONSHOT_API_KEY must get a card
+        API._secret = lambda *names: "moonshot-key" if "MOONSHOT_API_KEY" in names else None
+        self._routes({CODING_URL: PermissionError("HTTP 401"), AI_URL: self.BALANCE_AI})
+        p = API.fetch_kimi()
+        self.assertEqual(p["money"][0]["left"], 18.02)
+        self.assertEqual(self.headers_seen[-1]["Authorization"], "Bearer moonshot-key")
+
+    def test_international_region_probed_first(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"), AI_URL: self.BALANCE_AI})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL, AI_URL])  # .cn never touched when .ai answers
+        self.assertEqual(p["id"], "kimi-coding")
+        row = p["money"][0]
+        self.assertEqual(row["label"], "Balance")
+        self.assertEqual(row["left"], 18.02)   # nested data.available_balance, rounded
+        self.assertEqual(row["cur"], "CNY")
+
+    def test_falls_back_to_cn_region_when_ai_rejects_key(self):
+        self._key()
+        cn = {"code": 0, "data": {"available_balance": 42.5}}
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: PermissionError("HTTP 401: Invalid Authentication"),
+                      CN_URL: cn})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL, AI_URL, CN_URL])
+        self.assertEqual(p["money"][0]["left"], 42.5)
+
+    def test_both_regions_failing_surfaces_the_error(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: PermissionError("HTTP 401"),
+                      CN_URL: PermissionError("HTTP 401")})
+        with self.assertRaises(PermissionError):
+            API.fetch_kimi()
+
+    def test_legacy_flat_available_still_parses(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: {"available": 5.0}})
+        p = API.fetch_kimi()
+        self.assertEqual(p["money"][0]["left"], 5.0)
+
+    def test_coding_windows_take_precedence_over_balance(self):
+        self._key()
+        self._routes({CODING_URL: {"usage": {"used": 1.0, "limit": 4.0, "resetTime": "2026-10-05T00:00:00Z"}}})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL])
+        self.assertEqual(p["windows"][0]["percent"], 25.0)
+        self.assertNotIn("money", p)
+
+    def test_balance_body_without_number_raises(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: {"code": 0, "data": {"voucher_balance": 0}},
+                      CN_URL: {"code": 0, "data": {"voucher_balance": 0}}})
+        with self.assertRaises(RuntimeError):
+            API.fetch_kimi()
+
+    def test_kimi_balance_parser(self):
+        self.assertEqual(API._kimi_balance({"data": {"available_balance": "7.25"}}), 7.25)
+        self.assertEqual(API._kimi_balance({"available": 3}), 3.0)
+        self.assertIsNone(API._kimi_balance({"data": {"available_balance": None}}))
+        self.assertIsNone(API._kimi_balance({}))
+
+ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
+
+class AnthropicFetcherTest(unittest.TestCase):
+    """fetch_anthropic() with a mocked credentials file and mocked HTTP:
+    Hermes' helper first, Claude Code OAuth fallback. Fixtures carry a
+    placeholder token only — never real credential material."""
+
+    LIVE_BODY = {  # shape verified live against the OAuth usage endpoint
+        "five_hour": {"utilization": 40.3, "resets_at": "2026-10-02T07:06:00.000000+00:00"},
+        "seven_day": {"utilization": 0.0, "resets_at": "2026-10-07T00:59:59.000000+00:00"},
+        "seven_day_opus": None,
+    }
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.creds = self.home / ".claude" / ".credentials.json"
+        self._orig_home = API.HOME
+        API.HOME = self.home
+        self._orig_http = API._http_json
+        self._orig_hermes = API._hermes_usage
+        self.calls = []
+        self.headers_seen = []
+
+    def tearDown(self):
+        API.HOME = self._orig_home
+        API._http_json = self._orig_http
+        API._hermes_usage = self._orig_hermes
+        self._tmp.cleanup()
+
+    def _no_hermes(self):
+        # the desktop plugin host: Hermes' helper resolves nothing here
+        API._hermes_usage = lambda provider: None
+
+    def _write_creds(self, payload):
+        self.creds.parent.mkdir(parents=True, exist_ok=True)
+        self.creds.write_text(json.dumps(payload) if not isinstance(payload, str) else payload)
+
+    def _mock_http(self, body):
+        def fake(url, headers, **kw):
+            self.calls.append(url)
+            self.headers_seen.append(dict(headers))
+            return body
+        API._http_json = fake
+
+    def test_hermes_result_takes_precedence(self):
+        API._hermes_usage = lambda provider: {"id": provider, "status": "ok", "windows": []}
+        p = API.fetch_anthropic()
+        self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
+
+    def test_oauth_fallback_ratio_windows(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}})
+        self._mock_http(self.LIVE_BODY)
+        p = API.fetch_anthropic()
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(p["status"], "ok")
+        self.assertNotIn("money", p)  # ratio windows, never money rows
+        self.assertEqual(p["windows"][0]["label"], "5h")
+        self.assertEqual(p["windows"][0]["percent"], 40.3)
+        self.assertEqual(p["windows"][0]["resets_at"], "2026-10-02T07:06:00.000000+00:00")
+        self.assertEqual(p["windows"][1]["label"], "7d")
+        self.assertEqual(p["windows"][1]["percent"], 0.0)  # real 0%, not fabricated
+
+    def test_fallback_headers(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http(self.LIVE_BODY)
+        API.fetch_anthropic()
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+        hdr = self.headers_seen[0]
+        self.assertEqual(hdr["Authorization"], "Bearer test-token")
+        self.assertEqual(hdr["anthropic-beta"], "oauth-2025-04-20")
+
+    def test_missing_credentials_file_graceful_error(self):
+        self._no_hermes()
+        with self.assertRaises(RuntimeError) as cm:
+            API.fetch_anthropic()
+        self.assertEqual(str(cm.exception), "Claude Code credentials not found")
+
+    def test_malformed_credentials_file_graceful_error(self):
+        self._no_hermes()
+        self._write_creds("{not json")
+        with self.assertRaises(RuntimeError) as cm:
+            API.fetch_anthropic()
+        self.assertEqual(str(cm.exception), "Claude Code credentials not found")
+
+    def test_wrong_shape_credentials_graceful_error(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": ""}})  # empty token
+        with self.assertRaises(RuntimeError):
+            API.fetch_anthropic()
+        self._write_creds({"mcpOAuth": {}})  # no claudeAiOauth entry
+        with self.assertRaises(RuntimeError):
+            API.fetch_anthropic()
+
+    def test_token_from_other_entries_never_used(self):
+        # mcpOAuth entries are unrelated server tokens; only claudeAiOauth counts
+        self._no_hermes()
+        self._write_creds({"mcpOAuth": {"x|1": {"accessToken": "mcp-token"}}})
+        with self.assertRaises(RuntimeError):
+            API.fetch_anthropic()
+
+    def test_window_without_utilization_is_skipped(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"five_hour": {"resets_at": "2026-10-02T07:06:00+00:00"}})
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_partial_windows_only_render_present_rows(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"five_hour": {"utilization": 120.5, "resets_at": None}})
+        p = API.fetch_anthropic()
+        self.assertEqual(len(p["windows"]), 1)
+        self.assertEqual(p["windows"][0]["percent"], 100.0)  # clamped to a sane bar
+        self.assertIsNone(p["windows"][0]["resets_at"])

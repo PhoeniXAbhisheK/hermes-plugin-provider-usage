@@ -43,13 +43,30 @@ providers are omitted from the panel entirely.
 | OpenCode | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else `~/.local/share/opencode/auth.json` | `https://opencode.ai/zen/go/v1/usage` |
 | OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else `~/.codex/auth.json` | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
-| Anthropic | Hermes' Claude Code sign-in (account-usage helper) | `https://api.anthropic.com/api/oauth/usage` |
+| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json` | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | Nous Portal account info |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
-| Kimi | `KIMI_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance) |
+| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance: `https://api.moonshot.ai/v1/users/me/balance` first, then `api.moonshot.cn`) |
 | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/v1/api/openplatform/coding_plan/remains` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
+
+## Spend tracking
+
+OpenCode Zen spend is read from the OpenCode CLI's local ledger at
+`~/.local/share/opencode/opencode.db` (see `fetch_opencode_zen` in
+`dashboard/plugin_api.py`). This is a **read-only** view over a
+**current-month window**: the plugin sums `session.cost` for sessions whose
+provider is `opencode` and whose `time_created` falls on or after the first
+of this month.
+
+Because the ledger is written only by the `opencode` CLI itself, the figure
+updates only when `opencode` runs. Usage that goes through Hermes desktop
+does **not** write to that ledger, so the displayed spend can lag behind
+actual Zen usage until the next time the `opencode` CLI records a session.
+
+OpenCode Go is a subscription and is intentionally hidden from the spend
+readout (its usage windows are shown separately, not as a dollar figure).
 
 ## Privacy
 

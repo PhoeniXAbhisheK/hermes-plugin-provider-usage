@@ -24,8 +24,12 @@ Credential sources (read-only):
   re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic / Nous: resolved by Hermes' own read-only account-usage helpers
-  (the user's existing Hermes sign-ins).
+- Anthropic: Hermes' read-only account-usage helper (the user's existing
+  Hermes sign-in), falling back to the Claude Code OAuth token in
+  ``~/.claude/.credentials.json`` when Hermes' helper cannot run (desktop
+  plugin host); a missing/malformed credentials file surfaces as an error,
+  never an exception that blanks the panel.
+- Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
 
@@ -34,9 +38,11 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage (Go only; Zen cost is read from the local ledger)
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes)
+- https://api.anthropic.com/api/oauth/usage (via Hermes, or the Claude Code
+  OAuth token when Hermes' helper is unavailable)
 - https://api.deepseek.com/user/balance
-- https://api.kimi.com/coding/v1/usages, https://api.moonshot.cn/v1/users/me/balance
+- https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
+  (international region first; falls back to api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
 - https://api.minimax.io/v1/api/openplatform/coding_plan/remains
 - https://api.github.com/copilot_internal/user
@@ -239,6 +245,10 @@ def fetch_opencode_zen():
     charged per session, and its provider model JSON carries
     providerID 'opencode' == Zen. Free Zen models have cost 0.0, so the
     sum is real spend -- $0.00 here is measured, never fabricated.
+
+    Limitation (documented in README "Spend tracking"): this ledger is
+    written only by the `opencode` CLI, so spend is stale when usage goes
+    through Hermes desktop. Read-only by design; do not change the source.
     """
     uri = _opencode_db_uri()
     if uri is None:
@@ -352,15 +362,75 @@ def _hermes_usage(provider):
     return {"id": provider, "status": "ok", "windows": windows}
 
 
-def _fetch_hermes(provider):
-    payload = _hermes_usage(provider)
-    if payload is None:
-        raise _Skip(provider)
-    return payload
+CLAUDE_CREDENTIALS_ERROR = "Claude Code credentials not found"
+
+
+def _claude_code_oauth_token():
+    """Claude Code OAuth access token from ~/.claude/.credentials.json.
+
+    The file is written by `claude login`: claudeAiOauth.accessToken is the
+    OAuth token the Claude Code client itself sends to api.anthropic.com.
+    Returns None when the file is missing, malformed, or carries no token;
+    the token is never logged, echoed, or stored.
+    """
+    try:
+        d = json.loads((HOME / ".claude" / ".credentials.json").read_text())
+    except (OSError, ValueError):
+        return None
+    entry = d.get("claudeAiOauth")
+    if not isinstance(entry, dict):
+        return None
+    token = entry.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return None
+    return token
 
 
 def fetch_anthropic():
-    return _fetch_hermes("anthropic")
+    """Anthropic quota windows: Hermes sign-in first, Claude Code fallback.
+
+    Hermes' account-usage helper returns None inside the desktop plugin
+    host, which used to hide the card entirely. Claude Code keeps its own
+    OAuth token on disk, so GET /api/oauth/usage (anthropic-beta:
+    oauth-2025-04-20) answers with ratio windows even when Hermes' fetcher
+    is unavailable. The response is plan-quota ratios, not meters:
+    five_hour / seven_day each carry utilization percent and resets_at;
+    windows render like the Copilot ratio rows (no cap, no money).
+    """
+    payload = _hermes_usage("anthropic")
+    if payload is not None:
+        return payload
+    token = _claude_code_oauth_token()
+    if not token:
+        # Surfaces in-band as an error card ("no exception" is _collect's
+        # job); the module omits genuinely unconfigured providers via _Skip.
+        raise RuntimeError(CLAUDE_CREDENTIALS_ERROR)
+    d = _http_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        {
+            "Authorization": "Bearer " + token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "Accept": "application/json",
+        },
+    )
+    windows = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = d.get(key)
+        if not isinstance(w, dict):
+            continue
+        percent = _num(w.get("utilization"))
+        if percent is None:
+            continue  # missing metric: never render a fabricated 0% bar
+        resets = w.get("resets_at")
+        windows.append({
+            "label": label,
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+            "resets_at": resets if isinstance(resets, str) else None,
+            "status": "ok",
+        })
+    if not windows:
+        raise _Skip("anthropic")  # answered, but no ratio window to show
+    return {"id": "anthropic", "status": "ok", "windows": windows}
 
 
 def fetch_nous():
@@ -458,8 +528,55 @@ def fetch_deepseek():
     return {"id": "deepseek", "status": "ok", "money": money}
 
 
+def _kimi_balance(payload):
+    """Available CNY from a Moonshot balance body.
+
+    Live shape (verified against the international platform): the number is
+    nested under data.available_balance; the legacy flat "available" key is
+    kept as a fallback. Returns None when the body carries no usable number.
+    """
+    data = payload.get("data")
+    if isinstance(data, dict):
+        value = _num(data.get("available_balance"))
+        if value is not None:
+            return value
+    return _num(payload.get("available"))
+
+
+# Account region decides which host answers: keys are never valid across
+# regions (an .ai key gets 401 from api.moonshot.cn and vice versa). Hermes'
+# config.yaml points this deployment at the international platform, so probe
+# .ai first and fall back to the China endpoint.
+_MOONSHOT_BALANCE_URLS = (
+    "https://api.moonshot.ai/v1/users/me/balance",
+    "https://api.moonshot.cn/v1/users/me/balance",
+)
+
+
+def _fetch_moonshot_balance(headers):
+    last_error = None
+    for url in _MOONSHOT_BALANCE_URLS:
+        try:
+            payload = _http_json(url, headers)
+        except Exception as exc:
+            # 401/403: the key belongs to the other region; 404: the endpoint
+            # is not offered there; anything else (transport, non-JSON body)
+            # is region-agnostic too. Any failure only rules out THIS host.
+            last_error = exc
+            continue
+        available = _kimi_balance(payload)
+        if available is None:
+            # The host answered and understood the key; a body without a
+            # number is a contract break, not a region mismatch.
+            raise RuntimeError("Moonshot balance response carried no available_balance")
+        return available
+    raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
+
+
 def fetch_kimi():
-    key = _secret("KIMI_API_KEY")
+    # Kimi Coding keys and Moonshot open-platform keys are the same product
+    # line; users set whichever their setup provisioned.
+    key = _secret("KIMI_API_KEY", "MOONSHOT_API_KEY")
     if not key:
         raise _Skip("kimi-coding")
     headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
@@ -494,10 +611,7 @@ def fetch_kimi():
             })
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
-    balance = _http_json("https://api.moonshot.cn/v1/users/me/balance", headers)
-    available = _num(balance.get("available"))
-    if available is None:
-        raise RuntimeError("Kimi returned no usage windows or balance")
+    available = _fetch_moonshot_balance(headers)
     return {"id": "kimi-coding", "status": "ok",
             "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}]}
 
