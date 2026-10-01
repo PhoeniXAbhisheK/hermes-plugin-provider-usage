@@ -40,6 +40,7 @@ providers are omitted from the panel entirely.
 
 | Provider | Credential (read-only) | Endpoint |
 |---|---|---|
+| OpenCode Zen | `OPENCODE_CONSOLE_COOKIE` (console session, read-only) | `https://opencode.ai/_server` (balance); falls back to the local ledger |
 | OpenCode | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else `~/.local/share/opencode/auth.json` | `https://opencode.ai/zen/go/v1/usage` |
 | OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else `~/.codex/auth.json` | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
@@ -51,9 +52,27 @@ providers are omitted from the panel entirely.
 | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/v1/api/openplatform/coding_plan/remains` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
 
-## Spend tracking
+## Zen balance and spend tracking
 
-OpenCode Zen spend is read from the OpenCode CLI's local ledger at
+The OpenCode Zen card shows a live **Balance** when `OPENCODE_CONSOLE_COOKIE`
+is set: Zen has no key-authenticated balance API, so the number is scraped
+read-only from OpenCode's login-gated console billing RPC
+(`GET https://opencode.ai/_server`). To capture the cookie: log into
+`https://opencode.ai`, open DevTools → Application → Cookies, copy the value
+of the `auth` cookie, and add `OPENCODE_CONSOLE_COOKIE=<value>` to
+`$HERMES_HOME/.env` (on this machine
+`__HERMES_HOME__/.env`). The console
+workspace id is auto-discovered from the local `opencode.db`; override with
+`OPENCODE_WORKSPACE_ID` if you have several.
+
+Two known failure modes degrade silently to the spend card instead of
+erroring: the session cookie expires (re-paste a fresh one) and the
+server-function hash pinned in `dashboard/plugin_api.py` rotates after an
+OpenCode deploy (symptom: the card reverts to Spend; re-capture the `?id=`
+from the `/_server` request on the console billing page in DevTools →
+Network).
+
+Without a cookie, spend is read from the OpenCode CLI's local ledger at
 `~/.local/share/opencode/opencode.db` (see `fetch_opencode_zen` in
 `dashboard/plugin_api.py`). This is a **read-only** view over a
 **current-month window**: the plugin sums `session.cost` for sessions whose
@@ -71,8 +90,9 @@ readout (its usage windows are shown separately, not as a dollar figure).
 ## Privacy
 
 - **Read-only credentials.** The plugin writes nothing back to any credential
-  file and never mints or refreshes a token itself. No browser cookies, no
-  credential CLIs. Providers marked as resolved by Hermes use the app's own
+  file and never mints or refreshes a token itself. No browser cookies beyond
+  an explicitly user-supplied read-only console session (OpenCode Zen
+  balance); no credential CLIs. Providers marked as resolved by Hermes use the app's own
   account-usage helpers (the same code path as Hermes' `/usage` surfaces,
   including Hermes' normal credential upkeep).
 - **No subprocesses.** Every provider call is an in-process `httpx` request;

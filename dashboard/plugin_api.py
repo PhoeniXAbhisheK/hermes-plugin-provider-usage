@@ -6,15 +6,19 @@ bar; provider API calls happen here, on the user's machine.
 
 Providers appear only when their credentials are usable; unconfigured
 providers are omitted (never rendered as errors). Credential handling is
-read-only throughout: no writes, no token refresh, no browser cookies, no
-credential CLIs.
+read-only throughout: no writes, no token refresh, no browser cookies beyond
+an explicitly user-supplied read-only console session (OpenCode Zen balance),
+no credential CLIs.
 
 Credential sources (read-only):
 
-- OpenCode Zen: no metered-spend HTTP endpoint exists, so cost comes
-  read-only from the local OpenCode CLI ledger
-  (``~/.local/share/opencode/opencode.db``, ``session.cost`` sums for
-  provider ``opencode``, calendar month to date).
+- OpenCode Zen: live balance scraped read-only from the login-gated console
+  RPC (``GET https://opencode.ai/_server``, cookie-authed via
+  ``OPENCODE_CONSOLE_COOKIE``); with no/failed cookie it falls back to the
+  local ledger spend (``~/.local/share/opencode/opencode.db``,
+  ``session.cost`` sums for provider ``opencode``, calendar month to date).
+  Workspace id auto-discovered from ``opencode.db`` (override:
+  ``OPENCODE_WORKSPACE_ID``).
 - OpenCode Go: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope,
   falling back to the ``opencode-go`` entry of
   ``~/.local/share/opencode/auth.json`` (never the Zen key); a 403
@@ -35,7 +39,8 @@ Credential sources (read-only):
 
 Endpoints hit (GET, machine credentials attached):
 
-- https://opencode.ai/zen/go/v1/usage (Go only; Zen cost is read from the local ledger)
+- https://opencode.ai/_server (Zen balance, cookie-authed; GET only)
+- https://opencode.ai/zen/go/v1/usage (Go only; Zen cost falls back to the local ledger)
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
 - https://api.anthropic.com/api/oauth/usage (via Hermes, or the Claude Code

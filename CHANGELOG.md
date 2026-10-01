@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- **OpenCode Zen card shows live USD Balance.** Zen has no key-authenticated
+  balance API (upstream anomalyco/opencode#10447/#10448/#44189), so the number
+  is scraped read-only from the login-gated console billing RPC
+  (`GET https://opencode.ai/_server`, SolidStart server-fn; port of openusage's
+  `console_rpc.go`), authenticated with a user-supplied `auth` session cookie
+  set as `OPENCODE_CONSOLE_COOKIE` in the Hermes `.env`. The console workspace
+  id auto-discovers from `opencode.db` (override: `OPENCODE_WORKSPACE_ID`). On
+  success the card returns the same Balance money row the panel renders for
+  Kimi. Known limitations by design: the cookie expires (re-paste) and the
+  pinned server-fn hash rotates after OpenCode deploys — in both cases the
+  card automatically falls back to the previous month-to-date ledger Spend
+  readout, never a blank or an error.
+
 ## 0.3.0
 
 - **Anthropic card via Claude Code OAuth fallback.** `fetch_anthropic()` now
