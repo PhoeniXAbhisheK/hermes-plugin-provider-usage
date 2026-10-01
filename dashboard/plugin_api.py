@@ -240,13 +240,17 @@ def fetch_opencode_go():
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
+def _ro_uri(db):
+    """Read-only SQLite URI for a path (spaces percent-encoded; sqlite URIs
+    reject raw spaces and backslashes on Windows)."""
+    return "file:" + db.as_posix().replace(" ", "%20") + "?mode=ro"
+
+
 def _opencode_db_uri():
-    """Read-only URI for the OpenCode CLI ledger (spaces percent-encoded;
-    sqlite URIs reject raw spaces and backslashes on Windows)."""
     db = HOME / ".local/share/opencode/opencode.db"
     if not db.exists():
         return None
-    return "file:" + db.as_posix().replace(" ", "%20") + "?mode=ro"
+    return _ro_uri(db)
 
 
 def _hermes_home():
@@ -269,7 +273,7 @@ def _hermes_state_db_uri():
     """
     for db in (HOME / "state.db", _hermes_home() / "state.db"):
         if db.exists():
-            return "file:" + db.as_posix().replace(" ", "%20") + "?mode=ro"
+            return _ro_uri(db)
     return None
 
 
@@ -416,7 +420,9 @@ def _fetch_models_dev_catalog():
             _models_dev_cache["catalog"] = data
             _models_dev_cache["at"] = now
         return data
-    except Exception:
+    except (httpx.HTTPError, OSError, ValueError):
+        # Network, transport, or JSON-parse failures fall back to stale cache;
+        # anything else (a bug in this file) must surface.
         with _models_dev_lock:
             return _models_dev_cache["catalog"]  # stale fallback
 
