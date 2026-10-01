@@ -65,24 +65,34 @@ of the `auth` cookie, and add `OPENCODE_CONSOLE_COOKIE=<value>` to
 workspace id is auto-discovered from the local `opencode.db`; override with
 `OPENCODE_WORKSPACE_ID` if you have several.
 
-Two known failure modes degrade silently to the spend card instead of
-erroring: the session cookie expires (re-paste a fresh one) and the
-server-function hash pinned in `dashboard/plugin_api.py` rotates after an
-OpenCode deploy (symptom: the card reverts to Spend; re-capture the `?id=`
-from the `/_server` request on the console billing page in DevTools →
-Network).
+Two known failure modes degrade silently to the estimated-spend readout instead
+of erroring: the session cookie expires (re-paste a fresh one) and OpenCode
+rotates the server-function id that backs the billing RPC (symptom: the card
+stops reporting a live balance; the request id comes from the `/_server`
+request on the console billing page in DevTools → Network).
 
-Without a cookie, spend is read from the OpenCode CLI's local ledger at
-`~/.local/share/opencode/opencode.db` (see `fetch_opencode_zen` in
-`dashboard/plugin_api.py`). This is a **read-only** view over a
-**current-month window**: the plugin sums `session.cost` for sessions whose
-provider is `opencode` and whose `time_created` falls on or after the first
-of this month.
+Without a cookie, spend is estimated from the **local token ledgers** times
+public [Models.dev](https://models.dev) pricing, not read from a stored cost
+column. Two ledgers are summed (see `_zen_ledger_rows` in
+`dashboard/plugin_api.py`), because neither alone sees all Zen traffic:
 
-Because the ledger is written only by the `opencode` CLI itself, the figure
-updates only when `opencode` runs. Usage that goes through Hermes desktop
-does **not** write to that ledger, so the displayed spend can lag behind
-actual Zen usage until the next time the `opencode` CLI records a session.
+| Ledger | Records | Path |
+| --- | --- | --- |
+| Hermes `state.db` | every turn Hermes makes | `$HERMES_HOME/state.db`, table `session_model_usage`, rows with `billing_provider = 'opencode-zen'` |
+| OpenCode CLI | sessions run outside Hermes | `~/.local/share/opencode/opencode.db`, table `session`, rows whose `model.providerID` is `opencode` |
+
+The two are disjoint — no shared session ids — so summing them does not
+double-count. Cost is `tokens × price_per_1M / 1_000_000` per model, with
+zero-rated models (the `-free` tiers) contributing $0. Both are opened
+**read-only**; the plugin never writes to either.
+
+**This is cumulative spend, not a remaining balance.** It only rises. A true
+balance requires the console cookie above. The window is the current calendar
+month, widening to all history when the month has no billable Zen usage yet —
+a bare `$0` would hide real spend, which is worse than a wider window.
+
+Hermes' own `session_model_usage.estimated_cost_usd` is deliberately not used:
+it has no pricing entry for `opencode-zen` and stores `0` for every such row.
 
 OpenCode Go is a subscription and is intentionally hidden from the spend
 readout (its usage windows are shown separately, not as a dollar figure).

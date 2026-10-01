@@ -409,65 +409,119 @@ def _fetch_models_dev_catalog():
             return _models_dev_cache["catalog"]  # stale fallback
 
 
-def _zen_estimated_cost(since_ms=None):
-    """Estimated USD spend from the Hermes ledger * Models.dev pricing.
+def _model_price(model_id, oc_models):
+    """Models.dev cost row for a model, tolerating Zen's ``-free`` /
+    ``-contributor-free`` / ``-sol`` suffixes.  End-only stripping keeps a
+    model whose name merely contains a suffix (e.g. "x-free-y") intact."""
+    price = oc_models.get(model_id, {}).get("cost", {})
+    if price:
+        return price
+    for suffix in ("-free", "-contributor-free", "-sol"):
+        alt = model_id.removesuffix(suffix)
+        if alt != model_id and alt in oc_models:
+            return oc_models[alt].get("cost", {})
+    return {}
 
-    Reads ``session_model_usage`` in Hermes' own state.db, filtered to the
-    Zen billing providers.  That table is written on every turn regardless of
-    whether the call came from the opencode CLI or from Hermes itself, which
-    is why it -- not opencode.db -- is the source of truth here.
 
-    Returns (cost_usd, details_dict) or (None, None) when the DB or catalog
-    is unreachable.  Details contains per-model breakdown for diagnostics.
-    ``since_ms`` bounds the ledger scan; None scans all history.
+def _price_tokens(inp, out, rea, cr, cw, price):
+    """USD for one model's token row, from per-1M rates."""
+    cost = (inp or 0) * price.get("input", 0)
+    cost += (out or 0) * price.get("output", 0)
+    cost += (rea or 0) * price.get("reasoning", price.get("output", 0))
+    cost += (cr or 0) * price.get("cache_read", 0)
+    cost += (cw or 0) * price.get("cache_write", 0)
+    return cost / 1_000_000.0
+
+
+def _zen_ledger_rows(since_ms=None):
+    """Per-model token rows for Zen spend.
+
+    Two disjoint ledgers, merged: Hermes' own ``session_model_usage`` (every
+    turn Hermes makes, the bulk of real traffic) and the opencode CLI's
+    ``session`` table (sessions run outside Hermes).  Session ids do not
+    overlap, so summing them does not double-count.
+
+    Returns [(model, source, inp, out, reasoning, cache_read, cache_write)].
     """
+    rows = []
     uri = _hermes_state_db_uri()
-    if uri is None:
-        return None, None
+    if uri is not None:
+        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _HERMES_TOKEN_COLS)
+            sql = (
+                "select model, " + cols_sql
+                + " from session_model_usage"
+                + " where billing_provider = 'opencode-zen'"
+            )
+            params = ()
+            if since_ms is not None:
+                sql += " and last_seen >= ?"
+                params = (since_ms / 1000.0,)
+            # group by matters twice over: it keeps one row per model, and it
+            # makes an empty window return zero rows instead of one all-NULL
+            # aggregate row, which would read as "usage exists".
+            sql += " group by model"
+            rows += [(m, "hermes") + tuple(v) for m, *v in con.execute(sql, params)]
+        except sqlite3.Error:
+            pass
+        finally:
+            con.close()
+
+    uri = _opencode_db_uri()
+    if uri is not None:
+        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _TOKEN_COLS)
+            sql = (
+                "select json_extract(model, '$.id'), " + cols_sql
+                + " from session"
+                + " where json_extract(model, '$.providerID') = 'opencode'"
+            )
+            params = ()
+            if since_ms is not None:
+                sql += " and time_created >= ?"
+                params = (since_ms,)
+            sql += " group by 1"
+            rows += [(m, "opencode-cli") + tuple(v) for m, *v in con.execute(sql, params)]
+        except sqlite3.Error:
+            pass
+        finally:
+            con.close()
+    return rows
+
+
+def _zen_estimated_cost(since_ms=None):
+    """Estimated USD Zen spend from local ledgers * Models.dev pricing.
+
+    Reads both local ledgers (see ``_zen_ledger_rows``) and prices each
+    model's token counts with public Models.dev rates.  Hermes' own
+    ``estimated_cost_usd`` is not usable: it has no pricing entry for
+    ``opencode-zen`` and stores 0 for every such row.
+
+    Returns (cost_usd, details_dict) or (None, None) when no ledger or no
+    catalog is reachable.  ``details`` breaks the cost down per model and
+    per source.  ``since_ms`` bounds the scan; None scans all history.
+    """
     catalog = _fetch_models_dev_catalog()
     if catalog is None:
         return None, None
     oc_models = catalog.get("opencode", {}).get("models", {})
-    con = sqlite3.connect(uri, uri=True, timeout=2.0)
-    try:
-        cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _HERMES_TOKEN_COLS)
-        sql = (
-            "select model, " + cols_sql
-            + " from session_model_usage"
-            + " where billing_provider in ('opencode-zen', 'opencode')"
-        )
-        params = ()
-        if since_ms is not None:
-            sql += " and last_seen >= ?"
-            params = (since_ms / 1000.0,)
-        sql += " group by model"
-        rows = con.execute(sql, params).fetchall()
-    except sqlite3.Error:
+    ledger = _zen_ledger_rows(since_ms)
+    if not ledger:
         return None, None
-    finally:
-        con.close()
 
     total = 0.0
     details = {}
-    for model_id, inp, out, rea, cr, cw in rows:
+    for model_id, source, inp, out, rea, cr, cw in ledger:
         model_id = model_id or "unknown"
-        price = oc_models.get(model_id, {}).get("cost", {})
-        if not price:
-            # try stripping known suffixes (end-only, so "x-free-y" stays intact)
-            for suffix in ("-free", "-contributor-free", "-sol"):
-                alt = model_id.removesuffix(suffix)
-                if alt != model_id and alt in oc_models:
-                    price = oc_models[alt].get("cost", {})
-                    break
-        cost = 0.0
-        cost += (inp or 0) * price.get("input", 0)
-        cost += (out or 0) * price.get("output", 0)
-        cost += (rea or 0) * price.get("reasoning", price.get("output", 0))
-        cost += (cr or 0) * price.get("cache_read", 0)
-        cost += (cw or 0) * price.get("cache_write", 0)
-        cost /= 1_000_000.0
+        price = _model_price(model_id, oc_models)
+        cost = _price_tokens(inp, out, rea, cr, cw, price)
         total += cost
-        details[model_id] = {
+        key = "%s [%s]" % (model_id, source)
+        details[key] = {
+            "source": source,
+            "model": model_id,
             "tokens": {"input": inp, "output": out, "reasoning": rea, "cache_read": cr, "cache_write": cw},
             "price": {k: v for k, v in price.items() if isinstance(v, (int, float))},
             "cost_usd": round(cost, 4),
@@ -483,17 +537,19 @@ def fetch_opencode_zen():
     {"label": "Balance", ...} money row the panel renders for Kimi.
 
     Fallback 1: If the console cookie is missing, estimate spend from the
-    OpenCode CLI's local SQLite ledger using Models.dev pricing:
-    tokens * price_per_1M / 1_000_000 for each model.  This is grounded in
-    real token counts and public pricing, not fabricated.  Scans the current
-    month first, then all history when the month has no Zen sessions yet --
-    a bare $0 hides real spend, which is worse than a wider window.
+    local ledgers using Models.dev pricing: tokens * price_per_1M / 1_000_000
+    for each model.  This is grounded in real token counts and public
+    pricing, not fabricated.  Reads Hermes' own state.db and the opencode
+    CLI's opencode.db, which are disjoint (no shared session ids).  Scans
+    the current month first, then all history when the month has no Zen
+    sessions yet -- a bare $0 hides real spend, which is worse than a
+    wider window.
 
     Fallback 2: If Models.dev is unreachable, fall back to raw token counts.
 
-    Limitation (documented in README "Spend tracking"): this ledger is
-    written only by the `opencode` CLI, so usage is stale when sessions go
-    through Hermes desktop.  Read-only by design; do not change the source.
+    Limitation (documented in README "Spend tracking"): without the console
+    cookie this is cumulative SPEND, not a remaining balance.  Read-only by
+    design; do not change the source.
     """
     balance = _zen_console_balance()
     if balance is not None:
@@ -506,7 +562,9 @@ def fetch_opencode_zen():
     # Fallback 1: estimated cost from Models.dev pricing, month then all-time
     est, details = _zen_estimated_cost(_month_start_ms())
     window = "month"
-    if not details:
+    # Test the computed cost, not the row count: a model row can exist with
+    # every token column at zero, and that is still an empty window.
+    if not est:
         est, details = _zen_estimated_cost(None)
         window = "all-time"
     if est is not None:
@@ -518,26 +576,19 @@ def fetch_opencode_zen():
         }
 
     # Fallback 2: raw token counts, same month then all-time widening
-    uri = _hermes_state_db_uri()
-    if uri is None:
-        raise _Skip("opencode-zen")
-    con = sqlite3.connect(uri, uri=True, timeout=2.0)
-    try:
-        cols_sql = ", ".join(f"coalesce(sum({c}), 0)" for c in _HERMES_TOKEN_COLS)
-        base = (
-            "select " + cols_sql
-            + " from session_model_usage"
-            + " where billing_provider in ('opencode-zen', 'opencode')"
+    def _token_sum(window_ms):
+        return sum(
+            sum(v or 0 for v in row[2:])
+            for row in _zen_ledger_rows(window_ms)
         )
-        row = con.execute(base + " and last_seen >= ?", (_month_start_ms() / 1000.0,)).fetchone()
-        tokens = sum(x or 0 for x in row)
-        if not tokens:
-            row = con.execute(base).fetchone()
-            tokens = sum(x or 0 for x in row)
-    except sqlite3.Error as exc:
-        raise RuntimeError("OpenCode ledger unreadable: %s" % exc)
-    finally:
-        con.close()
+
+    if _hermes_state_db_uri() is None and _opencode_db_uri() is None:
+        raise _Skip("opencode-zen")
+    tokens = _token_sum(_month_start_ms())
+    if not tokens:
+        tokens = _token_sum(None)
+    if not tokens:
+        raise _Skip("opencode-zen")
     return {
         "id": "opencode-zen",
         "status": "ok",

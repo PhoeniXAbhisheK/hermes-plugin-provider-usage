@@ -133,8 +133,7 @@ class ZenFetcherTest(unittest.TestCase):
         from pathlib import Path
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        # Hermes' own ledger -- session_model_usage is what records Zen turns,
-        # for both opencode CLI and Hermes sessions.
+        # Ledger 1: Hermes' own state.db -- records every turn Hermes makes.
         con = sqlite3.connect(self.home / "state.db")
         con.execute(
             "create table session_model_usage ("
@@ -144,17 +143,38 @@ class ZenFetcherTest(unittest.TestCase):
             " cache_write_tokens integer, last_seen real)"
         )
         now = time.time()
-        zen = "opencode-zen"
         con.executemany(
             "insert into session_model_usage values (?,?,?,?,?,?,?,?,?,?)",
             [
                 # (session, model, provider, calls, in, out, reas, cache_r, cache_w, last_seen)
-                ("s1", "x", zen, 1, 1000, 500, 100, 2000, 50, now),            # Zen, this month
-                ("s2", "x", zen, 1, 2000, 1000, 200, 4000, 100, now - 60),    # Zen, this month
-                ("s3", "free", zen, 1, 0, 0, 0, 0, 0, now - 120),              # Zen free model
-                ("s4", "x", zen, 1, 5000, 2500, 500, 10000, 250, now - 40 * 86400),  # older
-                ("s5", "y", "anthropic", 1, 3000, 1500, 300, 6000, 150, now),  # not Zen
-                ("s6", "x", "moonshot", 1, 9999, 9999, 0, 0, 0, now),           # not Zen
+                ("s1", "x", "opencode-zen", 1, 1000, 500, 100, 2000, 50, now),          # Zen, this month
+                ("s2", "x", "opencode-zen", 1, 2000, 1000, 200, 4000, 100, now - 60),  # Zen, this month
+                ("s3", "free", "opencode-zen", 1, 0, 0, 0, 0, 0, now - 120),            # Zen free model
+                ("s4", "x", "opencode-zen", 1, 5000, 2500, 500, 10000, 250, now - 40 * 86400),  # older
+                ("s5", "y", "anthropic", 1, 3000, 1500, 300, 6000, 150, now),           # not Zen
+                ("s6", "x", "moonshot", 1, 9999, 9999, 0, 0, 0, now),                    # not Zen
+                ("s7", "x", "opencode", 1, 7777, 7777, 0, 0, 0, now),                    # not Zen
+            ],
+        )
+        con.commit()
+        con.close()
+        # Ledger 2: the opencode CLI's own DB -- sessions run outside Hermes.
+        db_dir = self.home / ".local" / "share" / "opencode"
+        db_dir.mkdir(parents=True)
+        con = sqlite3.connect(db_dir / "opencode.db")
+        con.execute(
+            "create table session (model text, time_created integer,"
+            " tokens_input integer, tokens_output integer, tokens_reasoning integer,"
+            " tokens_cache_read integer, tokens_cache_write integer)"
+        )
+        now_ms = int(now * 1000)
+        con.executemany(
+            "insert into session values (?,?,?,?,?,?,?)",
+            [
+                # CLI Zen session, this month -> must be merged in
+                ('{"providerID":"opencode","id":"cli"}', now_ms, 4000, 2000, 200, 8000, 200),
+                # CLI session for another provider -> must be ignored
+                ('{"providerID":"anthropic","id":"y"}', now_ms, 9000, 9000, 0, 0, 0),
             ],
         )
         con.commit()
@@ -184,13 +204,14 @@ class ZenFetcherTest(unittest.TestCase):
         self.assertEqual(p["money"], [{"label": "Balance", "left": 4.32, "cur": "USD"}])
 
     def test_month_to_date_zen_spend_only(self):
-        # Mock Models.dev catalog so the estimator has pricing for model "x"
+        # Mock Models.dev catalog so the estimator has pricing for models x/cli
         import time as _time
         orig = API._models_dev_cache.copy()
         API._models_dev_cache["catalog"] = {
             "opencode": {
                 "models": {
-                    "x": {"cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.1}}
+                    "x": {"cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.1}},
+                    "cli": {"cost": {"input": 1.0, "output": 2.0, "cache_read": 0.5, "cache_write": 0.1}},
                 }
             }
         }
@@ -204,12 +225,15 @@ class ZenFetcherTest(unittest.TestCase):
         self.assertEqual(row["label"], "Balance")
         self.assertEqual(row["cur"], "USD")
         self.assertNotIn("total", row)        # pure usage row, no quota bar
-        # Estimated cost: (1000*1 + 500*2 + 100*2 + 2000*0.5 + 50*0.1 +
-        #                  2000*1 + 1000*2 + 200*2 + 4000*0.5 + 100*0.1) / 1M
-        # = (3205 + 6410) / 1M = 0.009615
-        self.assertAlmostEqual(row["left"], 0.01, places=2)
-        # only the opencode-zen rows count; moonshot / anthropic are excluded
-        self.assertEqual(set(p["meta"]["models"]), {"x", "free"})
+        # Hermes rows: (1000*1 + 500*2 + 100*2 + 2000*0.5 + 50*0.1) = 3205
+        #             (2000*1 + 1000*2 + 200*2 + 4000*0.5 + 100*0.1) = 6410
+        # CLI row:    (4000*1 + 2000*2 + 200*2 + 8000*0.5 + 200*0.1) = 12220
+        # total = (3205 + 6410 + 12220) / 1M = 0.021835
+        self.assertAlmostEqual(row["left"], 0.02, places=2)
+        # only Zen rows, from both ledgers; anthropic / moonshot / opencode excluded
+        sources = {v["source"] for v in p["meta"]["models"].values()}
+        self.assertEqual(sources, {"hermes", "opencode-cli"})
+        self.assertNotIn("y", {v["model"] for v in p["meta"]["models"].values()})
         self.assertIn("month", p["meta"]["source"])
 
     def test_all_time_fallback_when_month_is_empty(self):
@@ -219,9 +243,13 @@ class ZenFetcherTest(unittest.TestCase):
             "opencode": {"models": {"x": {"cost": {"input": 1.0, "output": 2.0}}}}
         }
         API._models_dev_cache["at"] = _time.time()
-        # push every Zen row out of the current month
+        # push every Zen row out of the current month, in both ledgers
         con = sqlite3.connect(self.home / "state.db")
         con.execute("update session_model_usage set last_seen = last_seen - 90 * 86400")
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.home / ".local" / "share" / "opencode" / "opencode.db")
+        con.execute("update session set time_created = time_created - 90 * 86400 * 1000")
         con.commit()
         con.close()
         p = API.fetch_opencode_zen()
