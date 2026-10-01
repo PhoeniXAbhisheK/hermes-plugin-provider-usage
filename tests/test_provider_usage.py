@@ -129,35 +129,42 @@ class GoFetcherTest(unittest.TestCase):
 
 class ZenFetcherTest(unittest.TestCase):
     def setUp(self):
-        import sqlite3, tempfile, datetime
+        import sqlite3, tempfile, time
         from pathlib import Path
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        db_dir = self.home / ".local" / "share" / "opencode"
-        db_dir.mkdir(parents=True)
-        con = sqlite3.connect(db_dir / "opencode.db")
+        # Hermes' own ledger -- session_model_usage is what records Zen turns,
+        # for both opencode CLI and Hermes sessions.
+        con = sqlite3.connect(self.home / "state.db")
         con.execute(
-            "create table session (model text, cost real, time_created integer,"
-            " tokens_input integer, tokens_output integer, tokens_reasoning integer,"
-            " tokens_cache_read integer, tokens_cache_write integer)"
+            "create table session_model_usage ("
+            " session_id text, model text, billing_provider text,"
+            " api_call_count integer, input_tokens integer, output_tokens integer,"
+            " reasoning_tokens integer, cache_read_tokens integer,"
+            " cache_write_tokens integer, last_seen real)"
         )
-        now_ms = int(datetime.datetime.now().timestamp() * 1000)
-        zen = '{"providerID":"opencode","id":"x"}'
+        now = time.time()
+        zen = "opencode-zen"
         con.executemany(
-            "insert into session values (?,?,?,?,?,?,?,?)",
+            "insert into session_model_usage values (?,?,?,?,?,?,?,?,?,?)",
             [
-                (zen, 1.00, now_ms, 1000, 500, 100, 2000, 50),        # Zen, this month
-                (zen, 2.50, now_ms - 60_000, 2000, 1000, 200, 4000, 100),  # Zen, this month
-                (zen, 0.00, now_ms - 120_000, 0, 0, 0, 0, 0),        # Zen free model
-                (zen, 99.00, now_ms - 40 * 86_400_000, 5000, 2500, 500, 10000, 250),  # Zen, previous months
-                ('{"providerID":"anthropic","id":"y"}', 7.00, now_ms, 3000, 1500, 300, 6000, 150),  # not Zen
-                (None, 5.00, now_ms, 1000, 500, 100, 2000, 50),       # unparseable model json
+                # (session, model, provider, calls, in, out, reas, cache_r, cache_w, last_seen)
+                ("s1", "x", zen, 1, 1000, 500, 100, 2000, 50, now),            # Zen, this month
+                ("s2", "x", zen, 1, 2000, 1000, 200, 4000, 100, now - 60),    # Zen, this month
+                ("s3", "free", zen, 1, 0, 0, 0, 0, 0, now - 120),              # Zen free model
+                ("s4", "x", zen, 1, 5000, 2500, 500, 10000, 250, now - 40 * 86400),  # older
+                ("s5", "y", "anthropic", 1, 3000, 1500, 300, 6000, 150, now),  # not Zen
+                ("s6", "x", "moonshot", 1, 9999, 9999, 0, 0, 0, now),           # not Zen
             ],
         )
         con.commit()
         con.close()
         self._orig_home = API.HOME
         API.HOME = self.home
+        # state.db is looked up under HOME and the Hermes home; pin both so a
+        # test never reads the real ledger.
+        self._orig_hhome = API._hermes_home
+        API._hermes_home = lambda: self.home
         # ledger tests exercise the spend fallback; the cookie-scrape seam is
         # forced off here and covered in ZenConsoleBalanceTest
         self._orig_console = API._zen_console_balance
@@ -165,6 +172,7 @@ class ZenFetcherTest(unittest.TestCase):
 
     def tearDown(self):
         API.HOME = self._orig_home
+        API._hermes_home = self._orig_hhome
         API._zen_console_balance = self._orig_console
         self._tmp.cleanup()
 
@@ -200,9 +208,31 @@ class ZenFetcherTest(unittest.TestCase):
         #                  2000*1 + 1000*2 + 200*2 + 4000*0.5 + 100*0.1) / 1M
         # = (3205 + 6410) / 1M = 0.009615
         self.assertAlmostEqual(row["left"], 0.01, places=2)
+        # only the opencode-zen rows count; moonshot / anthropic are excluded
+        self.assertEqual(set(p["meta"]["models"]), {"x", "free"})
+        self.assertIn("month", p["meta"]["source"])
+
+    def test_all_time_fallback_when_month_is_empty(self):
+        import sqlite3, time as _time
+        orig = API._models_dev_cache.copy()
+        API._models_dev_cache["catalog"] = {
+            "opencode": {"models": {"x": {"cost": {"input": 1.0, "output": 2.0}}}}
+        }
+        API._models_dev_cache["at"] = _time.time()
+        # push every Zen row out of the current month
+        con = sqlite3.connect(self.home / "state.db")
+        con.execute("update session_model_usage set last_seen = last_seen - 90 * 86400")
+        con.commit()
+        con.close()
+        p = API.fetch_opencode_zen()
+        API._models_dev_cache.clear()
+        API._models_dev_cache.update(orig)
+        self.assertIn("all-time", p["meta"]["source"])
+        self.assertGreater(p["money"][0]["left"], 0.0)   # real spend, not a bare $0
 
     def test_missing_db_skips(self):
         API.HOME = self.home.parent / "nope"
+        API._hermes_home = lambda: self.home.parent / "nope"
         with self.assertRaises(API._Skip):
             API.fetch_opencode_zen()
 
@@ -244,7 +274,7 @@ class ZenConsoleBalanceTest(unittest.TestCase):
         API._secret = lambda *names: "fake-cookie" if "CONSOLE_COOKIE" in names[0] else None
         import tempfile
         from pathlib import Path
-        API.HOME = Path(tempfile.mkdtemp()) / "nope"  # no opencode.db anywhere
+        API.HOME = Path(tempfile.mkdtemp()) / "nope"  # no state.db anywhere
         self.assertIsNone(API._zen_console_balance())
 
 CODING_URL = "https://api.kimi.com/coding/v1/usages"
