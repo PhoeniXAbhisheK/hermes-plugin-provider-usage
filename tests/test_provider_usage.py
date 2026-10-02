@@ -79,5 +79,70 @@ class HttpJsonGuardTest(unittest.TestCase):
             httpx.Client = orig
 
 
+class SmokeTest(unittest.TestCase):
+    def test_go_fetcher_registered(self):
+        self.assertIn("opencode-go", API.FETCHERS)
+        self.assertNotIn("opencode-zen", API.FETCHERS)
+        self.assertEqual(API.PROVIDER_META["opencode-go"]["name"], "OpenCode Go")
+
+
+class GoFetcherTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        (self.home / ".local" / "share" / "opencode").mkdir(parents=True)
+        self.auth = self.home / ".local" / "share" / "opencode" / "auth.json"
+        self._orig_home = API.HOME
+        API.HOME = self.home
+        API._secret = lambda *names: None  # no Hermes-scoped key in tests
+        self._orig_http = API._http_json
+
+    def tearDown(self):
+        API.HOME = self._orig_home
+        API._http_json = self._orig_http
+        self._tmp.cleanup()
+
+    def _write_auth(self, payload):
+        self.auth.write_text(json.dumps(payload))
+
+    def test_zen_key_is_never_sent_to_go_endpoint(self):
+        # auth.json with ONLY a Zen key (entry id "opencode") must skip,
+        # not 403 the Go endpoint with the wrong credential.
+        self._write_auth({"opencode": {"type": "api", "key": "zen-key"}})
+        with self.assertRaises(API._Skip):
+            API.fetch_opencode_go()
+
+    def test_no_key_no_file_skips(self):
+        with self.assertRaises(API._Skip):
+            API.fetch_opencode_go()
+
+    def test_403_entitlement_hides_silently(self):
+        self._write_auth({"opencode-go": {"type": "api", "key": "go-key"}})
+        def boom(url, headers, **kw):
+            raise PermissionError("HTTP 403: credential rejected or entitlement missing")
+        API._http_json = boom
+        with self.assertRaises(API._Skip):
+            API.fetch_opencode_go()
+
+    def test_windows_without_any_percent_are_skipped(self):
+        # missing metric must never render as a 0% bar
+        self._write_auth({"opencode-go": {"type": "api", "key": "go-key"}})
+        API._http_json = lambda url, headers, **kw: {"usage": {}}
+        with self.assertRaises(API._Skip):
+            API.fetch_opencode_go()
+
+    def test_ok_windows_payload(self):
+        self._write_auth({"opencode-go": {"type": "api", "key": "go-key"}})
+        API._http_json = lambda url, headers, **kw: {
+            "usage": {"rolling": {"percent": 12.5, "resetsAt": "2026-10-01T12:00:00Z", "status": "ok"}}
+        }
+        p = API.fetch_opencode_go()
+        self.assertEqual(p["id"], "opencode-go")
+        self.assertEqual(p["windows"][0]["label"], "5h")
+        self.assertEqual(p["windows"][0]["percent"], 12.5)
+
+
 if __name__ == "__main__":
     unittest.main()

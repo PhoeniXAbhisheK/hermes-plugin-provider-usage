@@ -11,8 +11,10 @@ credential CLIs.
 
 Credential sources (read-only):
 
-- OpenCode: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
-  back to ``~/.local/share/opencode/auth.json`` (the OpenCode CLI's store).
+- OpenCode Go: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
+  back to the ``opencode-go`` entry of ``~/.local/share/opencode/auth.json``
+  (the OpenCode CLI's store; never the Zen key). A 403 on the usage endpoint
+  means the account has no Go plan: the provider stays hidden.
 - OpenAI Codex: Hermes' Codex sign-in via the account-usage helper, falling
   back to ``~/.codex/auth.json`` (expired token surfaces as unavailable;
   re-auth in the Codex CLI).
@@ -62,7 +64,7 @@ class _Skip(Exception):
     """Provider has no usable credentials -> omitted from the payload."""
 
 PROVIDER_META = {
-    "opencode-go": {"name": "OpenCode", "tag": "Zen / Go"},
+    "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
     "openai-codex": {"name": "OpenAI Codex", "tag": "Plus"},
     "openrouter": {"name": "OpenRouter", "tag": "Credits"},
     "anthropic": {"name": "Anthropic", "tag": "Claude Code"},
@@ -169,27 +171,47 @@ def _http_json(url, headers, *, timeout=12.0):
 
 
 def fetch_opencode_go():
-    # Hermes settings first (secret scope, .env fallback), then the CLI store.
+    """OpenCode Go (subscription plan) quota windows.
+
+    Key resolution must never fall back to the Zen API key (auth.json entry
+    "opencode"): the Go endpoint answers those requests with 403, which used
+    to render a hard error card for every Zen-only user. No Go credential,
+    or a 403 with one, means "no Go plan on this account": the provider
+    stays hidden (module contract: unconfigured providers are omitted).
+    """
     key = _secret("OPENCODE_GO_API_KEY")
     if not key:
         try:
             d = json.loads((HOME / ".local/share/opencode/auth.json").read_text())
-            key = (d.get("opencode-go") or {}).get("key") or (d.get("opencode") or {}).get("key")
+            entry = d.get("opencode-go")
+            if isinstance(entry, dict):
+                key = entry.get("key")
         except (OSError, ValueError):
             pass
     if not key:
         raise _Skip("opencode-go")
-    d = _http_json("https://opencode.ai/zen/go/v1/usage", {"Authorization": "Bearer " + key, "Accept": "application/json"})
+    try:
+        d = _http_json(
+            "https://opencode.ai/zen/go/v1/usage",
+            {"Authorization": "Bearer " + key, "Accept": "application/json"},
+        )
+    except PermissionError:
+        raise _Skip("opencode-go")  # 401/403: no usable Go plan
     u = d.get("usage") or {}
     windows = []
     for wid, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "Monthly")):
         w = u.get(wid) or {}
+        percent = _num(w.get("percent"))
+        if percent is None:
+            continue  # missing metric: never render a fabricated 0% bar
         windows.append({
             "label": label,
-            "percent": w.get("percent"),
+            "percent": percent,
             "resets_at": w.get("resetsAt"),
             "status": w.get("status", "ok"),
         })
+    if not windows:
+        raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
