@@ -2,7 +2,7 @@
   "name": "provider-usage",
   "label": "Provider Usage",
   "description": "Backend router for the Provider Usage desktop status-bar plugin.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": { "hidden": true },
   "api": "plugin_api.py"
 }
