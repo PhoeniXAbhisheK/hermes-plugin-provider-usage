@@ -32,7 +32,8 @@ Endpoints hit (GET, machine credentials attached):
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
 - https://api.anthropic.com/api/oauth/usage (via Hermes)
 - https://api.deepseek.com/user/balance
-- https://api.kimi.com/coding/v1/usages, https://api.moonshot.cn/v1/users/me/balance
+- https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
+  (then api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
 - https://api.minimax.io/v1/api/openplatform/coding_plan/remains
 - https://api.github.com/copilot_internal/user
@@ -410,8 +411,54 @@ def fetch_deepseek():
     return {"id": "deepseek", "status": "ok", "money": money}
 
 
+def _kimi_balance(payload):
+    """Available CNY from a Moonshot balance body.
+
+    Live shape: the number sits under data.available_balance; the legacy
+    flat "available" key is kept as a fallback. Returns None when the body
+    carries no usable number.
+    """
+    data = payload.get("data")
+    if isinstance(data, dict):
+        value = _num(data.get("available_balance"))
+        if value is not None:
+            return value
+    return _num(payload.get("available"))
+
+
+# Moonshot accounts are region-scoped: keys are never valid across regions
+# (an .ai key gets 401 from api.moonshot.cn and vice versa). Probe the
+# international host first, then the China endpoint.
+_MOONSHOT_BALANCE_URLS = (
+    "https://api.moonshot.ai/v1/users/me/balance",
+    "https://api.moonshot.cn/v1/users/me/balance",
+)
+
+
+def _fetch_moonshot_balance(headers):
+    last_error = None
+    for url in _MOONSHOT_BALANCE_URLS:
+        try:
+            payload = _http_json(url, headers)
+        except Exception as exc:
+            # 401/403: the key belongs to the other region; 404: the endpoint
+            # is not offered there; anything else (transport, non-JSON body)
+            # rules this host out too. Any failure only rules out THIS host.
+            last_error = exc
+            continue
+        available = _kimi_balance(payload)
+        if available is None:
+            # The host answered and understood the key; a body without a
+            # number is a contract break, not a region mismatch.
+            raise RuntimeError("Moonshot balance response carried no available_balance")
+        return available
+    raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
+
+
 def fetch_kimi():
-    key = _secret("KIMI_API_KEY")
+    # Kimi Coding keys and Moonshot open-platform keys are the same product
+    # line; users set whichever their setup provisioned.
+    key = _secret("KIMI_API_KEY", "MOONSHOT_API_KEY")
     if not key:
         raise _Skip("kimi-coding")
     headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
@@ -446,10 +493,7 @@ def fetch_kimi():
             })
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
-    balance = _http_json("https://api.moonshot.cn/v1/users/me/balance", headers)
-    available = _num(balance.get("available"))
-    if available is None:
-        raise RuntimeError("Kimi returned no usage windows or balance")
+    available = _fetch_moonshot_balance(headers)
     return {"id": "kimi-coding", "status": "ok",
             "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}]}
 

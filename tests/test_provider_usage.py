@@ -144,5 +144,121 @@ class GoFetcherTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["percent"], 12.5)
 
 
+CODING_URL = "https://api.kimi.com/coding/v1/usages"
+AI_URL = "https://api.moonshot.ai/v1/users/me/balance"
+CN_URL = "https://api.moonshot.cn/v1/users/me/balance"
+
+
+class KimiFetcherTest(unittest.TestCase):
+    """fetch_kimi() with mocked endpoints (unit tests never hit the network
+    and never carry a real credential)."""
+
+    BALANCE_AI = {"code": 0, "scode": "0x0", "status": True,
+                  "data": {"available_balance": 18.02331,
+                           "voucher_balance": 0, "cash_balance": 18.02331}}
+
+    def setUp(self):
+        self._orig_secret = API._secret
+        self._orig_http = API._http_json
+        self.calls = []
+        self.headers_seen = []
+
+    def tearDown(self):
+        API._secret = self._orig_secret
+        API._http_json = self._orig_http
+
+    def _routes(self, routes):
+        def fake(url, headers, **kw):
+            self.calls.append(url)
+            self.headers_seen.append(dict(headers))
+            handler = routes.get(url, "MISS")
+            if handler == "MISS":
+                raise AssertionError("unexpected url: " + url)
+            if isinstance(handler, Exception):
+                raise handler
+            return handler
+        API._http_json = fake
+
+    def _key(self, value="fake-key"):
+        API._secret = lambda *names: value
+
+    def test_reads_both_env_var_names(self):
+        seen = []
+        def fake_secret(*names):
+            seen.append(names)
+            return None
+        API._secret = fake_secret
+        with self.assertRaises(API._Skip):
+            API.fetch_kimi()
+        self.assertIn("KIMI_API_KEY", seen[0])
+        self.assertIn("MOONSHOT_API_KEY", seen[0])
+
+    def test_moonshot_env_var_alone_suffices(self):
+        # users whose setup only provisioned MOONSHOT_API_KEY must get a card
+        API._secret = lambda *names: "moonshot-key" if "MOONSHOT_API_KEY" in names else None
+        self._routes({CODING_URL: PermissionError("HTTP 401"), AI_URL: self.BALANCE_AI})
+        p = API.fetch_kimi()
+        self.assertEqual(p["money"][0]["left"], 18.02)
+        self.assertEqual(self.headers_seen[-1]["Authorization"], "Bearer moonshot-key")
+
+    def test_international_region_probed_first(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"), AI_URL: self.BALANCE_AI})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL, AI_URL])  # .cn never touched when .ai answers
+        self.assertEqual(p["id"], "kimi-coding")
+        row = p["money"][0]
+        self.assertEqual(row["label"], "Balance")
+        self.assertEqual(row["left"], 18.02)   # nested data.available_balance, rounded
+        self.assertEqual(row["cur"], "CNY")
+
+    def test_falls_back_to_cn_region_when_ai_rejects_key(self):
+        self._key()
+        cn = {"code": 0, "data": {"available_balance": 42.5}}
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: PermissionError("HTTP 401: Invalid Authentication"),
+                      CN_URL: cn})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL, AI_URL, CN_URL])
+        self.assertEqual(p["money"][0]["left"], 42.5)
+
+    def test_both_regions_failing_surfaces_the_error(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: PermissionError("HTTP 401"),
+                      CN_URL: PermissionError("HTTP 401")})
+        with self.assertRaises(PermissionError):
+            API.fetch_kimi()
+
+    def test_legacy_flat_available_still_parses(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: {"available": 5.0}})
+        p = API.fetch_kimi()
+        self.assertEqual(p["money"][0]["left"], 5.0)
+
+    def test_coding_windows_take_precedence_over_balance(self):
+        self._key()
+        self._routes({CODING_URL: {"usage": {"used": 1.0, "limit": 4.0, "resetTime": "2026-10-05T00:00:00Z"}}})
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL])
+        self.assertEqual(p["windows"][0]["percent"], 25.0)
+        self.assertNotIn("money", p)
+
+    def test_balance_body_without_number_raises(self):
+        self._key()
+        self._routes({CODING_URL: PermissionError("HTTP 401"),
+                      AI_URL: {"code": 0, "data": {"voucher_balance": 0}},
+                      CN_URL: {"code": 0, "data": {"voucher_balance": 0}}})
+        with self.assertRaises(RuntimeError):
+            API.fetch_kimi()
+
+    def test_kimi_balance_parser(self):
+        self.assertEqual(API._kimi_balance({"data": {"available_balance": "7.25"}}), 7.25)
+        self.assertEqual(API._kimi_balance({"available": 3}), 3.0)
+        self.assertIsNone(API._kimi_balance({"data": {"available_balance": None}}))
+        self.assertIsNone(API._kimi_balance({}))
+
+
 if __name__ == "__main__":
     unittest.main()
