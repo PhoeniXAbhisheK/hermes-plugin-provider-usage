@@ -135,15 +135,37 @@ def _num(value):
         return None
 
 
+def _decode_json_body(resp):
+    """Parse a provider body, refusing non-JSON payloads.
+
+    Some gateways answer HTTP 200 with the literal text "Not Found", and a
+    plain resp.json() turns that into a bare JSONDecodeError. Report a clear,
+    shape-only error instead.
+
+    The response never leaves this function: _collect() turns exceptions into
+    {"error": str(exc)[:160]} and the panel renders that, so a provider that
+    reflects a rejected credential back in its body must not reach the UI.
+    """
+    text = (resp.text or "").lstrip()
+    if not text.startswith(("{", "[")):
+        raise ValueError(
+            "non-JSON response (HTTP %d, %d bytes)"
+            % (resp.status_code, len(text))
+        )
+    return json.loads(text) or {}
+
+
 def _http_json(url, headers, *, timeout=12.0):
     with httpx.Client(timeout=timeout) as client:
         resp = client.get(url, headers=headers)
         if resp.status_code in (401, 403):
-            raise RuntimeError("HTTP %d: credential rejected or expired" % resp.status_code)
+            # 403 covers both a rejected credential and a missing plan
+            # entitlement (e.g. OpenCode Go without a subscription).
+            raise PermissionError("HTTP %d: credential rejected or entitlement missing" % resp.status_code)
         if resp.status_code == 404:
             raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
         resp.raise_for_status()
-        return resp.json() or {}
+        return _decode_json_body(resp)
 
 
 def fetch_opencode_go():
