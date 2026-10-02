@@ -260,5 +260,125 @@ class KimiFetcherTest(unittest.TestCase):
         self.assertIsNone(API._kimi_balance({}))
 
 
+ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
+
+
+class AnthropicFetcherTest(unittest.TestCase):
+    """fetch_anthropic() with a mocked credentials file and mocked HTTP:
+    Hermes' helper first, Claude Code OAuth fallback. Fixtures carry a
+    placeholder token only; never real credential material."""
+
+    LIVE_BODY = {  # shape verified live against the OAuth usage endpoint
+        "five_hour": {"utilization": 40.3, "resets_at": "2026-10-02T07:06:00.000000+00:00"},
+        "seven_day": {"utilization": 0.0, "resets_at": "2026-10-07T00:59:59.000000+00:00"},
+        "seven_day_opus": None,
+    }
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.creds = self.home / ".claude" / ".credentials.json"
+        self._orig_home = API.HOME
+        API.HOME = self.home
+        self._orig_http = API._http_json
+        self._orig_hermes = API._hermes_usage
+        self.calls = []
+        self.headers_seen = []
+
+    def tearDown(self):
+        API.HOME = self._orig_home
+        API._http_json = self._orig_http
+        API._hermes_usage = self._orig_hermes
+        self._tmp.cleanup()
+
+    def _no_hermes(self):
+        # the desktop plugin host: Hermes' helper resolves nothing here
+        API._hermes_usage = lambda provider: None
+
+    def _write_creds(self, payload):
+        self.creds.parent.mkdir(parents=True, exist_ok=True)
+        self.creds.write_text(json.dumps(payload) if not isinstance(payload, str) else payload)
+
+    def _mock_http(self, body):
+        def fake(url, headers, **kw):
+            self.calls.append(url)
+            self.headers_seen.append(dict(headers))
+            return body
+        API._http_json = fake
+
+    def test_hermes_result_takes_precedence(self):
+        API._hermes_usage = lambda provider: {"id": provider, "status": "ok", "windows": []}
+        p = API.fetch_anthropic()
+        self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
+
+    def test_oauth_fallback_ratio_windows(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}})
+        self._mock_http(self.LIVE_BODY)
+        p = API.fetch_anthropic()
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(p["status"], "ok")
+        self.assertNotIn("money", p)  # ratio windows, never money rows
+        self.assertEqual(p["windows"][0]["label"], "5h")
+        self.assertEqual(p["windows"][0]["percent"], 40.3)
+        self.assertEqual(p["windows"][0]["resets_at"], "2026-10-02T07:06:00.000000+00:00")
+        self.assertEqual(p["windows"][1]["label"], "7d")
+        self.assertEqual(p["windows"][1]["percent"], 0.0)  # real 0%, not fabricated
+
+    def test_fallback_headers(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http(self.LIVE_BODY)
+        API.fetch_anthropic()
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+        hdr = self.headers_seen[0]
+        self.assertEqual(hdr["Authorization"], "Bearer test-token")
+        self.assertEqual(hdr["anthropic-beta"], "oauth-2025-04-20")
+
+    def test_missing_credentials_file_skips(self):
+        self._no_hermes()
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_malformed_credentials_file_skips(self):
+        self._no_hermes()
+        self._write_creds("{not json")
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_wrong_shape_credentials_skips(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": ""}})  # empty token
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+        self._write_creds({"mcpOAuth": {}})  # no claudeAiOauth entry
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_token_from_other_entries_never_used(self):
+        # mcpOAuth entries are unrelated server tokens; only claudeAiOauth counts
+        self._no_hermes()
+        self._write_creds({"mcpOAuth": {"x|1": {"accessToken": "mcp-token"}}})
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_window_without_utilization_is_skipped(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"five_hour": {"resets_at": "2026-10-02T07:06:00+00:00"}})
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+
+    def test_partial_windows_only_render_present_rows(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"five_hour": {"utilization": 120.5, "resets_at": None}})
+        p = API.fetch_anthropic()
+        self.assertEqual(len(p["windows"]), 1)
+        self.assertEqual(p["windows"][0]["percent"], 100.0)  # clamped to a sane bar
+        self.assertIsNone(p["windows"][0]["resets_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,8 +20,10 @@ Credential sources (read-only):
   re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic / Nous: resolved by Hermes' own read-only account-usage helpers
-  (the user's existing Hermes sign-ins).
+- Anthropic: resolved by Hermes' own read-only account-usage helper, falling
+  back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
+  the helper returns nothing (the desktop plugin host).
+- Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
 
@@ -30,7 +32,7 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes)
+- https://api.anthropic.com/api/oauth/usage (via Hermes, else the Claude Code token)
 - https://api.deepseek.com/user/balance
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
@@ -305,15 +307,69 @@ def _hermes_usage(provider):
     return {"id": provider, "status": "ok", "windows": windows}
 
 
-def _fetch_hermes(provider):
-    payload = _hermes_usage(provider)
-    if payload is None:
-        raise _Skip(provider)
-    return payload
+def _claude_code_oauth_token():
+    """Claude Code OAuth access token from ~/.claude/.credentials.json.
+
+    The file is written by ``claude login``: claudeAiOauth.accessToken is the
+    token the Claude Code client itself sends to api.anthropic.com. Returns
+    None when the file is missing, malformed, or carries no token; the token
+    is never logged, echoed, or stored.
+    """
+    try:
+        d = json.loads((HOME / ".claude" / ".credentials.json").read_text())
+    except (OSError, ValueError):
+        return None
+    entry = d.get("claudeAiOauth")
+    if not isinstance(entry, dict):
+        return None
+    token = entry.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return None
+    return token
 
 
 def fetch_anthropic():
-    return _fetch_hermes("anthropic")
+    """Anthropic quota windows: Hermes sign-in first, Claude Code fallback.
+
+    Hermes' account-usage helper can return nothing inside the desktop plugin
+    host, which used to hide the card entirely. Claude Code keeps its own
+    OAuth token on disk, so GET /api/oauth/usage (anthropic-beta:
+    oauth-2025-04-20) answers with ratio windows even then. No Hermes data
+    and no Claude Code credentials means the provider is unconfigured and
+    stays hidden.
+    """
+    payload = _hermes_usage("anthropic")
+    if payload is not None:
+        return payload
+    token = _claude_code_oauth_token()
+    if not token:
+        raise _Skip("anthropic")
+    d = _http_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        {
+            "Authorization": "Bearer " + token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "Accept": "application/json",
+        },
+    )
+    windows = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = d.get(key)
+        if not isinstance(w, dict):
+            continue
+        percent = _num(w.get("utilization"))
+        if percent is None:
+            continue  # missing metric: skip the row, never a fabricated 0%
+        resets = w.get("resets_at")
+        windows.append({
+            "label": label,
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+            "resets_at": resets if isinstance(resets, str) else None,
+            "status": "ok",
+        })
+    if not windows:
+        raise _Skip("anthropic")
+    return {"id": "anthropic", "status": "ok", "windows": windows}
 
 
 def fetch_nous():
