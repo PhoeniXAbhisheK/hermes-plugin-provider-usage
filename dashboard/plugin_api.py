@@ -11,15 +11,19 @@ credential CLIs.
 
 Credential sources (read-only):
 
-- OpenCode: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
-  back to ``~/.local/share/opencode/auth.json`` (the OpenCode CLI's store).
+- OpenCode Go: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
+  back to the ``opencode-go`` entry of ``~/.local/share/opencode/auth.json``
+  (the OpenCode CLI's store; never the Zen key). A 403 on the usage endpoint
+  means the account has no Go plan: the provider stays hidden.
 - OpenAI Codex: Hermes' Codex sign-in via the account-usage helper, falling
   back to ``~/.codex/auth.json`` (expired token surfaces as unavailable;
   re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic / Nous: resolved by Hermes' own read-only account-usage helpers
-  (the user's existing Hermes sign-ins).
+- Anthropic: resolved by Hermes' own read-only account-usage helper, falling
+  back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
+  the helper returns nothing (the desktop plugin host).
+- Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
 
@@ -28,9 +32,10 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes)
+- https://api.anthropic.com/api/oauth/usage (via Hermes, else the Claude Code token)
 - https://api.deepseek.com/user/balance
-- https://api.kimi.com/coding/v1/usages, https://api.moonshot.cn/v1/users/me/balance
+- https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
+  (then api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
 - https://api.minimax.io/v1/api/openplatform/coding_plan/remains
 - https://api.github.com/copilot_internal/user
@@ -62,7 +67,7 @@ class _Skip(Exception):
     """Provider has no usable credentials -> omitted from the payload."""
 
 PROVIDER_META = {
-    "opencode-go": {"name": "OpenCode", "tag": "Zen / Go"},
+    "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
     "openai-codex": {"name": "OpenAI Codex", "tag": "Plus"},
     "openrouter": {"name": "OpenRouter", "tag": "Credits"},
     "anthropic": {"name": "Anthropic", "tag": "Claude Code"},
@@ -135,39 +140,81 @@ def _num(value):
         return None
 
 
+def _decode_json_body(resp):
+    """Parse a provider body, refusing non-JSON payloads.
+
+    Some gateways answer HTTP 200 with the literal text "Not Found", and a
+    plain resp.json() turns that into a bare JSONDecodeError. Report a clear,
+    shape-only error instead.
+
+    The response never leaves this function: _collect() turns exceptions into
+    {"error": str(exc)[:160]} and the panel renders that, so a provider that
+    reflects a rejected credential back in its body must not reach the UI.
+    """
+    text = (resp.text or "").lstrip()
+    if not text.startswith(("{", "[")):
+        raise ValueError(
+            "non-JSON response (HTTP %d, %d bytes)"
+            % (resp.status_code, len(text))
+        )
+    return json.loads(text) or {}
+
+
 def _http_json(url, headers, *, timeout=12.0):
     with httpx.Client(timeout=timeout) as client:
         resp = client.get(url, headers=headers)
         if resp.status_code in (401, 403):
-            raise RuntimeError("HTTP %d: credential rejected or expired" % resp.status_code)
+            # 403 covers both a rejected credential and a missing plan
+            # entitlement (e.g. OpenCode Go without a subscription).
+            raise PermissionError("HTTP %d: credential rejected or entitlement missing" % resp.status_code)
         if resp.status_code == 404:
             raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
         resp.raise_for_status()
-        return resp.json() or {}
+        return _decode_json_body(resp)
 
 
 def fetch_opencode_go():
-    # Hermes settings first (secret scope, .env fallback), then the CLI store.
+    """OpenCode Go (subscription plan) quota windows.
+
+    Key resolution must never fall back to the Zen API key (auth.json entry
+    "opencode"): the Go endpoint answers those requests with 403, which used
+    to render a hard error card for every Zen-only user. No Go credential,
+    or a 403 with one, means "no Go plan on this account": the provider
+    stays hidden (module contract: unconfigured providers are omitted).
+    """
     key = _secret("OPENCODE_GO_API_KEY")
     if not key:
         try:
             d = json.loads((HOME / ".local/share/opencode/auth.json").read_text())
-            key = (d.get("opencode-go") or {}).get("key") or (d.get("opencode") or {}).get("key")
+            entry = d.get("opencode-go")
+            if isinstance(entry, dict):
+                key = entry.get("key")
         except (OSError, ValueError):
             pass
     if not key:
         raise _Skip("opencode-go")
-    d = _http_json("https://opencode.ai/zen/go/v1/usage", {"Authorization": "Bearer " + key, "Accept": "application/json"})
+    try:
+        d = _http_json(
+            "https://opencode.ai/zen/go/v1/usage",
+            {"Authorization": "Bearer " + key, "Accept": "application/json"},
+        )
+    except PermissionError:
+        raise _Skip("opencode-go")  # 401/403: no usable Go plan
     u = d.get("usage") or {}
     windows = []
     for wid, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "Monthly")):
         w = u.get(wid) or {}
+        percent = _num(w.get("percent"))
+        if percent is None:
+            continue  # missing metric: never render a fabricated 0% bar
         windows.append({
             "label": label,
-            "percent": w.get("percent"),
+            "percent": percent,
             "resets_at": w.get("resetsAt"),
             "status": w.get("status", "ok"),
         })
+    if not windows:
+        raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
@@ -260,15 +307,69 @@ def _hermes_usage(provider):
     return {"id": provider, "status": "ok", "windows": windows}
 
 
-def _fetch_hermes(provider):
-    payload = _hermes_usage(provider)
-    if payload is None:
-        raise _Skip(provider)
-    return payload
+def _claude_code_oauth_token():
+    """Claude Code OAuth access token from ~/.claude/.credentials.json.
+
+    The file is written by ``claude login``: claudeAiOauth.accessToken is the
+    token the Claude Code client itself sends to api.anthropic.com. Returns
+    None when the file is missing, malformed, or carries no token; the token
+    is never logged, echoed, or stored.
+    """
+    try:
+        d = json.loads((HOME / ".claude" / ".credentials.json").read_text())
+    except (OSError, ValueError):
+        return None
+    entry = d.get("claudeAiOauth")
+    if not isinstance(entry, dict):
+        return None
+    token = entry.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return None
+    return token
 
 
 def fetch_anthropic():
-    return _fetch_hermes("anthropic")
+    """Anthropic quota windows: Hermes sign-in first, Claude Code fallback.
+
+    Hermes' account-usage helper can return nothing inside the desktop plugin
+    host, which used to hide the card entirely. Claude Code keeps its own
+    OAuth token on disk, so GET /api/oauth/usage (anthropic-beta:
+    oauth-2025-04-20) answers with ratio windows even then. No Hermes data
+    and no Claude Code credentials means the provider is unconfigured and
+    stays hidden.
+    """
+    payload = _hermes_usage("anthropic")
+    if payload is not None:
+        return payload
+    token = _claude_code_oauth_token()
+    if not token:
+        raise _Skip("anthropic")
+    d = _http_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        {
+            "Authorization": "Bearer " + token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "Accept": "application/json",
+        },
+    )
+    windows = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = d.get(key)
+        if not isinstance(w, dict):
+            continue
+        percent = _num(w.get("utilization"))
+        if percent is None:
+            continue  # missing metric: skip the row, never a fabricated 0%
+        resets = w.get("resets_at")
+        windows.append({
+            "label": label,
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+            "resets_at": resets if isinstance(resets, str) else None,
+            "status": "ok",
+        })
+    if not windows:
+        raise _Skip("anthropic")
+    return {"id": "anthropic", "status": "ok", "windows": windows}
 
 
 def fetch_nous():
@@ -366,8 +467,54 @@ def fetch_deepseek():
     return {"id": "deepseek", "status": "ok", "money": money}
 
 
+def _kimi_balance(payload):
+    """Available CNY from a Moonshot balance body.
+
+    Live shape: the number sits under data.available_balance; the legacy
+    flat "available" key is kept as a fallback. Returns None when the body
+    carries no usable number.
+    """
+    data = payload.get("data")
+    if isinstance(data, dict):
+        value = _num(data.get("available_balance"))
+        if value is not None:
+            return value
+    return _num(payload.get("available"))
+
+
+# Moonshot accounts are region-scoped: keys are never valid across regions
+# (an .ai key gets 401 from api.moonshot.cn and vice versa). Probe the
+# international host first, then the China endpoint.
+_MOONSHOT_BALANCE_URLS = (
+    "https://api.moonshot.ai/v1/users/me/balance",
+    "https://api.moonshot.cn/v1/users/me/balance",
+)
+
+
+def _fetch_moonshot_balance(headers):
+    last_error = None
+    for url in _MOONSHOT_BALANCE_URLS:
+        try:
+            payload = _http_json(url, headers)
+        except Exception as exc:
+            # 401/403: the key belongs to the other region; 404: the endpoint
+            # is not offered there; anything else (transport, non-JSON body)
+            # rules this host out too. Any failure only rules out THIS host.
+            last_error = exc
+            continue
+        available = _kimi_balance(payload)
+        if available is None:
+            # The host answered and understood the key; a body without a
+            # number is a contract break, not a region mismatch.
+            raise RuntimeError("Moonshot balance response carried no available_balance")
+        return available
+    raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
+
+
 def fetch_kimi():
-    key = _secret("KIMI_API_KEY")
+    # Kimi Coding keys and Moonshot open-platform keys are the same product
+    # line; users set whichever their setup provisioned.
+    key = _secret("KIMI_API_KEY", "MOONSHOT_API_KEY")
     if not key:
         raise _Skip("kimi-coding")
     headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
@@ -402,10 +549,7 @@ def fetch_kimi():
             })
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
-    balance = _http_json("https://api.moonshot.cn/v1/users/me/balance", headers)
-    available = _num(balance.get("available"))
-    if available is None:
-        raise RuntimeError("Kimi returned no usage windows or balance")
+    available = _fetch_moonshot_balance(headers)
     return {"id": "kimi-coding", "status": "ok",
             "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}]}
 

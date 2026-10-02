@@ -1,7 +1,7 @@
 # Provider Usage
 
 Per-provider quota and balance readout in the Hermes desktop status bar:
-**OpenCode**, **OpenAI Codex**, **OpenRouter**, plus **Anthropic**,
+**OpenCode Go**, **OpenAI Codex**, **OpenRouter**, plus **Anthropic**,
 **GitHub Copilot**, **Nous**, **Z.AI**, **Kimi**, **MiniMax**, and
 **DeepSeek** when configured.
 
@@ -40,16 +40,18 @@ providers are omitted from the panel entirely.
 
 | Provider | Credential (read-only) | Endpoint |
 |---|---|---|
-| OpenCode | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else `~/.local/share/opencode/auth.json` | `https://opencode.ai/zen/go/v1/usage` |
+| OpenCode Go | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else the `opencode-go` entry of `~/.local/share/opencode/auth.json` (never the Zen key; without a Go plan the card stays hidden) | `https://opencode.ai/zen/go/v1/usage` |
 | OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else `~/.codex/auth.json` | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
-| Anthropic | Hermes' Claude Code sign-in (account-usage helper) | `https://api.anthropic.com/api/oauth/usage` |
+| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json` | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | Nous Portal account info |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
-| Kimi | `KIMI_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance) |
+| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance: `api.moonshot.ai` first, then `api.moonshot.cn`) |
 | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/v1/api/openplatform/coding_plan/remains` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
+
+OpenCode Zen (the metered API) is not tracked yet; this card covers the Go subscription.
 
 ## Privacy
 
@@ -105,11 +107,13 @@ __init__.py              Agent entry point (inert by design)
 dashboard/manifest.json  Dashboard manifest (mounts the backend router)
 dashboard/plugin_api.py  Backend: fetchers, cache, burn-rate history
 desktop/plugin.js        Desktop: status-bar item, popover, alerts
+tests/                   Stdlib unittest suite for the backend
 ```
 
 ## Development
 
 - `hermes plugins validate .` runs the same admission checks as the catalog CI.
+- `python -m unittest tests.test_provider_usage` runs the backend test suite (stdlib only, run it with the interpreter that serves the dashboard).
 - The backend served payload is a single JSON object:
   `{ fetched_at, providers: [{ id, name, tag, status, windows | money }] }`.
 
