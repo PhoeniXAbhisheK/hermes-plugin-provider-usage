@@ -1,0 +1,13 @@
+dashboard:
+  - changed-files:
+      - any-glob-to-any-file: "dashboard/**"
+
+desktop:
+  - changed-files:
+      - any-glob-to-any-file: "desktop/**"
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "README.md"
+          - "docs/**"
