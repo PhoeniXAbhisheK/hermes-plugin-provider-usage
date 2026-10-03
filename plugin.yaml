@@ -1,4 +1,4 @@
 name: provider-usage
-version: "0.2.0"
+version: "0.2.1"
 requires_hermes: ">=0.21.0"
 description: Per-provider quota and balance readout in the status bar.

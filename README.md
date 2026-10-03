@@ -45,7 +45,7 @@ providers are omitted from the panel entirely.
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
 | Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json` | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
-| Nous | Hermes' Nous Portal sign-in | Nous Portal account info |
+| Nous | Hermes' Nous Portal sign-in | Nous Portal account info (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
 | Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance: `api.moonshot.ai` first, then `api.moonshot.cn`) |
 | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/v1/api/openplatform/coding_plan/remains` |

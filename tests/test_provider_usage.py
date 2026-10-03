@@ -380,5 +380,94 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertIsNone(p["windows"][0]["resets_at"])
 
 
+class _FakeAccess:
+    """Stands in for hermes_cli.nous_account's paid-service access info."""
+
+    def __init__(self, total=None, purchased=None, subscription=None):
+        self.total_usable_credits = total
+        self.purchased_credits_remaining = purchased
+        self.subscription_credits_remaining = subscription
+
+
+class _FakeInfo:
+    def __init__(self, access):
+        self.paid_service_access_info = access
+
+
+class _FakeSnap:
+    def __init__(self, available=True, windows=()):
+        self.available = available
+        self.windows = windows
+
+
+class _FakeWindow:
+    def __init__(self, label, used, reset=None):
+        self.label = label
+        self.used_percent = used
+        self.reset_at = reset
+
+
+class NousFetcherTest(unittest.TestCase):
+    """fetch_nous() with the Hermes account-usage helpers stubbed out.
+
+    A free / top-up-only Portal account reports credits but no subscription
+    percentage window; the card used to vanish entirely. It must now surface
+    the balance as money rows, while a real subscription window still wins.
+    """
+
+    def _install(self, snap, info=None):
+        import types
+        agent = types.ModuleType("agent")
+        acct = types.ModuleType("agent.account_usage")
+        setattr(acct, "build_nous_credits_snapshot", lambda _info=None: snap)
+        setattr(agent, "account_usage", acct)
+        cli = types.ModuleType("hermes_cli")
+        nous = types.ModuleType("hermes_cli.nous_account")
+        setattr(nous, "get_nous_portal_account_info", lambda force_fresh=False: info)
+        setattr(cli, "nous_account", nous)
+        for name, mod in (
+            ("agent", agent),
+            ("agent.account_usage", acct),
+            ("hermes_cli", cli),
+            ("hermes_cli.nous_account", nous),
+        ):
+            sys.modules[name] = mod
+        self.addCleanup(
+            lambda: [sys.modules.pop(k, None) for k in
+                     ("agent", "agent.account_usage", "hermes_cli", "hermes_cli.nous_account")]
+        )
+
+    def test_topup_credits_become_money_rows(self):
+        self._install(_FakeSnap(windows=()), _FakeInfo(_FakeAccess(total=7.92, purchased=7.92, subscription=0.0)))
+        p = API.fetch_nous()
+        self.assertEqual(p["status"], "ok")
+        self.assertEqual(p["windows"], [])
+        self.assertEqual(p["money"][0], {"label": "Balance", "left": 7.92, "cur": "USD"})
+        # purchased == total -> no redundant duplicate row
+        self.assertEqual(len(p["money"]), 1)
+
+    def test_subscription_and_topup_split(self):
+        self._install(_FakeSnap(windows=()), _FakeInfo(_FakeAccess(total=9.5, purchased=4.5, subscription=5.0)))
+        labels = [m["label"] for m in API.fetch_nous()["money"]]
+        self.assertEqual(labels, ["Balance", "Top-up credits", "Subscription credits"])
+
+    def test_subscription_window_still_wins(self):
+        self._install(_FakeSnap(windows=(_FakeWindow("Weekly", 42.0),)),
+                      _FakeInfo(_FakeAccess(total=7.9)))
+        p = API.fetch_nous()
+        self.assertEqual(p["windows"][0]["percent"], 42.0)
+        self.assertNotIn("money", p)
+
+    def test_no_credit_fields_skips(self):
+        self._install(_FakeSnap(windows=()), _FakeInfo(_FakeAccess()))
+        with self.assertRaises(API._Skip):
+            API.fetch_nous()
+
+    def test_unavailable_snapshot_skips(self):
+        self._install(_FakeSnap(available=False, windows=()), _FakeInfo(_FakeAccess(total=1.0)))
+        with self.assertRaises(API._Skip):
+            API.fetch_nous()
+
+
 if __name__ == "__main__":
     unittest.main()

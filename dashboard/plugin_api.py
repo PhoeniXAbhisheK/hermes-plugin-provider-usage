@@ -372,6 +372,30 @@ def fetch_anthropic():
     return {"id": "anthropic", "status": "ok", "windows": windows}
 
 
+def _nous_credit_rows(info):
+    """Money rows for the Nous Portal credit balance (USD), or [] when the
+    account exposes no numeric credit fields.
+
+    Mirrors the amounts Hermes' account-usage snapshot reports in its details:
+    the total usable credits headline first (what the status-bar chip shows),
+    then the top-up / subscription split only when it adds information.
+    """
+    access = getattr(info, "paid_service_access_info", None)
+    if access is None:
+        return []
+    total = _num(getattr(access, "total_usable_credits", None))
+    purchased = _num(getattr(access, "purchased_credits_remaining", None))
+    subscription = _num(getattr(access, "subscription_credits_remaining", None))
+    rows = []
+    if total is not None:
+        rows.append({"label": "Balance", "left": round(total, 2), "cur": "USD"})
+    if purchased is not None and purchased > 0 and (total is None or abs(purchased - total) > 0.005):
+        rows.append({"label": "Top-up credits", "left": round(purchased, 2), "cur": "USD"})
+    if subscription is not None and subscription > 0:
+        rows.append({"label": "Subscription credits", "left": round(subscription, 2), "cur": "USD"})
+    return rows
+
+
 def fetch_nous():
     try:
         from agent.account_usage import build_nous_credits_snapshot
@@ -394,9 +418,17 @@ def fetch_nous():
             "resets_at": _iso_dt(w.reset_at),
             "status": "ok",
         })
-    if not windows:
+    if windows:
+        return {"id": "nous", "status": "ok", "windows": windows}
+
+    # No subscription percentage window (a free plan, or prepaid top-up
+    # credits only) used to hide the whole card. The Portal still exposes an
+    # absolute credit balance then, so surface it as money rows instead of
+    # dropping the provider.
+    money = _nous_credit_rows(info)
+    if not money:
         raise _Skip("nous")
-    return {"id": "nous", "status": "ok", "windows": windows}
+    return {"id": "nous", "status": "ok", "windows": [], "money": money}
 
 
 def fetch_copilot():
