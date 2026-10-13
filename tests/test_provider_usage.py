@@ -380,5 +380,50 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertIsNone(p["windows"][0]["resets_at"])
 
 
+class EnvEncodingTest(unittest.TestCase):
+    """GBK/cp936 Windows: any read without an explicit encoding raised
+    UnicodeDecodeError. Regression tests for the UTF-8 read sweep."""
+
+    def _point_home(self, home):
+        import types
+        hc = types.ModuleType("hermes_constants")
+        hc.get_hermes_home = lambda: home
+        sys.modules["hermes_constants"] = hc
+        self.addCleanup(lambda: sys.modules.pop("hermes_constants", None))
+
+    def test_env_read_specifies_encoding(self):
+        # A non-UTF-8 platform locale makes any encoding-less read fail; the
+        # .env read must pass its own encoding. Simulated with a strict reader
+        # (verbatim the Windows failure: no encoding kwarg -> UnicodeDecodeError).
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            (home / ".env").write_text(
+                "# note \u2014 with an em dash\nDEEPSEEK_API_KEY=test-key\n",
+                encoding="utf-8",
+            )
+            self._point_home(home)
+            orig = pathlib.Path.read_text
+
+            def strict_locale_read(self, *args, **kwargs):
+                if "encoding" not in kwargs:
+                    raise UnicodeDecodeError("gbk", b"\x94", 0, 1, "illegal multibyte sequence")
+                return orig(self, *args, **kwargs)
+
+            pathlib.Path.read_text = strict_locale_read
+            self.addCleanup(lambda: setattr(pathlib.Path, "read_text", orig))
+            self.assertEqual(API._hermes_env_value("DEEPSEEK_API_KEY"), "test-key")
+
+    def test_env_read_tolerates_undecodable_bytes(self):
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            (home / ".env").write_bytes(b"# \x94 broken comment\nZAI_API_KEY=zz\n")
+            self._point_home(home)
+            self.assertEqual(API._hermes_env_value("ZAI_API_KEY"), "zz")
+
+
 if __name__ == "__main__":
     unittest.main()

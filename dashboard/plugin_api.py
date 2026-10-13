@@ -94,6 +94,17 @@ FETCH_ORDER = (
 )
 
 
+def _read_text(path):
+    """UTF-8 text from a small config file, tolerating undecodable bytes.
+
+    Without an explicit encoding, read_text uses the platform locale: on a
+    GBK/cp936 Windows any non-ASCII byte in these files raised
+    UnicodeDecodeError, which turned every .env-keyed provider into an
+    error row (the .env handler only caught OSError).
+    """
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _hermes_env_value(name):
     """Read-only fallback: the profile's own .env (never os.environ)."""
     try:
@@ -102,10 +113,10 @@ def _hermes_env_value(name):
     except Exception:
         env_path = Path.home() / ".hermes" / ".env"
     try:
-        for line in env_path.read_text().splitlines():
+        for line in _read_text(env_path).splitlines():
             if line.startswith(name + "="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
+    except (OSError, ValueError):
         pass
     return None
 
@@ -185,7 +196,7 @@ def fetch_opencode_go():
     key = _secret("OPENCODE_GO_API_KEY")
     if not key:
         try:
-            d = json.loads((HOME / ".local/share/opencode/auth.json").read_text())
+            d = json.loads(_read_text(HOME / ".local/share/opencode/auth.json"))
             entry = d.get("opencode-go")
             if isinstance(entry, dict):
                 key = entry.get("key")
@@ -232,7 +243,7 @@ def fetch_openai_codex():
         return payload
     tok = None
     try:
-        d = json.loads((HOME / ".codex/auth.json").read_text())
+        d = json.loads(_read_text(HOME / ".codex/auth.json"))
         tok = (d.get("tokens") or {}).get("access_token") or d.get("OPENAI_API_KEY")
     except (OSError, ValueError):
         pass
@@ -316,7 +327,7 @@ def _claude_code_oauth_token():
     is never logged, echoed, or stored.
     """
     try:
-        d = json.loads((HOME / ".claude" / ".credentials.json").read_text())
+        d = json.loads(_read_text(HOME / ".claude" / ".credentials.json"))
     except (OSError, ValueError):
         return None
     entry = d.get("claudeAiOauth")
