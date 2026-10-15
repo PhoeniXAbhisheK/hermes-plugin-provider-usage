@@ -425,5 +425,83 @@ class EnvEncodingTest(unittest.TestCase):
             self.assertEqual(API._hermes_env_value("ZAI_API_KEY"), "zz")
 
 
+class ContextPropagationTest(unittest.TestCase):
+    """A multiplexed host binds the profile secret scope and profile home in
+    contextvars on the request; bare pool workers drop them, so fetchers
+    either fail closed (UnscopedSecretError) or read the launch profile
+    (#8, #9). Each pool task must run in a copy of the caller's context."""
+
+    def test_collect_copies_context_into_workers(self):
+        import contextvars
+        marker = contextvars.ContextVar("provider_usage_test_marker", default="unset")
+        seen = {}
+
+        def probe():
+            seen["marker"] = marker.get()
+            return {"id": "deepseek", "status": "ok"}
+
+        orig_order, orig_fetchers = API.FETCH_ORDER, API.FETCHERS
+        API.FETCH_ORDER = ("deepseek",)
+        API.FETCHERS = dict(API.FETCHERS, deepseek=probe)
+        self.addCleanup(lambda: setattr(API, "FETCH_ORDER", orig_order))
+        self.addCleanup(lambda: setattr(API, "FETCHERS", orig_fetchers))
+        token = marker.set("visible")
+        self.addCleanup(lambda: marker.reset(token))
+
+        out = API._collect()
+        self.assertEqual(seen.get("marker"), "visible",
+                         "collect worker lost the caller's context")
+        self.assertEqual([p["id"] for p in out["providers"]], ["deepseek"])
+
+    def test_nous_pool_copies_context_into_workers(self):
+        import contextvars
+        import types
+        marker = contextvars.ContextVar("provider_usage_test_marker_nous", default="unset")
+        seen = {}
+
+        def fake_get_nous_portal_account_info(force_fresh=False):
+            seen["marker"] = marker.get()
+            return {"ok": True}
+
+        class FakeWindow:
+            label = "Credits"
+            used_percent = 12.5
+            reset_at = None
+
+        class FakeSnapshot:
+            available = True
+            windows = (FakeWindow(),)
+
+        agent_pkg = types.ModuleType("agent")
+        agent_mod = types.ModuleType("agent.account_usage")
+        agent_mod.build_nous_credits_snapshot = lambda info: FakeSnapshot()
+        agent_pkg.account_usage = agent_mod
+        cli_pkg = types.ModuleType("hermes_cli")
+        cli_mod = types.ModuleType("hermes_cli.nous_account")
+        cli_mod.get_nous_portal_account_info = fake_get_nous_portal_account_info
+        cli_pkg.nous_account = cli_mod
+        for name, mod in (
+            ("agent", agent_pkg),
+            ("agent.account_usage", agent_mod),
+            ("hermes_cli", cli_pkg),
+            ("hermes_cli.nous_account", cli_mod),
+        ):
+            orig = sys.modules.get(name)
+            sys.modules[name] = mod
+            if orig is None:
+                self.addCleanup(lambda n=name: sys.modules.pop(n, None))
+            else:
+                self.addCleanup(lambda n=name, m=orig: sys.modules.__setitem__(n, m))
+
+        token = marker.set("visible")
+        self.addCleanup(lambda: marker.reset(token))
+
+        p = API.fetch_nous()
+        self.assertEqual(seen.get("marker"), "visible",
+                         "nous pool worker lost the caller's context")
+        self.assertEqual(p["id"], "nous")
+        self.assertEqual(p["windows"][0]["percent"], 12.5)
+
+
 if __name__ == "__main__":
     unittest.main()
