@@ -1,5 +1,7 @@
 # Provider Usage
 
+![Provider Usage banner](media/banner.png)
+
 Per-provider quota and balance readout in the Hermes desktop status bar:
 **OpenCode Go**, **OpenAI Codex**, **OpenRouter**, plus **Anthropic**,
 **GitHub Copilot**, **Nous**, **Z.AI**, **Kimi**, **MiniMax**, and
