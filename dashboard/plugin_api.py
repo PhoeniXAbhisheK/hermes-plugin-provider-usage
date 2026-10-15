@@ -44,6 +44,7 @@ All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import threading
 import time
@@ -390,7 +391,9 @@ def fetch_nous():
     except ImportError:
         raise _Skip("nous")
     with ThreadPoolExecutor(max_workers=1) as pool:
-        info = pool.submit(get_nous_portal_account_info, force_fresh=True).result(timeout=10.0)
+        # Same context copy as _collect(): this nested pool must not drop the
+        # caller's profile scope either.
+        info = pool.submit(contextvars.copy_context().run, get_nous_portal_account_info, force_fresh=True).result(timeout=10.0)
     snap = build_nous_credits_snapshot(info)
     if snap is None or not snap.available:
         raise _Skip("nous")
@@ -734,7 +737,11 @@ def _decorate(pid, p, now):
 def _collect():
     results = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(FETCHERS[pid]): pid for pid in FETCH_ORDER}
+        # Pool workers do not inherit contextvars; under a multiplexed host the
+        # profile secret scope and profile home live in the caller's context,
+        # so run every task in a copy of it (the core's tools/daemon_pool.py
+        # uses the same pattern).
+        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in FETCH_ORDER}
         for future in as_completed(futures):
             pid = futures[future]
             try:
