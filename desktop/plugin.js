@@ -347,7 +347,10 @@ function BarTip() {
             ]
           })
         )
-      : [jsx('div', { key: 'load', children: 'Provider usage: loading…' })]
+      : [jsx('div', {
+          key: data ? 'empty' : 'load',
+          children: data ? 'Provider usage: no providers available' : 'Provider usage: loading…'
+        })]
   })
 }
 
@@ -608,6 +611,8 @@ function UsagePanel() {
   provs.forEach((p, i) => body.push(jsx(ProviderBlock, { p, first: i === 0, mode, ids }, p.id)))
   if (isError) {
     body.push(jsx('div', { key: 'down', style: { fontSize: 11 }, children: 'Backend unreachable. Enable the plugin and retry.' }))
+  } else if (data && !provs.length) {
+    body.push(jsx('div', { key: 'empty', style: { fontSize: 11 }, children: 'No providers available.' }))
   }
 
   return jsxs('div', {
