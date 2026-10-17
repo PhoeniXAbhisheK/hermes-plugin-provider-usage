@@ -6,7 +6,8 @@
  * so provider credentials stay on the local machine.
  *
  * Each provider header carries an eye toggle that shows/hides that provider
- * in the status bar; until one is touched, only the first provider shows.
+ * in the status bar; until one is touched, the bar follows the active
+ * session's model provider (claude-* -> Anthropic, gpt/codex -> Codex, ...).
  *
  * Registered as a DATA contribution, so the app renders it with the exact
  * same chrome as the core context-usage gauge; `variant: 'menu'` opens the
@@ -24,7 +25,7 @@
  * `depletes_in_seconds` from observed history; rows show "~2d" when a
  * window would hit 100% before its reset (or a cap depletes soon).
  */
-import { STATUSBAR_AREAS, atom, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
+import { STATUSBAR_AREAS, atom, host, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
@@ -49,7 +50,7 @@ const $barProviders = atom(null)
 const STORE_INTERVAL = 'intervalMs'
 const STORE_MODE = 'valueMode'
 const STORE_ALERTS = 'alerts'
-const STORE_BAR = 'barProviders'
+const STORE_BAR = 'barProvidersV2'
 
 let storage = null
 let osNotify = null
@@ -157,17 +158,49 @@ function providerWarn(p) {
   return false
 }
 
-/* Bar visibility: default is the FIRST provider only (provider list order);
- * once the user touches a toggle, an explicit id list decides. */
-function barVisible(set, id, ids) {
+/* Map the active session's model slug to a usage-provider id. Returns null
+ * when the slug is empty or unrecognised. Vendor-prefixed slugs ("vendor/model")
+ * are routed aggregators (OpenRouter, else Nous) when one is available. */
+const MODEL_RULES = [
+  [/claude|anthropic/i, 'anthropic'],
+  [/codex|gpt|openai|(^|[/:])o\d/i, 'openai-codex'],
+  [/glm|zai/i, 'zai'],
+  [/kimi|moonshot/i, 'kimi-coding'],
+  [/minimax/i, 'minimax'],
+  [/deepseek/i, 'deepseek'],
+  [/copilot/i, 'copilot']
+]
+
+function providerForModel(model, ids) {
+  const m = String(model || '').trim()
+  if (!m || !Array.isArray(ids)) return null
+  if (m.indexOf('/') !== -1) {
+    const direct = MODEL_RULES.find(r => r[0].test(m.split('/')[0]))
+    if (direct && ids.indexOf(direct[1]) !== -1) return direct[1]
+    if (ids.indexOf('openrouter') !== -1) return 'openrouter'
+    if (ids.indexOf('nous') !== -1) return 'nous'
+  }
+  const hit = MODEL_RULES.find(r => r[0].test(m))
+  return hit && ids.indexOf(hit[1]) !== -1 ? hit[1] : null
+}
+
+/* Default (no explicit eye choice): follow the active session's provider. */
+function defaultBarIds(model, ids) {
+  const id = providerForModel(model, ids)
+  return id ? [id] : []
+}
+
+/* Bar visibility: default follows the active session's provider; once the
+ * user touches a toggle, an explicit id list decides. */
+function barVisible(set, id, ids, model) {
   if (!Array.isArray(ids)) return false
-  if (set === null) return ids.length > 0 && ids[0] === id
+  if (set === null) return defaultBarIds(model, ids).indexOf(id) !== -1
   return set.indexOf(id) !== -1
 }
 
-function toggleBarProvider(id, ids) {
+function toggleBarProvider(id, ids, model) {
   const cur = $barProviders.get()
-  const effective = cur === null ? (ids.length ? [ids[0]] : []) : cur.slice()
+  const effective = cur === null ? defaultBarIds(model, ids) : cur.slice()
   const next = effective.indexOf(id) === -1 ? effective.concat([id]) : effective.filter(x => x !== id)
   $barProviders.set(next)
 }
@@ -281,6 +314,7 @@ function BarDetail() {
   const { data, isError } = useUsage()
   const mode = useValue($mode)
   const barSet = useValue($barProviders)
+  const model = useValue(host.state.model)
 
   useEffect(() => {
     if (data) checkAlerts(data)
@@ -290,7 +324,7 @@ function BarDetail() {
   if (!data) return '…'
   const provs = data.providers || []
   const visible = barSet === null
-    ? provs.slice(0, 1)
+    ? provs.filter(p => barVisible(null, p.id, provs.map(x => x.id), model))
     : provs.filter(p => barSet.indexOf(p.id) !== -1)
   const parts = []
   visible.forEach((p, i) => {
@@ -412,12 +446,13 @@ function EyeIcon({ off }) {
 /* Eye toggle: shows/hides one provider in the status bar. */
 function BarToggle({ p, ids }) {
   const set = useValue($barProviders)
-  const on = barVisible(set, p.id, ids)
+  const model = useValue(host.state.model)
+  const on = barVisible(set, p.id, ids, model)
   return jsx('button', {
     type: 'button',
     title: on ? 'Hide from status bar' : 'Show in status bar',
     'aria-label': on ? 'Hide from status bar' : 'Show in status bar',
-    onClick: () => toggleBarProvider(p.id, ids),
+    onClick: () => toggleBarProvider(p.id, ids, host.state.model.get()),
     style: {
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       width: 16, height: 20, padding: 0, border: 'none', borderRadius: 5,
