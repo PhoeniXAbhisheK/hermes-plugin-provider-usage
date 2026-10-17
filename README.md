@@ -23,7 +23,8 @@ providers are omitted from the panel entirely.
 - **Status bar**: the providers you pick with the eye toggles, e.g.
   `opencode 6% · codex 2% · openrouter $0.32` (5h windows for quota providers,
   key-cap figure for OpenRouter; flips with Used/Remaining). Until a toggle
-  is touched, only the first provider shows.
+  is touched, the bar follows the active session's model: Claude models show
+  Anthropic, GPT/Codex models show Codex, and so on.
 - **Popover**: dense rows with every window, reset times, balance and key-cap
   amounts, and a manual refresh button.
 - **Near-limit tint**: any window or the OpenRouter key cap at 80%+ used
