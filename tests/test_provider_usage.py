@@ -503,5 +503,248 @@ class ContextPropagationTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["percent"], 12.5)
 
 
+class RateLimitTest(unittest.TestCase):
+    """429 + retry-after: hold the provider and keep the last reading (#13)."""
+
+    WINDOWS = [{"label": "5h", "percent": 12.0, "resets_at": None, "status": "ok"}]
+
+    def setUp(self):
+        self._orig = (API.FETCHERS, API.FETCH_ORDER, API._holds, API._last_good)
+
+    def tearDown(self):
+        API.FETCHERS, API.FETCH_ORDER, API._holds, API._last_good = self._orig
+
+    def _client(self, status, extra_headers=None):
+        import httpx
+        captured = dict(extra_headers or {})
+
+        class FakeClient:
+            def __init__(self, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, headers=None):
+                return httpx.Response(status, request=httpx.Request("GET", url), headers=captured)
+
+        return FakeClient
+
+    def _limited_wait(self, headers):
+        import httpx
+        orig = httpx.Client
+        httpx.Client = self._client(429, headers)
+        try:
+            before = API.time.time()
+            with self.assertRaises(API._RateLimited) as cm:
+                API._http_json("https://example.invalid/usage", {})
+        finally:
+            httpx.Client = orig
+        return cm.exception.reset_at - before
+
+    def test_retry_after_seconds(self):
+        wait = self._limited_wait({"retry-after": "2700"})
+        self.assertGreater(wait, 2600)
+        self.assertLess(wait, 2800)
+
+    def test_retry_after_absent_uses_default(self):
+        wait = self._limited_wait({})
+        self.assertGreaterEqual(wait, API.RATE_LIMIT_DEFAULT - 5)
+        self.assertLessEqual(wait, API.RATE_LIMIT_DEFAULT + 5)
+
+    def test_retry_after_http_date(self):
+        from datetime import datetime, timedelta, timezone
+        from email.utils import format_datetime
+
+        header = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=1800), usegmt=True)
+        wait = self._limited_wait({"retry-after": header})
+        self.assertGreater(wait, 1700)
+        self.assertLess(wait, 1900)
+
+    def test_hold_skips_fetcher_and_serves_last_reading(self):
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise AssertionError("fetcher ran while held")
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=boom)
+        API._holds = {"anthropic": API.time.time() + 600}
+        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        p = API._collect()["providers"][0]
+        self.assertEqual(calls, [])
+        self.assertTrue(p.get("stale"))
+        self.assertTrue(p.get("hold_until"))
+        self.assertEqual(p["windows"][0]["percent"], 12.0)
+        self.assertEqual(p["name"], "Anthropic")
+
+    def test_hold_without_last_reading_reports_rate_limit(self):
+        def boom():
+            raise AssertionError("fetcher ran while held")
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=boom)
+        API._holds = {"anthropic": API.time.time() + 600}
+        API._last_good = {}
+        p = API._collect()["providers"][0]
+        self.assertEqual(p["status"], "error")
+        self.assertIn("rate limited until", p["error"])
+
+    def test_fetcher_rate_limit_sets_hold_and_keeps_last_reading(self):
+        def limited():
+            raise API._RateLimited(API.time.time() + 900)
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=limited)
+        API._holds = {}
+        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        p = API._collect()["providers"][0]
+        self.assertTrue(p.get("stale"))
+        self.assertGreater(API._holds.get("anthropic", 0), API.time.time() + 800)
+
+    def test_expired_hold_refetches_and_clears(self):
+        calls = []
+
+        def good():
+            calls.append(1)
+            return {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=good)
+        API._holds = {"anthropic": API.time.time() - 10}
+        API._last_good = {}
+        p = API._collect()["providers"][0]
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("anthropic", API._holds)
+        self.assertFalse(p.get("stale"))
+
+    def test_hold_is_per_provider(self):
+        def boom():
+            raise AssertionError("fetcher ran while held")
+
+        def good():
+            return {"id": "deepseek", "status": "ok"}
+
+        API.FETCH_ORDER = ("anthropic", "deepseek")
+        API.FETCHERS = dict(API.FETCHERS, anthropic=boom, deepseek=good)
+        API._holds = {"anthropic": API.time.time() + 600}
+        API._last_good = {}
+        out = API._collect()
+        got = {p["id"]: p for p in out["providers"]}
+        self.assertEqual(got["deepseek"]["status"], "ok")
+        self.assertFalse(got["deepseek"].get("stale"))
+        self.assertEqual(got["anthropic"]["status"], "error")
+
+    def test_stale_reading_does_not_feed_projections(self):
+        recs = []
+        orig = API._record
+        API._record = lambda *a, **k: recs.append(a)
+        try:
+            def boom():
+                raise AssertionError("fetcher ran while held")
+
+            API.FETCH_ORDER = ("anthropic",)
+            API.FETCHERS = dict(API.FETCHERS, anthropic=boom)
+            API._holds = {"anthropic": API.time.time() + 600}
+            API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+            API._collect()
+        finally:
+            API._record = orig
+        self.assertEqual(recs, [])
+
+
+
+    def test_retry_after_malformed_falls_back(self):
+        wait = self._limited_wait({"retry-after": "soon"})
+        self.assertGreaterEqual(wait, API.RATE_LIMIT_DEFAULT - 5)
+        self.assertLessEqual(wait, API.RATE_LIMIT_DEFAULT + 5)
+
+    def test_retry_after_clamped_to_max(self):
+        wait = self._limited_wait({"retry-after": "999999"})
+        self.assertGreater(wait, API.RATE_LIMIT_MAX - 5)
+
+    def test_retry_after_past_date_floors_at_one_minute(self):
+        from datetime import datetime, timedelta, timezone
+        from email.utils import format_datetime
+
+        header = format_datetime(datetime.now(timezone.utc) - timedelta(hours=1), usegmt=True)
+        wait = self._limited_wait({"retry-after": header})
+        self.assertGreaterEqual(wait, 55)
+        self.assertLess(wait, 70)
+
+    def test_success_fills_last_good_and_serves_an_isolated_copy(self):
+        def good():
+            return {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=good)
+        API._holds = {}
+        API._last_good = {}
+        out = API._collect()
+        self.assertIn("anthropic", API._last_good)
+        out["providers"][0]["windows"][0]["percent"] = 99.0
+        self.assertEqual(API._last_good["anthropic"]["windows"][0]["percent"], 12.0)
+
+    def test_skip_clears_hold_and_last_good(self):
+        def skipped():
+            raise API._Skip("anthropic")
+
+        API.FETCH_ORDER = ("anthropic",)
+        API.FETCHERS = dict(API.FETCHERS, anthropic=skipped)
+        API._holds = {"anthropic": API.time.time() - 10}
+        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        out = API._collect()
+        self.assertEqual(out["providers"], [])
+        self.assertNotIn("anthropic", API._holds)
+        self.assertNotIn("anthropic", API._last_good)
+
+    def test_non_stale_reading_feeds_projections(self):
+        recs = []
+        orig = API._record
+        API._record = lambda *a, **k: recs.append(a)
+        try:
+            def good():
+                return {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+
+            API.FETCH_ORDER = ("anthropic",)
+            API.FETCHERS = dict(API.FETCHERS, anthropic=good)
+            API._holds = {}
+            API._last_good = {}
+            API._collect()
+        finally:
+            API._record = orig
+        self.assertNotEqual(recs, [])
+
+    def test_rate_limit_survives_kimi_fallbacks(self):
+        def boom(*a, **k):
+            raise API._RateLimited(API.time.time() + 600)
+
+        orig_secret, orig_http = API._secret, API._http_json
+        API._secret = lambda *names: "test-key"
+        API._http_json = boom
+        try:
+            with self.assertRaises(API._RateLimited):
+                API.fetch_kimi()
+        finally:
+            API._secret, API._http_json = orig_secret, orig_http
+
+    def test_rate_limit_survives_minimax_fallback(self):
+        def boom(*a, **k):
+            raise API._RateLimited(API.time.time() + 600)
+
+        orig_secret, orig_http = API._secret, API._http_json
+        API._secret = lambda *names: "test-key"
+        API._http_json = boom
+        try:
+            with self.assertRaises(API._RateLimited):
+                API.fetch_minimax()
+        finally:
+            API._secret, API._http_json = orig_secret, orig_http
+
+
 if __name__ == "__main__":
     unittest.main()
