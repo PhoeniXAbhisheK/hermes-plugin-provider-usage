@@ -33,6 +33,10 @@ providers are omitted from the panel entirely.
 - **Burn-rate projections**: `~2d` appears next to a window when it would hit
   100% before its own reset at the currently observed rate; caps show the
   projected exhaustion when inside 14 days.
+- **Rate limits**: a provider that answers `429` with `retry-after` is not
+  called again until that time; the popover keeps the last reading and adds
+  `last reading · retry after HH:MM` instead of hiding the provider. Holds
+  are in memory, so a backend restart queries once more.
 - **Footer controls**: auto refresh picker (30s / 1m / 5m / 10m) and a
   Used/Remaining toggle. Both persist across app restarts.
 - **Provider toggles**: an eye button on each provider header shows or hides

@@ -41,15 +41,20 @@ Endpoints hit (GET, machine credentials attached):
 - https://api.github.com/copilot_internal/user
 
 All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
+
+Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
+while held, the last reading is served marked ``stale`` and the endpoint is not polled.
 """
 from __future__ import annotations
 
+import copy
 import contextvars
 import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
@@ -58,14 +63,29 @@ from fastapi import APIRouter
 router = APIRouter()
 
 TTL = 300.0
+RATE_LIMIT_DEFAULT = 900.0  # seconds held when a 429 carries no Retry-After
+RATE_LIMIT_MAX = 21600.0  # clamp: never hold a provider longer than six hours
 HOME = Path.home()
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": None}
+_holds = {}      # provider id -> epoch when a 429 hold expires
+_last_good = {}  # provider id -> last ok payload (served while held)
 
 
 class _Skip(Exception):
     """Provider has no usable credentials -> omitted from the payload."""
+
+
+class _RateLimited(Exception):
+    """Provider answered 429: do not call it again before ``reset_at`` (epoch)."""
+
+    def __init__(self, reset_at):
+        self.reset_at = float(reset_at)
+        super().__init__(
+            "rate limited until "
+            + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
+        )
 
 PROVIDER_META = {
     "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
@@ -139,6 +159,31 @@ def _secret(*names):
     return None
 
 
+def _iso_epoch(epoch):
+    """Epoch seconds -> the payload's ISO-8601 UTC form."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _retry_after_seconds(value):
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
+    text = str(value or "").strip()
+    if not text:
+        return RATE_LIMIT_DEFAULT
+    try:
+        return max(60.0, min(RATE_LIMIT_MAX, float(text)))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+        if when is not None:
+            if when.tzinfo is None:  # RFC 7231 -0000 means UTC, not local time
+                when = when.replace(tzinfo=timezone.utc)
+            return max(60.0, min(RATE_LIMIT_MAX, when.timestamp() - time.time()))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return RATE_LIMIT_DEFAULT
+
+
 def _iso_dt(dt):
     if isinstance(dt, datetime):
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -181,6 +226,10 @@ def _http_json(url, headers, *, timeout=12.0):
             raise PermissionError("HTTP %d: credential rejected or entitlement missing" % resp.status_code)
         if resp.status_code == 404:
             raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
+        if resp.status_code == 429:
+            # Retry-After is seconds or an HTTP-date; hold the provider for that
+            # window instead of polling inside it (each poll refreshes the penalty).
+            raise _RateLimited(time.time() + _retry_after_seconds(resp.headers.get("retry-after")))
         resp.raise_for_status()
         return _decode_json_body(resp)
 
@@ -510,6 +559,8 @@ def _fetch_moonshot_balance(headers):
     for url in _MOONSHOT_BALANCE_URLS:
         try:
             payload = _http_json(url, headers)
+        except _RateLimited:
+            raise
         except Exception as exc:
             # 401/403: the key belongs to the other region; 404: the endpoint
             # is not offered there; anything else (transport, non-JSON body)
@@ -536,6 +587,8 @@ def fetch_kimi():
     payload = None
     try:
         payload = _http_json("https://api.kimi.com/coding/v1/usages", headers)
+    except _RateLimited:
+        raise
     except Exception:
         payload = None
     if isinstance(payload, dict):
@@ -622,6 +675,8 @@ def fetch_minimax():
         try:
             payload = _http_json(url, headers)
             break
+        except _RateLimited:
+            raise
         except Exception as exc:
             last_error = exc
     if not isinstance(payload, dict):
@@ -735,24 +790,49 @@ def _decorate(pid, p, now):
 
 
 def _collect():
+    """Collect every provider. Callers hold ``_lock`` (``payload()`` does)."""
     results = {}
+    now = time.time()
+    held = {pid: until for pid, until in _holds.items() if pid in FETCH_ORDER and until > now}
+    to_fetch = [pid for pid in FETCH_ORDER if pid not in held]
     with ThreadPoolExecutor(max_workers=6) as pool:
         # Pool workers do not inherit contextvars; under a multiplexed host the
         # profile secret scope and profile home live in the caller's context,
         # so run every task in a copy of it (the core's tools/daemon_pool.py
         # uses the same pattern).
-        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in FETCH_ORDER}
+        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in to_fetch}
         for future in as_completed(futures):
             pid = futures[future]
             try:
                 results[pid] = future.result()
             except _Skip:
+                _holds.pop(pid, None)
+                _last_good.pop(pid, None)
                 continue
+            except _RateLimited as exc:
+                _holds[pid] = exc.reset_at
+                held[pid] = exc.reset_at
             except Exception as exc:  # one provider must never blank the others
                 results[pid] = {"id": pid, "status": "error", "error": str(exc)[:160]}
+            else:
+                _holds.pop(pid, None)
+                _last_good[pid] = copy.deepcopy(results[pid])
+
+    for pid, until in held.items():
+        last = _last_good.get(pid)
+        if last is not None:
+            stale = copy.deepcopy(last)
+            stale["stale"] = True
+            stale["hold_until"] = _iso_epoch(until)
+            results[pid] = stale
+        else:
+            results[pid] = {
+                "id": pid,
+                "status": "error",
+                "error": "rate limited until %s" % time.strftime("%H:%M", time.localtime(until)),
+            }
 
     providers = []
-    now = time.time()
     for pid in FETCH_ORDER:
         p = results.get(pid)
         if p is None:
@@ -760,7 +840,7 @@ def _collect():
         meta = PROVIDER_META[pid]
         p.setdefault("name", meta["name"])
         p.setdefault("tag", meta["tag"])
-        if p.get("status") == "ok":
+        if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
         providers.append(p)
     return {"fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "providers": providers}
