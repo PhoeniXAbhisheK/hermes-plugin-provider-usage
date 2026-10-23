@@ -661,11 +661,21 @@ def fetch_zai():
         "https://api.z.ai/api/monitor/usage/quota/limit",
         {"Authorization": "Bearer " + key, "Accept": "application/json"},
     )
+    if not isinstance(payload, dict):
+        raise RuntimeError("Z.AI returned no parseable quota limits")
+    # Z.ai wraps the result in a {code, msg, success, data} envelope and the
+    # quota limits live under data.limits, so reading them off the top level
+    # always found nothing and blanked the card. A bare, unwrapped payload is
+    # still accepted in case the envelope is ever dropped.
+    data = payload.get("data")
+    envelope = data if isinstance(data, dict) else payload
     windows = []
-    for item in payload.get("limits") or []:
+    for item in envelope.get("limits") or []:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("type") or "").upper()
+        unit = item.get("unit")
+        number = _num(item.get("number"))
         percent = _num(item.get("percentage"))
         total, current, usage_value = item.get("total"), item.get("currentValue"), item.get("usage")
         if percent is None:
@@ -678,17 +688,29 @@ def fetch_zai():
             label = "Session (5h)"
         elif kind == "TIME_LIMIT":
             label = "Tool quota"
-        elif item.get("unit") == 6:
-            label = "Weekly"
+        elif unit == 3:
+            # hour-based credit window: the coding plan's rolling session
+            label = "Session (%gh)" % number if number else "Session (5h)"
+        elif unit == 6:
+            # day-based credit window: the coding plan's weekly cap
+            label = "Weekly" if not number or number <= 1 else "Weekly (%gd)" % number
         else:
             label = kind.replace("_", " ").title() or "Limit"
+        # Only some windows carry nextResetTime (the daily one usually does not).
+        resets_at = None
+        reset_ms = item.get("nextResetTime")
+        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
+            resets_at = _iso_epoch(reset_ms / 1000.0)
         windows.append({
             "label": label,
             "percent": round(max(0.0, min(100.0, float(percent))), 1),
-            "resets_at": None,
+            "resets_at": resets_at,
             "status": "ok",
         })
     if not windows:
+        message = payload.get("msg") or payload.get("message")
+        if isinstance(message, str) and message.strip():
+            raise RuntimeError("Z.AI: %s" % message.strip())
         raise RuntimeError("Z.AI returned no parseable quota limits")
     return {"id": "zai", "status": "ok", "windows": windows}
 
