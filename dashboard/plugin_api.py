@@ -37,7 +37,8 @@ Endpoints hit (GET, machine credentials attached):
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
-- https://api.minimax.io/v1/api/openplatform/coding_plan/remains
+- https://api.minimaxi.com/v1/token_plan/remains (CN) or https://api.minimax.io
+  /v1/token_plan/remains (global): M Plan subscription keys are region-bound
 - https://api.github.com/copilot_internal/user
 
 All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
@@ -715,46 +716,124 @@ def fetch_zai():
     return {"id": "zai", "status": "ok", "windows": windows}
 
 
+MINIMAX_CN_URLS = (
+    "https://api.minimaxi.com/v1/token_plan/remains",
+    "https://www.minimax.cn/v1/token_plan/remains",
+)
+MINIMAX_GLOBAL_URLS = (
+    "https://api.minimax.io/v1/token_plan/remains",
+    "https://www.minimax.io/v1/token_plan/remains",
+)
+
+
+def _minimax_credentials():
+    """MiniMax credentials in probe order, each paired with its host families.
+
+    A mainland key is useless on the intl hosts and the other way round, so
+    every configured credential probes the family matching its region first and
+    the other one second. The CN key is tried before the global one, and both
+    are probed when both are configured.
+    """
+    credentials = []
+    for name, urls in (
+        ("MINIMAX_CN_API_KEY", MINIMAX_CN_URLS + MINIMAX_GLOBAL_URLS),
+        ("MINIMAX_API_KEY", MINIMAX_GLOBAL_URLS + MINIMAX_CN_URLS),
+    ):
+        key = _secret(name)
+        if key and key not in [known for known, _urls in credentials]:
+            credentials.append((key, urls))
+    return credentials
+
+
 def fetch_minimax():
-    key = _secret("MINIMAX_API_KEY")
-    if not key:
+    """MiniMax plan quota windows, M Plan subscriptions included.
+
+    Subscription keys (the ``sk-cp-`` ones) are region-bound: a mainland key
+    only answers on the CN hosts and a global key only on the intl ones, so
+    each configured credential probes the family matching its region first and
+    the other one second (``MINIMAX_CN_API_KEY`` before ``MINIMAX_API_KEY``).
+    The M Plan meter is percentage based: its ``*_total_count`` fields stay 0
+    and only ``*_remaining_percent`` carries the reading, so a present percent
+    field is authoritative. The count fields are a fallback for payloads
+    without one, where they keep their legacy meaning (used over total).
+    """
+    credentials = _minimax_credentials()
+    if not credentials:
         raise _Skip("minimax")
-    headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
     payload = None
     last_error = None
-    for url in (
-        "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
-        "https://www.minimax.io/v1/api/openplatform/coding_plan/remains",
-    ):
-        try:
-            payload = _http_json(url, headers)
+    for key, urls in credentials:
+        headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+        for url in urls:
+            try:
+                candidate = _http_json(url, headers)
+            except _RateLimited:
+                raise
+            except Exception as exc:
+                last_error = exc
+                continue
+            if isinstance(candidate, dict) and candidate.get("model_remains"):
+                payload = candidate
+                break
+            # A reachable host serving the other region answers 200 with a
+            # base_resp error and no rows: remember it, keep probing.
+            msg = None
+            if isinstance(candidate, dict):
+                msg = (candidate.get("base_resp") or {}).get("status_msg")
+            last_error = RuntimeError(str(msg or "no quota rows"))
+        if payload is not None:
             break
-        except _RateLimited:
-            raise
-        except Exception as exc:
-            last_error = exc
     if not isinstance(payload, dict):
         raise RuntimeError("MiniMax quota probe failed: %s" % (last_error or "no endpoint"))
     windows = []
     for row in payload.get("model_remains") or []:
         if not isinstance(row, dict):
             continue
-        model_name = str(row.get("model_name") or "Model")[:24]
-        for total_key, used_key, label in (
-            ("current_interval_total_count", "current_interval_usage_count", "5h"),
-            ("current_weekly_total_count", "current_weekly_usage_count", "weekly"),
+        model_name = str(row.get("model_name") or "")
+        # The M Plan reports a single aggregate row named "general".
+        prefix = "" if model_name in ("", "general") else model_name[:24] + " · "
+        for total_key, used_key, pct_key, end_key, label in (
+            (
+                "current_interval_total_count",
+                "current_interval_usage_count",
+                "current_interval_remaining_percent",
+                "end_time",
+                "5h",
+            ),
+            (
+                "current_weekly_total_count",
+                "current_weekly_usage_count",
+                "current_weekly_remaining_percent",
+                "weekly_end_time",
+                "weekly",
+            ),
         ):
-            total, used = row.get(total_key), row.get(used_key)
-            if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
-                used_clamped = min(max(used, 0), total)
-                windows.append({
-                    "label": "%s · %s" % (model_name, label),
-                    "percent": round(used_clamped / total * 100.0, 1),
-                    "resets_at": None,
-                    "status": "ok",
-                })
+            # The meter is authoritative when present. On token_plan/remains the
+            # count fields hold quota left (the legacy coding_plan payloads
+            # counted consumed quota), so preferring them would invert the
+            # reading of any payload that carries both.
+            remaining = _num(row.get(pct_key))
+            percent = None
+            if remaining is not None:
+                percent = 100.0 - remaining
+            else:
+                total, used = row.get(total_key), row.get(used_key)
+                if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
+                    percent = min(max(used, 0), total) / total * 100.0
+            if percent is None:
+                continue
+            resets_at = None
+            end_ms = row.get(end_key)
+            if isinstance(end_ms, (int, float)) and end_ms > 0:
+                resets_at = _iso_epoch(end_ms / 1000.0)
+            windows.append({
+                "label": prefix + label,
+                "percent": round(max(0.0, min(100.0, float(percent))), 1),
+                "resets_at": resets_at,
+                "status": "ok",
+            })
     if not windows:
-        raise RuntimeError("MiniMax returned no parseable coding-plan rows")
+        raise RuntimeError("MiniMax returned no parseable plan rows")
     return {"id": "minimax", "status": "ok", "windows": windows}
 
 

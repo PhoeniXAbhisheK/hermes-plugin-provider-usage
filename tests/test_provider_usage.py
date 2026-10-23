@@ -905,5 +905,143 @@ class ZaiFetcherTest(unittest.TestCase):
         self.assertIn("invalid token", str(cm.exception))
 
 
+class MinimaxFetcherTest(unittest.TestCase):
+    """fetch_minimax() with mocked endpoints (never hits the network)."""
+
+    # Mainland M Plan answer: one aggregate "general" row, the count fields are
+    # always 0 and the meter lives in the remaining-percent fields.
+    M_PLAN = {
+        "model_remains": [{
+            "start_time": 1792739203914, "end_time": 1792757203914,
+            "remains_time": 17999994,
+            "current_interval_total_count": 0, "current_interval_usage_count": 0,
+            "model_name": "general",
+            "current_weekly_total_count": 0, "current_weekly_usage_count": 0,
+            "weekly_start_time": 1792739203914, "weekly_end_time": 1793344003914,
+            "weekly_remains_time": 604799994,
+            "current_interval_status": 1, "current_interval_remaining_percent": 99,
+            "current_weekly_status": 1, "current_weekly_remaining_percent": 84,
+        }],
+        "base_resp": {"status_code": 0, "status_msg": "success"},
+    }
+
+    def setUp(self):
+        self._orig_secret, self._orig_http = API._secret, API._http_json
+        self.urls = []
+
+    def tearDown(self):
+        API._secret, API._http_json = self._orig_secret, self._orig_http
+
+    def _serve(self, *answers):
+        """Answer each request from ``answers`` in order, repeating the last."""
+        def fake(url, headers, **kw):
+            self.urls.append(url)
+            return answers[min(len(self.urls) - 1, len(answers) - 1)]
+        API._http_json = fake
+
+    def test_no_key_skips(self):
+        API._secret = lambda *names: None
+        with self.assertRaises(API._Skip):
+            API.fetch_minimax()
+
+    def test_cn_key_probes_cn_hosts_first(self):
+        # A mainland subscription key is rejected abroad, so it must not be
+        # spent on the intl hosts first.
+        API._secret = lambda *names: "cn-key" if "MINIMAX_CN_API_KEY" in names else None
+        self._serve(self.M_PLAN)
+        API.fetch_minimax()
+        self.assertTrue(self.urls[0].startswith("https://api.minimaxi.com/"), self.urls[0])
+
+    def test_global_key_probes_intl_hosts_first(self):
+        API._secret = lambda *names: "gl-key" if names == ("MINIMAX_API_KEY",) else None
+        self._serve(self.M_PLAN)
+        API.fetch_minimax()
+        self.assertTrue(self.urls[0].startswith("https://api.minimax.io/"), self.urls[0])
+
+    def test_percentage_meter_is_read_when_counts_are_zero(self):
+        API._secret = lambda *names: "cn-key"
+        self._serve(self.M_PLAN)
+        p = API.fetch_minimax()
+        by_label = {w["label"]: w for w in p["windows"]}
+        self.assertEqual(by_label["5h"]["percent"], 1.0)
+        self.assertEqual(by_label["weekly"]["percent"], 16.0)
+        self.assertEqual(by_label["5h"]["resets_at"], API._iso_epoch(1792757203914 / 1000.0))
+        self.assertEqual(by_label["weekly"]["resets_at"], API._iso_epoch(1793344003914 / 1000.0))
+
+    def test_other_region_answer_falls_through_to_the_next_host(self):
+        # A reachable host serving the other region answers 200 + base_resp error
+        # and no rows; that must not end the probe.
+        API._secret = lambda *names: "cn-key"
+        self._serve({"base_resp": {"status_code": 2049, "status_msg": "invalid api key"}},
+                    self.M_PLAN)
+        p = API.fetch_minimax()
+        self.assertEqual(len(p["windows"]), 2)
+        self.assertEqual(len(self.urls), 2)
+
+    def test_percent_meter_wins_over_disagreeing_counts(self):
+        # token_plan/remains reports the count fields as quota left while the
+        # legacy payloads counted consumed quota, so a payload carrying both
+        # must be read from the meter: 1000 total with 800 left is 20% used,
+        # not the 80% the count branch would claim.
+        API._secret = lambda *names: "cn-key"
+        self._serve({"model_remains": [{
+            "model_name": "general",
+            "current_interval_total_count": 1000, "current_interval_usage_count": 800,
+            "current_interval_remaining_percent": 80,
+        }]})
+        p = API.fetch_minimax()
+        self.assertEqual(p["windows"][0]["percent"], 20.0)
+
+    def test_count_based_coding_plan_rows_still_parse(self):
+        # Payloads without a percent field keep their legacy counts: usage over
+        # total is the consumed share.
+        API._secret = lambda *names: "gl-key"
+        self._serve({"model_remains": [{
+            "model_name": "MiniMax-M2",
+            "current_interval_total_count": 100, "current_interval_usage_count": 25,
+            "current_weekly_total_count": 0, "current_weekly_usage_count": 0,
+        }]})
+        p = API.fetch_minimax()
+        self.assertEqual(p["windows"], [{
+            "label": "MiniMax-M2 · 5h", "percent": 25.0, "resets_at": None, "status": "ok",
+        }])
+
+    def test_both_keys_are_probed_when_both_are_set(self):
+        # The CN key is tried first, but a rejection must not hide the global
+        # key that is also configured.
+        keys = {"MINIMAX_CN_API_KEY": "cn-key", "MINIMAX_API_KEY": "gl-key"}
+        API._secret = lambda name, *rest: keys.get(name)
+        seen = []
+
+        def fake(url, headers, **kw):
+            auth = headers.get("Authorization")
+            seen.append((url, auth))
+            if auth == "Bearer gl-key":
+                return self.M_PLAN
+            return {"base_resp": {"status_code": 2049, "status_msg": "invalid api key"}}
+
+        API._http_json = fake
+        p = API.fetch_minimax()
+        self.assertEqual(len(p["windows"]), 2)
+        self.assertEqual(seen[-1][1], "Bearer gl-key")
+        self.assertTrue(seen[-1][0].startswith("https://api.minimax.io/"), seen[-1][0])
+
+    def test_rows_without_any_meter_are_an_error(self):
+        API._secret = lambda *names: "cn-key"
+        self._serve({"model_remains": [{"model_name": "general"}]})
+        with self.assertRaises(RuntimeError):
+            API.fetch_minimax()
+
+    def test_rate_limit_is_not_swallowed_by_host_fallback(self):
+        API._secret = lambda *names: "cn-key"
+
+        def boom(url, headers, **kw):
+            raise API._RateLimited(API.time.time() + 600)
+
+        API._http_json = boom
+        with self.assertRaises(API._RateLimited):
+            API.fetch_minimax()
+
+
 if __name__ == "__main__":
     unittest.main()
