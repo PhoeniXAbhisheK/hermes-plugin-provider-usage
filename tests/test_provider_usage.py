@@ -834,5 +834,76 @@ class RateLimitTest(unittest.TestCase):
             API._secret, API._http_json = orig_secret, orig_http
 
 
+class ZaiFetcherTest(unittest.TestCase):
+    """fetch_zai() with mocked endpoints (never hits the network)."""
+
+    # Real shape: the limits sit inside a {code, msg, data, success} envelope.
+    # The coding plan reports a rolling 5h credit window (unit 3) and a weekly
+    # cap (unit 6); only the weekly one carries nextResetTime.
+    ENVELOPE = {
+        "code": 200, "msg": "ok", "success": True,
+        "data": {"level": "standard", "limits": [
+            {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000,
+             "currentValue": 0, "remaining": 2000, "percentage": 0},
+            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000,
+             "currentValue": 1612, "remaining": 8387, "percentage": 16,
+             "nextResetTime": 1793145034982},
+        ]},
+    }
+
+    def setUp(self):
+        self._orig_secret, self._orig_http = API._secret, API._http_json
+        API._secret = lambda *names: "test-key"
+
+    def tearDown(self):
+        API._secret, API._http_json = self._orig_secret, self._orig_http
+
+    def test_no_key_skips(self):
+        API._secret = lambda *names: None
+        with self.assertRaises(API._Skip):
+            API.fetch_zai()
+
+    def test_limits_are_read_from_the_data_envelope(self):
+        # Reading payload["limits"] off the top level found nothing and blanked
+        # the whole card with "no parseable quota limits".
+        API._http_json = lambda url, headers, **kw: self.ENVELOPE
+        p = API.fetch_zai()
+        self.assertEqual([w["label"] for w in p["windows"]], ["Session (5h)", "Weekly"])
+        self.assertEqual([w["percent"] for w in p["windows"]], [0.0, 16.0])
+
+    def test_weekly_reset_time_is_exposed(self):
+        API._http_json = lambda url, headers, **kw: self.ENVELOPE
+        weekly = API.fetch_zai()["windows"][1]
+        self.assertEqual(weekly["resets_at"], API._iso_epoch(1793145034982 / 1000.0))
+
+    def test_unwrapped_payload_still_parses(self):
+        API._http_json = lambda url, headers, **kw: {"limits": self.ENVELOPE["data"]["limits"]}
+        p = API.fetch_zai()
+        self.assertEqual(len(p["windows"]), 2)
+
+    def test_token_and_tool_windows_keep_their_labels(self):
+        API._http_json = lambda url, headers, **kw: {"data": {"limits": [
+            {"type": "TOKENS_LIMIT", "percentage": 12},
+            {"type": "TIME_LIMIT", "percentage": 3},
+        ]}}
+        p = API.fetch_zai()
+        self.assertEqual([w["label"] for w in p["windows"]], ["Session (5h)", "Tool quota"])
+
+    def test_usage_over_total_is_a_percent_fallback(self):
+        API._http_json = lambda url, headers, **kw: {"data": {"limits": [
+            {"type": "CREDIT_LIMIT", "unit": 6, "usage": 10000, "currentValue": 2500},
+        ]}}
+        p = API.fetch_zai()
+        self.assertEqual(p["windows"][0]["percent"], 25.0)
+
+    def test_envelope_error_message_is_surfaced(self):
+        API._http_json = lambda url, headers, **kw: {
+            "code": 401, "msg": "invalid token", "success": False, "data": {},
+        }
+        with self.assertRaises(RuntimeError) as cm:
+            API.fetch_zai()
+        self.assertIn("invalid token", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
