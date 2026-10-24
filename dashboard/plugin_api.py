@@ -64,6 +64,12 @@ from fastapi import APIRouter
 router = APIRouter()
 
 TTL = 300.0
+# A cached account-usage snapshot younger than this is served instead of polling the
+# provider again. Anthropic's OAuth usage endpoint allows only a handful of reads per
+# five minutes (it answers 429 with retry-after: 300 after ~5), and Hermes core polls
+# the same endpoint for its own chip, so a plugin that re-read on every UI refresh
+# spends that budget and then gets refused.
+CACHE_FRESH_S = 240.0
 RATE_LIMIT_DEFAULT = 900.0  # seconds held when a 429 carries no Retry-After
 RATE_LIMIT_MAX = 21600.0  # clamp: never hold a provider longer than six hours
 HOME = Path.home()
@@ -343,14 +349,60 @@ def fetch_openrouter():
 # --------------------------------------------------------------------------- #
 
 
-def _hermes_usage(provider):
-    """Map a Hermes AccountUsageSnapshot onto our payload schema; None when
-    the provider is not usable from this machine."""
+def _cached_usage(provider):
+    """The core's last account-usage snapshot for ``provider``: in-memory, no network.
+
+    Hermes records every fetch here — including the one ``session.usage`` runs after
+    each turn — so reusing it costs no provider call. None when nothing was fetched
+    in this process yet.
+    """
+    try:
+        from agent.account_usage_cache import cached_account_usage
+    except ImportError:
+        return None
+    try:
+        return cached_account_usage(provider)
+    except Exception:
+        return None
+
+
+def _snapshot_age(snap):
+    """Seconds since ``snap`` was fetched, or None when unknown/not usable."""
+    if snap is None or not getattr(snap, "available", False):
+        return None
+    try:
+        return max(0.0, time.time() - snap.fetched_at.timestamp())
+    except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _fetch_usage(provider):
+    """A live AccountUsageSnapshot from Hermes' read-only helper (may hit the network)."""
     try:
         from agent.account_usage import fetch_account_usage
     except ImportError:
         return None
-    snap = fetch_account_usage(provider)
+    return fetch_account_usage(provider)
+
+
+def _hermes_usage(provider):
+    """Map a Hermes AccountUsageSnapshot onto our payload schema; None when
+    the provider is not usable from this machine.
+
+    A cached snapshot younger than ``CACHE_FRESH_S`` is preferred over a new fetch:
+    the core polls these endpoints itself, and Anthropic's OAuth usage API refuses a
+    provider that is asked too often (429). When a fetch fails or is refused, the last
+    good snapshot is served rather than dropping the provider — a rate-limited read is
+    not an unconfigured provider, and hiding the card reads as "limits are gone".
+    """
+    cached = _cached_usage(provider)
+    age = _snapshot_age(cached)
+    if age is not None and age <= CACHE_FRESH_S:
+        snap = cached
+    else:
+        snap = _fetch_usage(provider)
+        if snap is None or not snap.available:
+            snap = cached
     if snap is None or not snap.available:
         return None
     windows = []
