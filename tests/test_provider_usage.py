@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1041,6 +1042,75 @@ class MinimaxFetcherTest(unittest.TestCase):
         API._http_json = boom
         with self.assertRaises(API._RateLimited):
             API.fetch_minimax()
+
+
+class HermesUsageCacheTest(unittest.TestCase):
+    """The core's per-turn snapshot is reused, and a refused read never hides a provider."""
+
+    class Win:
+        def __init__(self, label, percent, reset_at):
+            self.label = label
+            self.used_percent = percent
+            self.reset_at = reset_at
+
+    class Snap:
+        def __init__(self, age_s, percent=42.0, available=True):
+            now = datetime.now(timezone.utc)
+            self.available = available
+            self.fetched_at = now - timedelta(seconds=age_s)
+            self.windows = (HermesUsageCacheTest.Win("Current session", percent, now + timedelta(hours=1)),)
+
+    def setUp(self):
+        self._orig_cache = API._cached_usage
+        self._orig_fetch = API._fetch_usage
+        self.fetches = []
+
+    def tearDown(self):
+        API._cached_usage = self._orig_cache
+        API._fetch_usage = self._orig_fetch
+
+    def _cache(self, snap):
+        API._cached_usage = lambda provider: snap
+
+    def _fetch(self, snap):
+        def fake(provider):
+            self.fetches.append(provider)
+            return snap
+        API._fetch_usage = fake
+
+    def test_fresh_cached_snapshot_costs_no_provider_call(self):
+        self._cache(self.Snap(age_s=60))
+        self._fetch(None)
+        p = API._hermes_usage("anthropic")
+        self.assertEqual(self.fetches, [])  # served from the core cache
+        self.assertEqual(p["windows"][0]["percent"], 42.0)
+
+    def test_stale_cache_is_refetched(self):
+        self._cache(self.Snap(age_s=API.CACHE_FRESH_S + 60))
+        self._fetch(self.Snap(age_s=0, percent=55.0))
+        p = API._hermes_usage("anthropic")
+        self.assertEqual(self.fetches, ["anthropic"])
+        self.assertEqual(p["windows"][0]["percent"], 55.0)
+
+    def test_rate_limited_read_serves_the_last_good_snapshot(self):
+        # api.anthropic.com answers 429 with retry-after; Hermes' helper swallows it
+        # and returns None. The provider must stay visible with its last reading.
+        self._cache(self.Snap(age_s=API.CACHE_FRESH_S + 60, percent=83.0))
+        self._fetch(None)
+        p = API._hermes_usage("anthropic")
+        self.assertEqual(self.fetches, ["anthropic"])
+        self.assertEqual(p["status"], "ok")
+        self.assertEqual(p["windows"][0]["percent"], 83.0)
+
+    def test_nothing_cached_and_no_live_read_skips(self):
+        self._cache(None)
+        self._fetch(None)
+        self.assertIsNone(API._hermes_usage("anthropic"))
+
+    def test_unavailable_cached_snapshot_is_not_served(self):
+        self._cache(self.Snap(age_s=30, available=False))
+        self._fetch(None)
+        self.assertIsNone(API._hermes_usage("anthropic"))
 
 
 if __name__ == "__main__":
