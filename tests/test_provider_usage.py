@@ -1043,5 +1043,93 @@ class MinimaxFetcherTest(unittest.TestCase):
             API.fetch_minimax()
 
 
+class HermesUsageCacheTest(unittest.TestCase):
+    """_hermes_usage(): the helper's own cache, the last reading, and the cooldown."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig = (API._cached_snapshot, API._fetch_usage)
+        API._helper_cooldown.clear()
+
+    def tearDown(self):
+        API._cached_snapshot, API._fetch_usage = self._orig
+        API._helper_cooldown.clear()
+
+    @staticmethod
+    def _snap(age_s=0.0, percent=42.0, available=True):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        window = SimpleNamespace(label="5h", used_percent=percent, reset_at=None)
+        return SimpleNamespace(
+            fetched_at=datetime.now(timezone.utc) - timedelta(seconds=age_s),
+            windows=[window],
+            available=available,
+        )
+
+    def _refuse(self):
+        def fetch(provider):
+            self.calls.append(provider)
+            return None
+
+        return fetch
+
+    def test_fresh_cache_answers_without_calling_the_helper(self):
+        API._cached_snapshot = lambda provider: self._snap(age_s=10)
+        API._fetch_usage = self._refuse()
+        payload = API._hermes_usage("anthropic")
+        self.assertEqual(payload["windows"][0]["percent"], 42.0)
+        self.assertNotIn("stale", payload)
+        self.assertEqual(self.calls, [])
+
+    def test_stale_cache_is_served_as_the_last_reading(self):
+        API._cached_snapshot = lambda provider: self._snap(age_s=3600)
+        API._fetch_usage = self._refuse()
+        payload = API._hermes_usage("anthropic")
+        self.assertTrue(payload["stale"])
+        self.assertEqual(payload["windows"][0]["percent"], 42.0)
+        self.assertRegex(payload["fetched_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(self.calls, ["anthropic"])
+
+    def test_an_empty_read_cools_the_helper_down(self):
+        API._cached_snapshot = lambda provider: self._snap(age_s=3600)
+        API._fetch_usage = self._refuse()
+        API._hermes_usage("anthropic")
+        API._hermes_usage("anthropic")
+        self.assertEqual(self.calls, ["anthropic"])
+
+    def test_last_reading_has_a_six_hour_ceiling(self):
+        API._cached_snapshot = lambda provider: self._snap(age_s=API.CACHE_STALE_MAX_S + 60)
+        API._fetch_usage = self._refuse()
+        self.assertIsNone(API._hermes_usage("anthropic"))
+
+    def test_unavailable_snapshot_is_ignored(self):
+        API._cached_snapshot = lambda provider: self._snap(available=False)
+        API._fetch_usage = self._refuse()
+        self.assertIsNone(API._hermes_usage("anthropic"))
+
+    def test_a_helper_exception_reads_as_no_snapshot(self):
+        import sys
+        import types
+
+        module = types.ModuleType("agent.account_usage")
+
+        def boom(provider):
+            raise RuntimeError("helper failed")
+
+        module.fetch_account_usage = boom
+        saved = {name: sys.modules.get(name) for name in ("agent", "agent.account_usage")}
+        sys.modules["agent"] = saved["agent"] or types.ModuleType("agent")
+        sys.modules["agent.account_usage"] = module
+        try:
+            self.assertIsNone(API._fetch_usage("anthropic"))
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
+
+
 if __name__ == "__main__":
     unittest.main()
