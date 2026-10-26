@@ -22,7 +22,8 @@ Credential sources (read-only):
   read-only fallback to ``$HERMES_HOME/.env``.
 - Anthropic: resolved by Hermes' own read-only account-usage helper, falling
   back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
-  the helper returns nothing (the desktop plugin host).
+  the helper returns nothing (the desktop plugin host). A refused helper read
+  keeps the last reading for up to six hours, marked stale.
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
@@ -66,12 +67,16 @@ router = APIRouter()
 TTL = 300.0
 RATE_LIMIT_DEFAULT = 900.0  # seconds held when a 429 carries no Retry-After
 RATE_LIMIT_MAX = 21600.0  # clamp: never hold a provider longer than six hours
+CACHE_FRESH_S = 240.0  # a core snapshot younger than this answers without a helper call
+CACHE_STALE_MAX_S = 21600.0  # serve the last reading at most six hours after it was taken
+HELPER_COOLDOWN_S = 300.0  # wait after an empty helper read before trying the helper again
 HOME = Path.home()
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": None}
 _holds = {}      # provider id -> epoch when a 429 hold expires
 _last_good = {}  # provider id -> last ok payload (served while held)
+_helper_cooldown = {}  # provider id -> epoch when the account-usage helper may be tried again
 
 
 class _Skip(Exception):
@@ -343,30 +348,105 @@ def fetch_openrouter():
 # --------------------------------------------------------------------------- #
 
 
-def _hermes_usage(provider):
-    """Map a Hermes AccountUsageSnapshot onto our payload schema; None when
-    the provider is not usable from this machine."""
+def _cached_snapshot(provider):
+    """Hermes' in-process account-usage snapshot for provider, when there is one.
+
+    ``fetch_account_usage`` remembers every successful read in this process, so
+    the panel's own earlier reads show up here. The gateway's per-turn
+    ``session.usage`` reads live in another process and are not visible.
+    """
     try:
-        from agent.account_usage import fetch_account_usage
+        from agent.account_usage_cache import cached_account_usage
     except ImportError:
         return None
-    snap = fetch_account_usage(provider)
-    if snap is None or not snap.available:
+    try:
+        return cached_account_usage(provider)
+    except Exception:
+        return None
+
+
+def _snapshot_age(snap):
+    """Seconds since the snapshot was taken, or None when it carries no usable time."""
+    fetched = getattr(snap, "fetched_at", None)
+    if not isinstance(fetched, datetime):
+        return None
+    try:
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds())
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _snap_payload(provider, snap):
+    """Map a core snapshot onto our payload schema; None without a usable window."""
+    if snap is None or not getattr(snap, "available", False):
         return None
     windows = []
-    for w in snap.windows or ():
-        used = w.used_percent
+    for w in getattr(snap, "windows", None) or ():
+        used = getattr(w, "used_percent", None)
         if not isinstance(used, (int, float)):
             continue
         windows.append({
-            "label": str(w.label or "Window"),
+            "label": str(getattr(w, "label", None) or "Window"),
             "percent": round(float(used), 1),
-            "resets_at": _iso_dt(w.reset_at),
+            "resets_at": _iso_dt(getattr(w, "reset_at", None)),
             "status": "ok",
         })
     if not windows:
         return None
     return {"id": provider, "status": "ok", "windows": windows}
+
+
+def _last_reading(provider, snap):
+    """The cached snapshot as a stale payload, or None past its freshness ceiling."""
+    age = _snapshot_age(snap) if snap is not None else None
+    if age is None or age > CACHE_STALE_MAX_S:
+        return None
+    payload = _snap_payload(provider, snap)
+    if payload is None:
+        return None
+    payload["stale"] = True
+    payload["fetched_at"] = _iso_dt(getattr(snap, "fetched_at", None))
+    return payload
+
+
+def _fetch_usage(provider):
+    """One account-usage read. A helper failure is not a card error."""
+    try:
+        from agent.account_usage import fetch_account_usage
+    except ImportError:
+        return None
+    try:
+        return fetch_account_usage(provider)
+    except Exception:
+        return None
+
+
+def _hermes_usage(provider):
+    """Map a Hermes AccountUsageSnapshot onto our payload schema.
+
+    The helper returns None on any failure, including a 429 it swallows, so a
+    missing snapshot must not read as a card error. Answers in order: a fresh
+    in-process snapshot (no call), one live read, then the last reading within
+    CACHE_STALE_MAX_S. An empty read puts the helper on a short cooldown so a
+    refusing endpoint is not probed on every poll.
+    """
+    now = time.time()
+    cached = _cached_snapshot(provider)
+    age = _snapshot_age(cached) if cached is not None else None
+    if age is not None and age <= CACHE_FRESH_S:
+        payload = _snap_payload(provider, cached)
+        if payload is not None:
+            return payload
+    if _helper_cooldown.get(provider, 0.0) <= now:
+        payload = _snap_payload(provider, _fetch_usage(provider))
+        if payload is not None:
+            _helper_cooldown.pop(provider, None)
+            return payload
+        _helper_cooldown[provider] = now + HELPER_COOLDOWN_S
+        cached = _cached_snapshot(provider)
+    return _last_reading(provider, cached)
 
 
 def _claude_code_oauth_token():

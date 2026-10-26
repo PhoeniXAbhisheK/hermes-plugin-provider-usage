@@ -434,8 +434,12 @@ function ProviderBlock({ p, first, mode, ids }) {
   if (p.status !== 'ok') {
     rows.push(jsx('div', { key: 'err', style: { fontSize: 11, opacity: 0.8 }, children: 'unavailable: ' + (p.error || 'fetch failed') }))
   }
-  if (p.stale && p.hold_until) {
-    rows.push(jsx('div', { key: 'stale', style: { fontSize: 11, opacity: 0.8 }, children: 'last reading · retry after ' + new Date(p.hold_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }))
+  if (p.stale && (p.hold_until || p.fetched_at)) {
+    const clock = (v) => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const bits = []
+    if (p.fetched_at) bits.push('last reading ' + clock(p.fetched_at))
+    if (p.hold_until) bits.push('retry after ' + clock(p.hold_until))
+    rows.push(jsx('div', { key: 'stale', style: { fontSize: 11, opacity: 0.8 }, children: bits.join(' · ') }))
   }
   for (const w of p.windows || []) {
     const usedPct = usedPercentOf(w)

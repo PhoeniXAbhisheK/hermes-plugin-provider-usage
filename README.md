@@ -49,7 +49,7 @@ providers are omitted from the panel entirely.
 | OpenCode Go | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else the `opencode-go` entry of `~/.local/share/opencode/auth.json` (never the Zen key; without a Go plan the card stays hidden) | `https://opencode.ai/zen/go/v1/usage` |
 | OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else `~/.codex/auth.json` | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
-| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json` | `https://api.anthropic.com/api/oauth/usage` |
+| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`; a refused helper read keeps the last reading for up to six hours, marked stale | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | Nous Portal account info (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
