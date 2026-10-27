@@ -20,9 +20,12 @@ Credential sources (read-only):
   re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic: resolved by Hermes' own read-only account-usage helper, falling
-  back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
-  the helper returns nothing (the desktop plugin host). A refused helper read
+- Anthropic: Hermes' account-usage helper unless an explicit profile-scoped
+  Claude config directory is set; then read its OAuth token first from
+  ``CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR`` (preferred), else
+  ``CLAUDE_CONFIG_DIR``. An explicit directory never falls back to another
+  account; without an override, the legacy Hermes helper then
+  ``~/.claude/.credentials.json`` behavior is preserved. A refused helper read
   keeps the last reading for up to six hours, marked stale.
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
@@ -449,8 +452,8 @@ def _hermes_usage(provider):
     return _last_reading(provider, cached)
 
 
-def _claude_code_oauth_token():
-    """Claude Code OAuth access token from ~/.claude/.credentials.json.
+def _claude_code_oauth_token(config_dir=None):
+    """Claude Code OAuth token from the selected config directory or ~/.claude.
 
     The file is written by ``claude login``: claudeAiOauth.accessToken is the
     token the Claude Code client itself sends to api.anthropic.com. Returns
@@ -458,7 +461,8 @@ def _claude_code_oauth_token():
     is never logged, echoed, or stored.
     """
     try:
-        d = json.loads(_read_text(HOME / ".claude" / ".credentials.json"))
+        credentials = Path(config_dir) / ".credentials.json" if config_dir is not None else HOME / ".claude" / ".credentials.json"
+        d = json.loads(_read_text(credentials))
     except (OSError, ValueError):
         return None
     entry = d.get("claudeAiOauth")
@@ -480,10 +484,19 @@ def fetch_anthropic():
     and no Claude Code credentials means the provider is unconfigured and
     stays hidden.
     """
-    payload = _hermes_usage("anthropic")
-    if payload is not None:
-        return payload
-    token = _claude_code_oauth_token()
+    direct_sdk_dir = _secret("CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR")
+    claude_config_dir = _secret("CLAUDE_CONFIG_DIR")
+    explicit_config_dir = direct_sdk_dir or claude_config_dir
+    if explicit_config_dir:
+        # An explicit profile-scoped choice must not silently switch accounts.
+        token = _claude_code_oauth_token(explicit_config_dir)
+        if not token:
+            raise _Skip("anthropic")
+    else:
+        payload = _hermes_usage("anthropic")
+        if payload is not None:
+            return payload
+        token = _claude_code_oauth_token()
     if not token:
         raise _Skip("anthropic")
     d = _http_json(

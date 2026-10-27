@@ -281,6 +281,8 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.creds = self.home / ".claude" / ".credentials.json"
         self._orig_home = API.HOME
         API.HOME = self.home
+        self._orig_secret = API._secret
+        API._secret = lambda *names: None
         self._orig_http = API._http_json
         self._orig_hermes = API._hermes_usage
         self.calls = []
@@ -288,6 +290,7 @@ class AnthropicFetcherTest(unittest.TestCase):
 
     def tearDown(self):
         API.HOME = self._orig_home
+        API._secret = self._orig_secret
         API._http_json = self._orig_http
         API._hermes_usage = self._orig_hermes
         self._tmp.cleanup()
@@ -306,6 +309,37 @@ class AnthropicFetcherTest(unittest.TestCase):
             self.headers_seen.append(dict(headers))
             return body
         API._http_json = fake
+
+    def test_explicit_directsdk_config_dir_precedes_hermes_and_reads_that_account(self):
+        def wrong_account(provider):
+            self.fail("Explicit SDK selection must bypass the generic Hermes account")
+        API._hermes_usage = wrong_account
+        sdk_dir = self.home / "sdk-account"
+        (sdk_dir / ".credentials.json").parent.mkdir(parents=True)
+        (sdk_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "sdk-token"}}))
+        API._secret = lambda *names: str(sdk_dir) if "CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR" in names else None
+        self._mock_http(self.LIVE_BODY)
+        API.fetch_anthropic()
+        self.assertEqual(self.headers_seen[0]["Authorization"], "Bearer sdk-token")
+
+    def test_claude_config_dir_is_supported_when_directsdk_is_unset(self):
+        config_dir = self.home / "claude-config"
+        config_dir.mkdir()
+        (config_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "config-token"}}))
+        API._secret = lambda *names: str(config_dir) if names == ("CLAUDE_CONFIG_DIR",) else None
+        self._no_hermes()
+        self._mock_http(self.LIVE_BODY)
+        API.fetch_anthropic()
+        self.assertEqual(self.headers_seen[0]["Authorization"], "Bearer config-token")
+
+    def test_invalid_explicit_config_never_falls_back_to_home_or_hermes(self):
+        self._no_hermes()
+        self._write_creds({"claudeAiOauth": {"accessToken": "other-account-token"}})
+        missing_dir = self.home / "missing-sdk-config"
+        API._secret = lambda *names: str(missing_dir) if names == ("CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR",) else None
+        with self.assertRaises(API._Skip):
+            API.fetch_anthropic()
+        self.assertEqual(self.calls, [])
 
     def test_hermes_result_takes_precedence(self):
         API._hermes_usage = lambda provider: {"id": provider, "status": "ok", "windows": []}
