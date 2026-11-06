@@ -113,15 +113,20 @@ __init__.py              Agent entry point (inert by design)
 dashboard/manifest.json  Dashboard manifest (mounts the backend router)
 dashboard/plugin_api.py  Backend: fetchers, cache, burn-rate history
 desktop/plugin.js        Desktop: status-bar item, popover, alerts
-tests/                   Stdlib unittest suite for the backend
+tests/                   unittest suite: backend fetchers and package metadata
 ```
 
 ## Development
 
 - `hermes plugins validate .` runs the same admission checks as the catalog CI.
-- `python -m unittest tests.test_provider_usage` runs the backend test suite (stdlib only, run it with the interpreter that serves the dashboard).
+- `python -m unittest discover -s tests -t .` runs the suite. It needs `httpx`
+  and `fastapi`, so run it with the interpreter that serves the dashboard, or
+  with a throwaway venv that has those two packages.
 - The backend served payload is a single JSON object:
-  `{ fetched_at, providers: [{ id, name, tag, status, windows | money }] }`.
+  `{ fetched_at, providers: [{ id, name, tag, status, windows | money }] }`. A
+  provider row can also carry `plan`, `error`, or `stale` with `hold_until` and
+  a snapshot `fetched_at`; rows carry `eta_seconds` and `depletes_in_seconds`
+  when a projection is available.
 
 ## License
 

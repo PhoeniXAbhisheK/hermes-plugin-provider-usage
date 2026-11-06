@@ -1,0 +1,87 @@
+name: CI
+
+# Triggered by pull_request, not pull_request_target, so fork PRs run only after
+# a maintainer approves them and no repository secret is available to PR code.
+# The labeler keeps its own pull_request_target workflow and never checks out
+# PR code there.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUFF_VERSION: "0.17.4"
+
+jobs:
+  tests:
+    name: Backend suite (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check httpx fastapi
+      - name: Run the suite
+        env:
+          # Keep credential lookups away from the runner's real home directory.
+          HOME: ${{ runner.temp }}/home
+        run: |
+          mkdir -p "$HOME"
+          python -m unittest discover --start-directory tests --top-level-directory . --verbose
+
+  lint:
+    name: Lint and hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check "ruff==${RUFF_VERSION}"
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Hygiene scan
+        run: bash .github/scripts/hygiene-scan.sh
+
+  desktop:
+    name: Desktop syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Parse the desktop half as an ES module
+        run: |
+          cp desktop/plugin.js "${RUNNER_TEMP}/plugin.mjs"
+          node --check "${RUNNER_TEMP}/plugin.mjs"
+
+# Not run here: `hermes plugins validate .`. Installing the CLI pulls the whole
+# Hermes runtime (about 120 pinned dependencies), which is too slow and too
+# fragile for every pull request. Keep it as a local pre-release check, as the
+# README development section says.
