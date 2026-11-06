@@ -1,0 +1,9 @@
+{
+  "rate_limit": {
+    "primary_window": {
+      "used_percent": 5.0,
+      "reset_after_seconds": 3600
+    }
+  },
+  "plan_type": "plus"
+}
