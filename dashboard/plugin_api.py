@@ -20,10 +20,12 @@ Credential sources (read-only):
   re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic: resolved by Hermes' own read-only account-usage helper, falling
-  back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
-  the helper returns nothing (the desktop plugin host). A refused helper read
-  keeps the last reading for up to six hours, marked stale.
+- Anthropic: resolved by Hermes' own read-only account-usage helper, then by
+  the same helper for the ``claude-subscription-directsdk-experimental``
+  provider (Nous' DirectSDK plugin asks Claude Code for its plan limits; the
+  token never reaches this plugin), falling back to the Claude Code OAuth
+  token in ``~/.claude/.credentials.json`` when neither answers. A refused
+  helper read keeps the last reading for up to six hours, marked stale.
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
@@ -42,7 +44,9 @@ Endpoints hit (GET, machine credentials attached):
   /v1/token_plan/remains (global): M Plan subscription keys are region-bound
 - https://api.github.com/copilot_internal/user
 
-All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
+All provider HTTPS calls use httpx in-process; this plugin spawns no
+subprocesses. (The DirectSDK provider's own usage hook runs the Claude Code
+CLI behind a zero-inference admission gate; that is the provider's code.)
 
 Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
 while held, the last reading is served marked ``stale`` and the endpoint is not polled.
@@ -470,8 +474,13 @@ def _claude_code_oauth_token():
     return token
 
 
+#: Provider profile registered by Nous' claude-subscription-directsdk plugin.
+DIRECTSDK_PROVIDER = "claude-subscription-directsdk-experimental"
+
+
 def fetch_anthropic():
-    """Anthropic quota windows: Hermes sign-in first, Claude Code fallback.
+    """Anthropic quota windows: Hermes sign-in, then the DirectSDK plugin,
+    then the Claude Code token on disk.
 
     Hermes' account-usage helper can return nothing inside the desktop plugin
     host, which used to hide the card entirely. Claude Code keeps its own
@@ -483,6 +492,12 @@ def fetch_anthropic():
     payload = _hermes_usage("anthropic")
     if payload is not None:
         return payload
+    # Nous' DirectSDK plugin asks Claude Code itself for the plan limits (the
+    # CLI's own login, Keychain included), so it answers where the on-disk
+    # token below is missing or stale.
+    payload = _hermes_usage(DIRECTSDK_PROVIDER)
+    if payload is not None:
+        return dict(payload, id="anthropic")
     token = _claude_code_oauth_token()
     if not token:
         raise _Skip("anthropic")
