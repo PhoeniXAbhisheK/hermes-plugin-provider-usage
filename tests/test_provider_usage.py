@@ -312,6 +312,31 @@ class AnthropicFetcherTest(unittest.TestCase):
         p = API.fetch_anthropic()
         self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
 
+    def _hermes_only(self, answers):
+        asked = []
+        def fake(provider):
+            asked.append(provider)
+            return answers.get(provider)
+        API._hermes_usage = fake
+        return asked
+
+    def test_directsdk_answers_when_hermes_anthropic_does_not(self):
+        window = {"label": "Current session", "percent": 18.0, "resets_at": None, "status": "ok"}
+        asked = self._hermes_only({API.DIRECTSDK_PROVIDER: {
+            "id": API.DIRECTSDK_PROVIDER, "status": "ok", "windows": [window]}})
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http(self.LIVE_BODY)
+        p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
+        self.assertEqual(p["id"], "anthropic")  # card stays the Anthropic card
+        self.assertEqual(p["windows"], [window])
+        self.assertEqual(self.calls, [])  # stale on-disk token never used
+
+    def test_hermes_anthropic_wins_over_directsdk(self):
+        asked = self._hermes_only({"anthropic": {"id": "anthropic", "status": "ok", "windows": []}})
+        API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic"])
+
     def test_oauth_fallback_ratio_windows(self):
         self._no_hermes()
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}})
