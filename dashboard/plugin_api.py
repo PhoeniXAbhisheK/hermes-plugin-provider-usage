@@ -16,8 +16,9 @@ Credential sources (read-only):
   (the OpenCode CLI's store; never the Zen key). A 403 on the usage endpoint
   means the account has no Go plan: the provider stays hidden.
 - OpenAI Codex: Hermes' Codex sign-in via the account-usage helper, falling
-  back to ``~/.codex/auth.json`` (expired token surfaces as unavailable;
-  re-auth in the Codex CLI).
+  back to the OAuth access token in ``~/.codex/auth.json``. The
+  ``OPENAI_API_KEY`` entry in that file is never read (an expired token
+  surfaces as unavailable; re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
 - Anthropic: resolved by Hermes' own read-only account-usage helper, falling
@@ -53,8 +54,11 @@ from __future__ import annotations
 import copy
 import contextvars
 import json
+import logging
+import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -72,6 +76,37 @@ CACHE_FRESH_S = 240.0  # a core snapshot younger than this answers without a hel
 CACHE_STALE_MAX_S = 21600.0  # serve the last reading at most six hours after it was taken
 HELPER_COOLDOWN_S = 300.0  # wait after an empty helper read before trying the helper again
 HOME = Path.home()
+
+# Every host this module can reach, tagged with the role of the caller: "plugin"
+# for a request made here with a provider credential, "helper" for a Hermes core
+# helper that resolves or reads the account server-side. The README provider
+# table is the public copy of this list; tests/test_privacy.py keeps them equal.
+ALLOWED_HOSTS = {
+    "opencode.ai": {"plugin"},
+    "chatgpt.com": {"plugin", "helper"},
+    "openrouter.ai": {"plugin"},
+    "api.anthropic.com": {"plugin", "helper"},
+    "api.deepseek.com": {"plugin"},
+    "api.kimi.com": {"plugin"},
+    "api.moonshot.ai": {"plugin"},
+    "api.moonshot.cn": {"plugin"},
+    "api.z.ai": {"plugin"},
+    "api.minimaxi.com": {"plugin"},
+    "api.minimax.io": {"plugin"},
+    "api.github.com": {"plugin"},
+    "portal.nousresearch.com": {"helper"},
+}
+
+ERROR_MAX_CHARS = 120  # payload error text: one line, no credential, short
+_LOG_DETAIL_MAX = 500  # server-side log detail keeps more context
+_TOKEN_SHAPED = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{8,}"
+    r"|github_pat_[A-Za-z0-9_]{16,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|Bearer\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}"
+    r"|[A-Za-z0-9._~+/=-]{32,})"
+)
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": None}
@@ -92,6 +127,21 @@ class _RateLimited(Exception):
         super().__init__(
             "rate limited until " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
         )
+
+
+class _ProviderError(RuntimeError, ValueError):
+    """A failure that carries provider text worth showing.
+
+    ``_error_message`` sanitizes ``detail`` before it reaches the payload: one
+    line, control characters stripped, capped, and the request's credential plus
+    anything token-shaped replaced. Inherits ValueError as well as RuntimeError
+    because callers have always caught one or the other.
+    """
+
+    def __init__(self, message, secret=None):
+        super().__init__(message)
+        self.detail = str(message)
+        self.secret = secret
 
 
 PROVIDER_META = {
@@ -206,6 +256,74 @@ def _num(value):
         return None
 
 
+def _redact(text, secret=None):
+    """Replace the request's credential and anything token-shaped."""
+    secrets = secret if isinstance(secret, (tuple, list, set)) else (secret,)
+    for value in secrets:
+        if value:
+            text = text.replace(str(value), "[redacted]")
+    return _TOKEN_SHAPED.sub("[redacted]", text)
+
+
+def _clean_error_text(text, secret=None, cap=ERROR_MAX_CHARS):
+    """One line, no invisible characters, no credential, capped.
+
+    Unicode categories Cc (control) and Cf (format) are stripped first, so a
+    zero-width or bidi character hidden inside a key cannot break the redaction
+    match that follows.
+    """
+    text = "".join(ch for ch in str(text) if unicodedata.category(ch) not in ("Cc", "Cf"))
+    text = " ".join(text.split())
+    text = _redact(text, secret)
+    if len(text) > cap:
+        text = text[:cap].rstrip()
+        cut = text.rfind("[")
+        if cut != -1 and "[redacted]".startswith(text[cut:]):
+            text = text[:cut].rstrip()  # never leave half a marker behind
+    return text or "error"
+
+
+def _error_message(exc):
+    """The payload error string: allowlisted provider text, or shape only.
+
+    Anything that is not a curated provider message becomes a shape (``timeout``,
+    ``HTTP 500``), so provider-supplied text cannot reach the UI unless it is one
+    of the fields this module deliberately reads.
+    """
+    if isinstance(exc, _ProviderError):
+        return _clean_error_text(exc.detail, exc.secret)
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "HTTP %d" % exc.response.status_code
+    if isinstance(exc, httpx.RequestError):
+        return "connection failed"
+    if isinstance(exc, (PermissionError, FileNotFoundError)):
+        text = str(exc)
+        if text.startswith("HTTP "):
+            return _clean_error_text(text)  # the fixed messages from _http_json
+        return "permission denied" if isinstance(exc, PermissionError) else "not found"
+    return "unexpected error"
+
+
+def _log_provider_error(pid, exc):
+    """Server-side detail for one failed provider, with credentials redacted.
+
+    Only text whose shape is known gets logged: a curated provider message or an
+    httpx error. A plain exception's message can carry provider or filesystem
+    text, so only its type and the payload shape are recorded.
+    """
+    if isinstance(exc, _ProviderError):
+        detail = _clean_error_text(exc.detail, exc.secret, cap=_LOG_DETAIL_MAX)
+    elif isinstance(exc, httpx.HTTPError):
+        detail = _clean_error_text(str(exc), None, cap=_LOG_DETAIL_MAX)
+    else:
+        detail = _error_message(exc)
+    logging.getLogger(__name__).warning(
+        "provider %s failed (%s): %s", pid, type(exc).__name__, detail
+    )
+
+
 def _decode_json_body(resp):
     """Parse a provider body, refusing non-JSON payloads.
 
@@ -213,13 +331,15 @@ def _decode_json_body(resp):
     plain resp.json() turns that into a bare JSONDecodeError. Report a clear,
     shape-only error instead.
 
-    The response never leaves this function: _collect() turns exceptions into
-    {"error": str(exc)[:160]} and the panel renders that, so a provider that
-    reflects a rejected credential back in its body must not reach the UI.
+    The body itself never leaves this function: the message carries only the
+    status and the byte count, so a provider that reflects a rejected credential
+    in its body cannot reach the UI through this path.
     """
     text = (resp.text or "").lstrip()
     if not text.startswith(("{", "[")):
-        raise ValueError("non-JSON response (HTTP %d, %d bytes)" % (resp.status_code, len(text)))
+        raise _ProviderError(
+            "non-JSON response (HTTP %d, %d bytes)" % (resp.status_code, len(text))
+        )
     return json.loads(text) or {}
 
 
@@ -304,7 +424,9 @@ def fetch_openai_codex():
     tok = None
     try:
         d = json.loads(_read_text(HOME / ".codex/auth.json"))
-        tok = (d.get("tokens") or {}).get("access_token") or d.get("OPENAI_API_KEY")
+        # OAuth access token only: the OPENAI_API_KEY entry is a platform key for
+        # the OpenAI API, never a credential for the ChatGPT backend.
+        tok = (d.get("tokens") or {}).get("access_token")
     except (OSError, ValueError):
         pass
     if not tok:
@@ -690,7 +812,7 @@ def fetch_deepseek():
             }
         )
     if not money:
-        raise RuntimeError("DeepSeek returned no balance rows")
+        raise _ProviderError("DeepSeek returned no balance rows", secret=key)
     return {"id": "deepseek", "status": "ok", "money": money}
 
 
@@ -735,7 +857,10 @@ def _fetch_moonshot_balance(headers):
         if available is None:
             # The host answered and understood the key; a body without a
             # number is a contract break, not a region mismatch.
-            raise RuntimeError("Moonshot balance response carried no available_balance")
+            raise _ProviderError(
+                "Moonshot balance response carried no available_balance",
+                secret=str(headers.get("Authorization") or "").removeprefix("Bearer "),
+            )
         return available
     raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
 
@@ -803,7 +928,7 @@ def fetch_zai():
         {"Authorization": "Bearer " + key, "Accept": "application/json"},
     )
     if not isinstance(payload, dict):
-        raise RuntimeError("Z.AI returned no parseable quota limits")
+        raise _ProviderError("Z.AI returned no parseable quota limits", secret=key)
     # Z.ai wraps the result in a {code, msg, success, data} envelope and the
     # quota limits live under data.limits, so reading them off the top level
     # always found nothing and blanked the card. A bare, unwrapped payload is
@@ -853,19 +978,13 @@ def fetch_zai():
     if not windows:
         message = payload.get("msg") or payload.get("message")
         if isinstance(message, str) and message.strip():
-            raise RuntimeError("Z.AI: %s" % message.strip())
-        raise RuntimeError("Z.AI returned no parseable quota limits")
+            raise _ProviderError("Z.AI: %s" % message.strip(), secret=key)
+        raise _ProviderError("Z.AI returned no parseable quota limits", secret=key)
     return {"id": "zai", "status": "ok", "windows": windows}
 
 
-MINIMAX_CN_URLS = (
-    "https://api.minimaxi.com/v1/token_plan/remains",
-    "https://www.minimax.cn/v1/token_plan/remains",
-)
-MINIMAX_GLOBAL_URLS = (
-    "https://api.minimax.io/v1/token_plan/remains",
-    "https://www.minimax.io/v1/token_plan/remains",
-)
+MINIMAX_CN_URLS = ("https://api.minimaxi.com/v1/token_plan/remains",)
+MINIMAX_GLOBAL_URLS = ("https://api.minimax.io/v1/token_plan/remains",)
 
 
 def _minimax_credentials():
@@ -922,11 +1041,15 @@ def fetch_minimax():
             msg = None
             if isinstance(candidate, dict):
                 msg = (candidate.get("base_resp") or {}).get("status_msg")
-            last_error = RuntimeError(str(msg or "no quota rows"))
+            last_error = _ProviderError(str(msg or "no quota rows"), secret=key)
         if payload is not None:
             break
     if not isinstance(payload, dict):
-        raise RuntimeError("MiniMax quota probe failed: %s" % (last_error or "no endpoint"))
+        detail = _error_message(last_error) if last_error is not None else "no endpoint"
+        raise _ProviderError(
+            "MiniMax quota probe failed: %s" % detail,
+            secret=tuple(key for key, _urls in credentials),
+        )
     windows = []
     for row in payload.get("model_remains") or []:
         if not isinstance(row, dict):
@@ -977,7 +1100,10 @@ def fetch_minimax():
                 }
             )
     if not windows:
-        raise RuntimeError("MiniMax returned no parseable plan rows")
+        raise _ProviderError(
+            "MiniMax returned no parseable plan rows",
+            secret=tuple(key for key, _urls in credentials),
+        )
     return {"id": "minimax", "status": "ok", "windows": windows}
 
 
@@ -1092,7 +1218,8 @@ def _collect():
                 _holds[pid] = exc.reset_at
                 held[pid] = exc.reset_at
             except Exception as exc:  # one provider must never blank the others
-                results[pid] = {"id": pid, "status": "error", "error": str(exc)[:160]}
+                _log_provider_error(pid, exc)
+                results[pid] = {"id": pid, "status": "error", "error": _error_message(exc)}
             else:
                 _holds.pop(pid, None)
                 _last_good[pid] = copy.deepcopy(results[pid])

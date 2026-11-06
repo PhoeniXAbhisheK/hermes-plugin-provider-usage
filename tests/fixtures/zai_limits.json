@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "msg": "ok",
+  "success": true,
+  "data": {
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "usage": 10000,
+        "currentValue": 2500,
+        "percentage": 25
+      }
+    ]
+  }
+}

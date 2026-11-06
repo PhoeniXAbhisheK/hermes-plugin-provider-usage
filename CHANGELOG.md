@@ -7,6 +7,21 @@ repository; the date is the release date.
 
 - Keep the last reading when the Hermes usage helper refuses, instead of
   dropping the provider for one refresh (#20).
+- [behaviour] MiniMax probes only `api.minimaxi.com` and `api.minimax.io`; the
+  two `www` variants are no longer contacted. Affected test:
+  `test_fetchers_only_reach_declared_hosts`.
+- [behaviour] Codex reads only the OAuth access token from `~/.codex/auth.json`.
+  The `OPENAI_API_KEY` entry is never sent to the ChatGPT backend. Affected
+  tests: `test_platform_key_is_never_sent`,
+  `test_credentials_reach_only_their_own_hosts`.
+- [behaviour] Provider error text in the payload is sanitized: one line, control
+  and invisible characters stripped, capped at 120 characters, the request's
+  credential and any token-shaped string redacted, and anything outside a
+  curated message reduced to a shape such as `timeout` or `HTTP 500`. Affected
+  tests: `test_error_payload_has_no_credentials`,
+  `test_error_rows_are_single_line_and_capped`.
+- A failed provider is logged server-side with the credential redacted, so the
+  shape shown in the panel stays diagnosable.
 
 ## 0.3.1 (2026-10-23)
 

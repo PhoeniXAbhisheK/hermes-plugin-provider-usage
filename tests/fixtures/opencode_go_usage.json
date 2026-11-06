@@ -1,0 +1,9 @@
+{
+  "usage": {
+    "rolling": {
+      "percent": 12.0,
+      "resetsAt": "2026-11-07T05:00:00Z",
+      "status": "ok"
+    }
+  }
+}

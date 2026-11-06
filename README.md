@@ -47,13 +47,13 @@ providers are omitted from the panel entirely.
 | Provider | Credential (read-only) | Endpoint |
 |---|---|---|
 | OpenCode Go | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else the `opencode-go` entry of `~/.local/share/opencode/auth.json` (never the Zen key; without a Go plan the card stays hidden) | `https://opencode.ai/zen/go/v1/usage` |
-| OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else `~/.codex/auth.json` | `https://chatgpt.com/backend-api/wham/usage` |
+| OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else the OAuth access token in `~/.codex/auth.json`; the `OPENAI_API_KEY` entry in that file is never used | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
 | Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`; a refused helper read keeps the last reading for up to six hours, marked stale | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
-| Nous | Hermes' Nous Portal sign-in | Nous Portal account info (subscription windows, else the credit balance as money rows) |
+| Nous | Hermes' Nous Portal sign-in | `https://portal.nousresearch.com/api/oauth/account` (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
-| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance: `api.moonshot.ai` first, then `api.moonshot.cn`) |
+| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance at `https://api.moonshot.ai/v1/users/me/balance`, then `https://api.moonshot.cn/v1/users/me/balance`) |
 | MiniMax | `MINIMAX_CN_API_KEY` (mainland) or `MINIMAX_API_KEY` (global); the CN key is tried first and both are probed when both are set, since M Plan subscription keys are region-bound | `https://api.minimaxi.com/v1/token_plan/remains` for mainland, `https://api.minimax.io/v1/token_plan/remains` for global |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
 
@@ -68,6 +68,12 @@ OpenCode Zen (the metered API) is not tracked yet; this card covers the Go subsc
   including Hermes' normal credential upkeep).
 - **No subprocesses.** Every provider call is an in-process `httpx` request;
   nothing is shelled out, and no helper process ever sees a credential.
+- **Sanitized error text.** A provider failure shown in the panel is short and
+  single line. The only provider text used is a Z.AI `msg` or a MiniMax
+  `status_msg`; it is capped at 120 characters, and the request's credential and
+  any token-shaped string are redacted. Every other failure shows a shape such
+  as `timeout` or `HTTP 500`; the raw detail goes to the backend log with the
+  credential redacted.
 - **Client identity disclosure.** The GitHub Copilot check queries GitHub's
   internal Copilot usage endpoint presenting the VS Code / Copilot client
   identity (`Editor-Version`, `User-Agent`), the same identity the Copilot
