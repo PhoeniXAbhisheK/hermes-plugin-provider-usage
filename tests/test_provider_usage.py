@@ -1,4 +1,5 @@
 """Loader + unit tests for dashboard/plugin_api.py (stdlib unittest only)."""
+
 import importlib.util
 import json
 import sys
@@ -6,6 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
 
 def load_api():
     # dash in the folder name makes a normal import impossible; load by path.
@@ -17,6 +19,7 @@ def load_api():
     spec.loader.exec_module(mod)
     return mod
 
+
 API = load_api()
 
 
@@ -25,6 +28,7 @@ class HttpJsonGuardTest(unittest.TestCase):
         def __init__(self, status, text):
             self.status_code = status
             self.text = text
+
         def raise_for_status(self):
             if self.status_code >= 400:
                 raise RuntimeError("HTTP %d" % self.status_code)
@@ -40,7 +44,9 @@ class HttpJsonGuardTest(unittest.TestCase):
             API._decode_json_body(HttpJsonGuardTest.FakeResp(200, "<html>login</html>"))
 
     def test_json_object_parses(self):
-        self.assertEqual(API._decode_json_body(HttpJsonGuardTest.FakeResp(200, '{"a":1}')), {"a": 1})
+        self.assertEqual(
+            API._decode_json_body(HttpJsonGuardTest.FakeResp(200, '{"a":1}')), {"a": 1}
+        )
 
     def test_error_never_echoes_response_body(self):
         # _collect() turns exceptions into {"error": str(exc)[:160]} and the
@@ -64,12 +70,20 @@ class HttpJsonGuardTest(unittest.TestCase):
         # Go entitlement errors come back 403; fetchers must be able to
         # distinguish them from generic failures. Monkeypatch the client.
         import httpx
+
         class FakeClient:
-            def __init__(self, **kw): pass
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
+            def __init__(self, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
             def get(self, url, headers=None):
                 return httpx.Response(403, request=httpx.Request("GET", url))
+
         orig = httpx.Client
         httpx.Client = FakeClient
         try:
@@ -90,6 +104,7 @@ class GoFetcherTest(unittest.TestCase):
     def setUp(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
         (self.home / ".local" / "share" / "opencode").mkdir(parents=True)
@@ -120,8 +135,10 @@ class GoFetcherTest(unittest.TestCase):
 
     def test_403_entitlement_hides_silently(self):
         self._write_auth({"opencode-go": {"type": "api", "key": "go-key"}})
+
         def boom(url, headers, **kw):
             raise PermissionError("HTTP 403: credential rejected or entitlement missing")
+
         API._http_json = boom
         with self.assertRaises(API._Skip):
             API.fetch_opencode_go()
@@ -136,7 +153,9 @@ class GoFetcherTest(unittest.TestCase):
     def test_ok_windows_payload(self):
         self._write_auth({"opencode-go": {"type": "api", "key": "go-key"}})
         API._http_json = lambda url, headers, **kw: {
-            "usage": {"rolling": {"percent": 12.5, "resetsAt": "2026-10-01T12:00:00Z", "status": "ok"}}
+            "usage": {
+                "rolling": {"percent": 12.5, "resetsAt": "2026-10-01T12:00:00Z", "status": "ok"}
+            }
         }
         p = API.fetch_opencode_go()
         self.assertEqual(p["id"], "opencode-go")
@@ -153,9 +172,12 @@ class KimiFetcherTest(unittest.TestCase):
     """fetch_kimi() with mocked endpoints (unit tests never hit the network
     and never carry a real credential)."""
 
-    BALANCE_AI = {"code": 0, "scode": "0x0", "status": True,
-                  "data": {"available_balance": 18.02331,
-                           "voucher_balance": 0, "cash_balance": 18.02331}}
+    BALANCE_AI = {
+        "code": 0,
+        "scode": "0x0",
+        "status": True,
+        "data": {"available_balance": 18.02331, "voucher_balance": 0, "cash_balance": 18.02331},
+    }
 
     def setUp(self):
         self._orig_secret = API._secret
@@ -177,6 +199,7 @@ class KimiFetcherTest(unittest.TestCase):
             if isinstance(handler, Exception):
                 raise handler
             return handler
+
         API._http_json = fake
 
     def _key(self, value="fake-key"):
@@ -184,9 +207,11 @@ class KimiFetcherTest(unittest.TestCase):
 
     def test_reads_both_env_var_names(self):
         seen = []
+
         def fake_secret(*names):
             seen.append(names)
             return None
+
         API._secret = fake_secret
         with self.assertRaises(API._Skip):
             API.fetch_kimi()
@@ -209,37 +234,50 @@ class KimiFetcherTest(unittest.TestCase):
         self.assertEqual(p["id"], "kimi-coding")
         row = p["money"][0]
         self.assertEqual(row["label"], "Balance")
-        self.assertEqual(row["left"], 18.02)   # nested data.available_balance, rounded
+        self.assertEqual(row["left"], 18.02)  # nested data.available_balance, rounded
         self.assertEqual(row["cur"], "CNY")
 
     def test_falls_back_to_cn_region_when_ai_rejects_key(self):
         self._key()
         cn = {"code": 0, "data": {"available_balance": 42.5}}
-        self._routes({CODING_URL: PermissionError("HTTP 401"),
-                      AI_URL: PermissionError("HTTP 401: Invalid Authentication"),
-                      CN_URL: cn})
+        self._routes(
+            {
+                CODING_URL: PermissionError("HTTP 401"),
+                AI_URL: PermissionError("HTTP 401: Invalid Authentication"),
+                CN_URL: cn,
+            }
+        )
         p = API.fetch_kimi()
         self.assertEqual(self.calls, [CODING_URL, AI_URL, CN_URL])
         self.assertEqual(p["money"][0]["left"], 42.5)
 
     def test_both_regions_failing_surfaces_the_error(self):
         self._key()
-        self._routes({CODING_URL: PermissionError("HTTP 401"),
-                      AI_URL: PermissionError("HTTP 401"),
-                      CN_URL: PermissionError("HTTP 401")})
+        self._routes(
+            {
+                CODING_URL: PermissionError("HTTP 401"),
+                AI_URL: PermissionError("HTTP 401"),
+                CN_URL: PermissionError("HTTP 401"),
+            }
+        )
         with self.assertRaises(PermissionError):
             API.fetch_kimi()
 
     def test_legacy_flat_available_still_parses(self):
         self._key()
-        self._routes({CODING_URL: PermissionError("HTTP 401"),
-                      AI_URL: {"available": 5.0}})
+        self._routes({CODING_URL: PermissionError("HTTP 401"), AI_URL: {"available": 5.0}})
         p = API.fetch_kimi()
         self.assertEqual(p["money"][0]["left"], 5.0)
 
     def test_coding_windows_take_precedence_over_balance(self):
         self._key()
-        self._routes({CODING_URL: {"usage": {"used": 1.0, "limit": 4.0, "resetTime": "2026-10-05T00:00:00Z"}}})
+        self._routes(
+            {
+                CODING_URL: {
+                    "usage": {"used": 1.0, "limit": 4.0, "resetTime": "2026-10-05T00:00:00Z"}
+                }
+            }
+        )
         p = API.fetch_kimi()
         self.assertEqual(self.calls, [CODING_URL])
         self.assertEqual(p["windows"][0]["percent"], 25.0)
@@ -247,9 +285,13 @@ class KimiFetcherTest(unittest.TestCase):
 
     def test_balance_body_without_number_raises(self):
         self._key()
-        self._routes({CODING_URL: PermissionError("HTTP 401"),
-                      AI_URL: {"code": 0, "data": {"voucher_balance": 0}},
-                      CN_URL: {"code": 0, "data": {"voucher_balance": 0}}})
+        self._routes(
+            {
+                CODING_URL: PermissionError("HTTP 401"),
+                AI_URL: {"code": 0, "data": {"voucher_balance": 0}},
+                CN_URL: {"code": 0, "data": {"voucher_balance": 0}},
+            }
+        )
         with self.assertRaises(RuntimeError):
             API.fetch_kimi()
 
@@ -276,6 +318,7 @@ class AnthropicFetcherTest(unittest.TestCase):
 
     def setUp(self):
         import tempfile
+
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
         self.creds = self.home / ".claude" / ".credentials.json"
@@ -305,16 +348,19 @@ class AnthropicFetcherTest(unittest.TestCase):
             self.calls.append(url)
             self.headers_seen.append(dict(headers))
             return body
+
         API._http_json = fake
 
     def test_hermes_result_takes_precedence(self):
         API._hermes_usage = lambda provider: {"id": provider, "status": "ok", "windows": []}
-        p = API.fetch_anthropic()
+        API.fetch_anthropic()
         self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
 
     def test_oauth_fallback_ratio_windows(self):
         self._no_hermes()
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}})
+        self._write_creds(
+            {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}}
+        )
         self._mock_http(self.LIVE_BODY)
         p = API.fetch_anthropic()
         self.assertEqual(p["id"], "anthropic")
@@ -386,6 +432,7 @@ class EnvEncodingTest(unittest.TestCase):
 
     def _point_home(self, home):
         import types
+
         hc = types.ModuleType("hermes_constants")
         hc.get_hermes_home = lambda: home
         sys.modules["hermes_constants"] = hc
@@ -397,6 +444,7 @@ class EnvEncodingTest(unittest.TestCase):
         # (verbatim the Windows failure: no encoding kwarg -> UnicodeDecodeError).
         import pathlib
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
             (home / ".env").write_text(
@@ -418,6 +466,7 @@ class EnvEncodingTest(unittest.TestCase):
     def test_env_read_tolerates_undecodable_bytes(self):
         import pathlib
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
             (home / ".env").write_bytes(b"# \x94 broken comment\nZAI_API_KEY=zz\n")
@@ -433,6 +482,7 @@ class ContextPropagationTest(unittest.TestCase):
 
     def test_collect_copies_context_into_workers(self):
         import contextvars
+
         marker = contextvars.ContextVar("provider_usage_test_marker", default="unset")
         seen = {}
 
@@ -449,13 +499,13 @@ class ContextPropagationTest(unittest.TestCase):
         self.addCleanup(lambda: marker.reset(token))
 
         out = API._collect()
-        self.assertEqual(seen.get("marker"), "visible",
-                         "collect worker lost the caller's context")
+        self.assertEqual(seen.get("marker"), "visible", "collect worker lost the caller's context")
         self.assertEqual([p["id"] for p in out["providers"]], ["deepseek"])
 
     def test_nous_pool_copies_context_into_workers(self):
         import contextvars
         import types
+
         marker = contextvars.ContextVar("provider_usage_test_marker_nous", default="unset")
         seen = {}
 
@@ -497,10 +547,12 @@ class ContextPropagationTest(unittest.TestCase):
         self.addCleanup(lambda: marker.reset(token))
 
         p = API.fetch_nous()
-        self.assertEqual(seen.get("marker"), "visible",
-                         "nous pool worker lost the caller's context")
+        self.assertEqual(
+            seen.get("marker"), "visible", "nous pool worker lost the caller's context"
+        )
         self.assertEqual(p["id"], "nous")
         self.assertEqual(p["windows"][0]["percent"], 12.5)
+
 
 class _FakeAccess:
     """Stands in for hermes_cli.nous_account's paid-service access info."""
@@ -539,6 +591,7 @@ class NousFetcherTest(unittest.TestCase):
 
     def _install(self, snap, info=None):
         import types
+
         agent = types.ModuleType("agent")
         acct = types.ModuleType("agent.account_usage")
         setattr(acct, "build_nous_credits_snapshot", lambda _info=None: snap)
@@ -555,12 +608,17 @@ class NousFetcherTest(unittest.TestCase):
         ):
             sys.modules[name] = mod
         self.addCleanup(
-            lambda: [sys.modules.pop(k, None) for k in
-                     ("agent", "agent.account_usage", "hermes_cli", "hermes_cli.nous_account")]
+            lambda: [
+                sys.modules.pop(k, None)
+                for k in ("agent", "agent.account_usage", "hermes_cli", "hermes_cli.nous_account")
+            ]
         )
 
     def test_topup_credits_become_money_rows(self):
-        self._install(_FakeSnap(windows=()), _FakeInfo(_FakeAccess(total=7.92, purchased=7.92, subscription=0.0)))
+        self._install(
+            _FakeSnap(windows=()),
+            _FakeInfo(_FakeAccess(total=7.92, purchased=7.92, subscription=0.0)),
+        )
         p = API.fetch_nous()
         self.assertEqual(p["status"], "ok")
         self.assertNotIn("windows", p)
@@ -569,13 +627,17 @@ class NousFetcherTest(unittest.TestCase):
         self.assertEqual(len(p["money"]), 1)
 
     def test_subscription_and_topup_split(self):
-        self._install(_FakeSnap(windows=()), _FakeInfo(_FakeAccess(total=9.5, purchased=4.5, subscription=5.0)))
+        self._install(
+            _FakeSnap(windows=()),
+            _FakeInfo(_FakeAccess(total=9.5, purchased=4.5, subscription=5.0)),
+        )
         labels = [m["label"] for m in API.fetch_nous()["money"]]
         self.assertEqual(labels, ["Balance", "Top-up credits", "Subscription credits"])
 
     def test_subscription_window_still_wins(self):
-        self._install(_FakeSnap(windows=(_FakeWindow("Weekly", 42.0),)),
-                      _FakeInfo(_FakeAccess(total=7.9)))
+        self._install(
+            _FakeSnap(windows=(_FakeWindow("Weekly", 42.0),)), _FakeInfo(_FakeAccess(total=7.9))
+        )
         p = API.fetch_nous()
         self.assertEqual(p["windows"][0]["percent"], 42.0)
         self.assertNotIn("money", p)
@@ -604,6 +666,7 @@ class RateLimitTest(unittest.TestCase):
 
     def _client(self, status, extra_headers=None):
         import httpx
+
         captured = dict(extra_headers or {})
 
         class FakeClient:
@@ -623,6 +686,7 @@ class RateLimitTest(unittest.TestCase):
 
     def _limited_wait(self, headers):
         import httpx
+
         orig = httpx.Client
         httpx.Client = self._client(429, headers)
         try:
@@ -662,7 +726,9 @@ class RateLimitTest(unittest.TestCase):
         API.FETCH_ORDER = ("anthropic",)
         API.FETCHERS = dict(API.FETCHERS, anthropic=boom)
         API._holds = {"anthropic": API.time.time() + 600}
-        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        API._last_good = {
+            "anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+        }
         p = API._collect()["providers"][0]
         self.assertEqual(calls, [])
         self.assertTrue(p.get("stale"))
@@ -689,7 +755,9 @@ class RateLimitTest(unittest.TestCase):
         API.FETCH_ORDER = ("anthropic",)
         API.FETCHERS = dict(API.FETCHERS, anthropic=limited)
         API._holds = {}
-        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        API._last_good = {
+            "anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+        }
         p = API._collect()["providers"][0]
         self.assertTrue(p.get("stale"))
         self.assertGreater(API._holds.get("anthropic", 0), API.time.time() + 800)
@@ -732,19 +800,20 @@ class RateLimitTest(unittest.TestCase):
         orig = API._record
         API._record = lambda *a, **k: recs.append(a)
         try:
+
             def boom():
                 raise AssertionError("fetcher ran while held")
 
             API.FETCH_ORDER = ("anthropic",)
             API.FETCHERS = dict(API.FETCHERS, anthropic=boom)
             API._holds = {"anthropic": API.time.time() + 600}
-            API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+            API._last_good = {
+                "anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+            }
             API._collect()
         finally:
             API._record = orig
         self.assertEqual(recs, [])
-
-
 
     def test_retry_after_malformed_falls_back(self):
         wait = self._limited_wait({"retry-after": "soon"})
@@ -784,7 +853,9 @@ class RateLimitTest(unittest.TestCase):
         API.FETCH_ORDER = ("anthropic",)
         API.FETCHERS = dict(API.FETCHERS, anthropic=skipped)
         API._holds = {"anthropic": API.time.time() - 10}
-        API._last_good = {"anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}}
+        API._last_good = {
+            "anthropic": {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
+        }
         out = API._collect()
         self.assertEqual(out["providers"], [])
         self.assertNotIn("anthropic", API._holds)
@@ -795,6 +866,7 @@ class RateLimitTest(unittest.TestCase):
         orig = API._record
         API._record = lambda *a, **k: recs.append(a)
         try:
+
             def good():
                 return {"id": "anthropic", "status": "ok", "windows": [dict(self.WINDOWS[0])]}
 
@@ -841,14 +913,33 @@ class ZaiFetcherTest(unittest.TestCase):
     # The coding plan reports a rolling 5h credit window (unit 3) and a weekly
     # cap (unit 6); only the weekly one carries nextResetTime.
     ENVELOPE = {
-        "code": 200, "msg": "ok", "success": True,
-        "data": {"level": "standard", "limits": [
-            {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000,
-             "currentValue": 0, "remaining": 2000, "percentage": 0},
-            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000,
-             "currentValue": 1612, "remaining": 8387, "percentage": 16,
-             "nextResetTime": 1793145034982},
-        ]},
+        "code": 200,
+        "msg": "ok",
+        "success": True,
+        "data": {
+            "level": "standard",
+            "limits": [
+                {
+                    "type": "CREDIT_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "usage": 2000,
+                    "currentValue": 0,
+                    "remaining": 2000,
+                    "percentage": 0,
+                },
+                {
+                    "type": "CREDIT_LIMIT",
+                    "unit": 6,
+                    "number": 1,
+                    "usage": 10000,
+                    "currentValue": 1612,
+                    "remaining": 8387,
+                    "percentage": 16,
+                    "nextResetTime": 1793145034982,
+                },
+            ],
+        },
     }
 
     def setUp(self):
@@ -882,23 +973,34 @@ class ZaiFetcherTest(unittest.TestCase):
         self.assertEqual(len(p["windows"]), 2)
 
     def test_token_and_tool_windows_keep_their_labels(self):
-        API._http_json = lambda url, headers, **kw: {"data": {"limits": [
-            {"type": "TOKENS_LIMIT", "percentage": 12},
-            {"type": "TIME_LIMIT", "percentage": 3},
-        ]}}
+        API._http_json = lambda url, headers, **kw: {
+            "data": {
+                "limits": [
+                    {"type": "TOKENS_LIMIT", "percentage": 12},
+                    {"type": "TIME_LIMIT", "percentage": 3},
+                ]
+            }
+        }
         p = API.fetch_zai()
         self.assertEqual([w["label"] for w in p["windows"]], ["Session (5h)", "Tool quota"])
 
     def test_usage_over_total_is_a_percent_fallback(self):
-        API._http_json = lambda url, headers, **kw: {"data": {"limits": [
-            {"type": "CREDIT_LIMIT", "unit": 6, "usage": 10000, "currentValue": 2500},
-        ]}}
+        API._http_json = lambda url, headers, **kw: {
+            "data": {
+                "limits": [
+                    {"type": "CREDIT_LIMIT", "unit": 6, "usage": 10000, "currentValue": 2500},
+                ]
+            }
+        }
         p = API.fetch_zai()
         self.assertEqual(p["windows"][0]["percent"], 25.0)
 
     def test_envelope_error_message_is_surfaced(self):
         API._http_json = lambda url, headers, **kw: {
-            "code": 401, "msg": "invalid token", "success": False, "data": {},
+            "code": 401,
+            "msg": "invalid token",
+            "success": False,
+            "data": {},
         }
         with self.assertRaises(RuntimeError) as cm:
             API.fetch_zai()
@@ -911,17 +1013,25 @@ class MinimaxFetcherTest(unittest.TestCase):
     # Mainland M Plan answer: one aggregate "general" row, the count fields are
     # always 0 and the meter lives in the remaining-percent fields.
     M_PLAN = {
-        "model_remains": [{
-            "start_time": 1792739203914, "end_time": 1792757203914,
-            "remains_time": 17999994,
-            "current_interval_total_count": 0, "current_interval_usage_count": 0,
-            "model_name": "general",
-            "current_weekly_total_count": 0, "current_weekly_usage_count": 0,
-            "weekly_start_time": 1792739203914, "weekly_end_time": 1793344003914,
-            "weekly_remains_time": 604799994,
-            "current_interval_status": 1, "current_interval_remaining_percent": 99,
-            "current_weekly_status": 1, "current_weekly_remaining_percent": 84,
-        }],
+        "model_remains": [
+            {
+                "start_time": 1792739203914,
+                "end_time": 1792757203914,
+                "remains_time": 17999994,
+                "current_interval_total_count": 0,
+                "current_interval_usage_count": 0,
+                "model_name": "general",
+                "current_weekly_total_count": 0,
+                "current_weekly_usage_count": 0,
+                "weekly_start_time": 1792739203914,
+                "weekly_end_time": 1793344003914,
+                "weekly_remains_time": 604799994,
+                "current_interval_status": 1,
+                "current_interval_remaining_percent": 99,
+                "current_weekly_status": 1,
+                "current_weekly_remaining_percent": 84,
+            }
+        ],
         "base_resp": {"status_code": 0, "status_msg": "success"},
     }
 
@@ -934,9 +1044,11 @@ class MinimaxFetcherTest(unittest.TestCase):
 
     def _serve(self, *answers):
         """Answer each request from ``answers`` in order, repeating the last."""
+
         def fake(url, headers, **kw):
             self.urls.append(url)
             return answers[min(len(self.urls) - 1, len(answers) - 1)]
+
         API._http_json = fake
 
     def test_no_key_skips(self):
@@ -972,8 +1084,9 @@ class MinimaxFetcherTest(unittest.TestCase):
         # A reachable host serving the other region answers 200 + base_resp error
         # and no rows; that must not end the probe.
         API._secret = lambda *names: "cn-key"
-        self._serve({"base_resp": {"status_code": 2049, "status_msg": "invalid api key"}},
-                    self.M_PLAN)
+        self._serve(
+            {"base_resp": {"status_code": 2049, "status_msg": "invalid api key"}}, self.M_PLAN
+        )
         p = API.fetch_minimax()
         self.assertEqual(len(p["windows"]), 2)
         self.assertEqual(len(self.urls), 2)
@@ -984,11 +1097,18 @@ class MinimaxFetcherTest(unittest.TestCase):
         # must be read from the meter: 1000 total with 800 left is 20% used,
         # not the 80% the count branch would claim.
         API._secret = lambda *names: "cn-key"
-        self._serve({"model_remains": [{
-            "model_name": "general",
-            "current_interval_total_count": 1000, "current_interval_usage_count": 800,
-            "current_interval_remaining_percent": 80,
-        }]})
+        self._serve(
+            {
+                "model_remains": [
+                    {
+                        "model_name": "general",
+                        "current_interval_total_count": 1000,
+                        "current_interval_usage_count": 800,
+                        "current_interval_remaining_percent": 80,
+                    }
+                ]
+            }
+        )
         p = API.fetch_minimax()
         self.assertEqual(p["windows"][0]["percent"], 20.0)
 
@@ -996,15 +1116,31 @@ class MinimaxFetcherTest(unittest.TestCase):
         # Payloads without a percent field keep their legacy counts: usage over
         # total is the consumed share.
         API._secret = lambda *names: "gl-key"
-        self._serve({"model_remains": [{
-            "model_name": "MiniMax-M2",
-            "current_interval_total_count": 100, "current_interval_usage_count": 25,
-            "current_weekly_total_count": 0, "current_weekly_usage_count": 0,
-        }]})
+        self._serve(
+            {
+                "model_remains": [
+                    {
+                        "model_name": "MiniMax-M2",
+                        "current_interval_total_count": 100,
+                        "current_interval_usage_count": 25,
+                        "current_weekly_total_count": 0,
+                        "current_weekly_usage_count": 0,
+                    }
+                ]
+            }
+        )
         p = API.fetch_minimax()
-        self.assertEqual(p["windows"], [{
-            "label": "MiniMax-M2 · 5h", "percent": 25.0, "resets_at": None, "status": "ok",
-        }])
+        self.assertEqual(
+            p["windows"],
+            [
+                {
+                    "label": "MiniMax-M2 · 5h",
+                    "percent": 25.0,
+                    "resets_at": None,
+                    "status": "ok",
+                }
+            ],
+        )
 
     def test_both_keys_are_probed_when_both_are_set(self):
         # The CN key is tried first, but a rejection must not hide the global

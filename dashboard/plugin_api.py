@@ -47,6 +47,7 @@ All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
 Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
 while held, the last reading is served marked ``stale`` and the endpoint is not polled.
 """
+
 from __future__ import annotations
 
 import copy
@@ -74,7 +75,7 @@ HOME = Path.home()
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": None}
-_holds = {}      # provider id -> epoch when a 429 hold expires
+_holds = {}  # provider id -> epoch when a 429 hold expires
 _last_good = {}  # provider id -> last ok payload (served while held)
 _helper_cooldown = {}  # provider id -> epoch when the account-usage helper may be tried again
 
@@ -89,9 +90,9 @@ class _RateLimited(Exception):
     def __init__(self, reset_at):
         self.reset_at = float(reset_at)
         super().__init__(
-            "rate limited until "
-            + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
+            "rate limited until " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
         )
+
 
 PROVIDER_META = {
     "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
@@ -136,6 +137,7 @@ def _hermes_env_value(name):
     """Read-only fallback: the profile's own .env (never os.environ)."""
     try:
         from hermes_constants import get_hermes_home
+
         env_path = get_hermes_home() / ".env"
     except Exception:
         env_path = Path.home() / ".hermes" / ".env"
@@ -154,6 +156,7 @@ def _secret(*names):
     for name in names:
         try:
             from agent.secret_scope import get_secret
+
             value = get_secret(name)
             if value:
                 return value
@@ -216,10 +219,7 @@ def _decode_json_body(resp):
     """
     text = (resp.text or "").lstrip()
     if not text.startswith(("{", "[")):
-        raise ValueError(
-            "non-JSON response (HTTP %d, %d bytes)"
-            % (resp.status_code, len(text))
-        )
+        raise ValueError("non-JSON response (HTTP %d, %d bytes)" % (resp.status_code, len(text)))
     return json.loads(text) or {}
 
 
@@ -229,7 +229,9 @@ def _http_json(url, headers, *, timeout=12.0):
         if resp.status_code in (401, 403):
             # 403 covers both a rejected credential and a missing plan
             # entitlement (e.g. OpenCode Go without a subscription).
-            raise PermissionError("HTTP %d: credential rejected or entitlement missing" % resp.status_code)
+            raise PermissionError(
+                "HTTP %d: credential rejected or entitlement missing" % resp.status_code
+            )
         if resp.status_code == 404:
             raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
         if resp.status_code == 429:
@@ -274,12 +276,14 @@ def fetch_opencode_go():
         percent = _num(w.get("percent"))
         if percent is None:
             continue  # missing metric: never render a fabricated 0% bar
-        windows.append({
-            "label": label,
-            "percent": percent,
-            "resets_at": w.get("resetsAt"),
-            "status": w.get("status", "ok"),
-        })
+        windows.append(
+            {
+                "label": label,
+                "percent": percent,
+                "resets_at": w.get("resetsAt"),
+                "status": w.get("status", "ok"),
+            }
+        )
     if not windows:
         raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
@@ -305,7 +309,10 @@ def fetch_openai_codex():
         pass
     if not tok:
         raise _Skip("openai-codex")
-    d = _http_json("https://chatgpt.com/backend-api/wham/usage", {"Authorization": "Bearer " + tok, "Accept": "application/json"})
+    d = _http_json(
+        "https://chatgpt.com/backend-api/wham/usage",
+        {"Authorization": "Bearer " + tok, "Accept": "application/json"},
+    )
     rl = d.get("rate_limit") or {}
     now = time.time()
     windows = []
@@ -316,12 +323,14 @@ def fetch_openai_codex():
         resets_at = None
         if isinstance(ra, (int, float)):
             resets_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + ra))
-        windows.append({
-            "label": label,
-            "percent": w.get("used_percent"),
-            "resets_at": resets_at,
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": label,
+                "percent": w.get("used_percent"),
+                "resets_at": resets_at,
+                "status": "ok",
+            }
+        )
     plan = (d.get("plan_type") or "").strip()
     return {"id": "openai-codex", "status": "ok", "plan": plan or None, "windows": windows}
 
@@ -331,15 +340,29 @@ def fetch_openrouter():
     if not key:
         raise _Skip("openrouter")
     hdr = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-    k = (_http_json("https://openrouter.ai/api/v1/key", hdr).get("data") or {})
-    c = (_http_json("https://openrouter.ai/api/v1/credits", hdr).get("data") or {})
+    k = _http_json("https://openrouter.ai/api/v1/key", hdr).get("data") or {}
+    c = _http_json("https://openrouter.ai/api/v1/credits", hdr).get("data") or {}
     money = []
     total, used = c.get("total_credits"), c.get("total_usage")
     if isinstance(total, (int, float)) and isinstance(used, (int, float)):
-        money.append({"label": "Balance", "left": round(total - used, 2), "total": round(total, 2), "cur": "USD"})
+        money.append(
+            {
+                "label": "Balance",
+                "left": round(total - used, 2),
+                "total": round(total, 2),
+                "cur": "USD",
+            }
+        )
     limit, cap_used = k.get("limit"), k.get("usage")
     if isinstance(limit, (int, float)) and isinstance(cap_used, (int, float)):
-        money.append({"label": "Key cap", "left": round(limit - cap_used, 2), "total": round(limit, 2), "cur": "USD"})
+        money.append(
+            {
+                "label": "Key cap",
+                "left": round(limit - cap_used, 2),
+                "total": round(limit, 2),
+                "cur": "USD",
+            }
+        )
     return {"id": "openrouter", "status": "ok", "money": money}
 
 
@@ -373,7 +396,9 @@ def _snapshot_age(snap):
     try:
         if fetched.tzinfo is None:
             fetched = fetched.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds())
+        return max(
+            0.0, (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds()
+        )
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -387,12 +412,14 @@ def _snap_payload(provider, snap):
         used = getattr(w, "used_percent", None)
         if not isinstance(used, (int, float)):
             continue
-        windows.append({
-            "label": str(getattr(w, "label", None) or "Window"),
-            "percent": round(float(used), 1),
-            "resets_at": _iso_dt(getattr(w, "reset_at", None)),
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": str(getattr(w, "label", None) or "Window"),
+                "percent": round(float(used), 1),
+                "resets_at": _iso_dt(getattr(w, "reset_at", None)),
+                "status": "ok",
+            }
+        )
     if not windows:
         return None
     return {"id": provider, "status": "ok", "windows": windows}
@@ -503,12 +530,14 @@ def fetch_anthropic():
         if percent is None:
             continue  # missing metric: skip the row, never a fabricated 0%
         resets = w.get("resets_at")
-        windows.append({
-            "label": label,
-            "percent": round(max(0.0, min(100.0, percent)), 1),
-            "resets_at": resets if isinstance(resets, str) else None,
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": label,
+                "percent": round(max(0.0, min(100.0, percent)), 1),
+                "resets_at": resets if isinstance(resets, str) else None,
+                "status": "ok",
+            }
+        )
     if not windows:
         raise _Skip("anthropic")
     return {"id": "anthropic", "status": "ok", "windows": windows}
@@ -531,7 +560,11 @@ def _nous_credit_rows(info):
     rows = []
     if total is not None:
         rows.append({"label": "Balance", "left": round(total, 2), "cur": "USD"})
-    if purchased is not None and purchased > 0 and (total is None or abs(purchased - total) > 0.005):
+    if (
+        purchased is not None
+        and purchased > 0
+        and (total is None or abs(purchased - total) > 0.005)
+    ):
         rows.append({"label": "Top-up credits", "left": round(purchased, 2), "cur": "USD"})
     if subscription is not None and subscription > 0:
         rows.append({"label": "Subscription credits", "left": round(subscription, 2), "cur": "USD"})
@@ -547,7 +580,9 @@ def fetch_nous():
     with ThreadPoolExecutor(max_workers=1) as pool:
         # Same context copy as _collect(): this nested pool must not drop the
         # caller's profile scope either.
-        info = pool.submit(contextvars.copy_context().run, get_nous_portal_account_info, force_fresh=True).result(timeout=10.0)
+        info = pool.submit(
+            contextvars.copy_context().run, get_nous_portal_account_info, force_fresh=True
+        ).result(timeout=10.0)
     snap = build_nous_credits_snapshot(info)
     if snap is None or not snap.available:
         raise _Skip("nous")
@@ -556,12 +591,14 @@ def fetch_nous():
         used = w.used_percent
         if not isinstance(used, (int, float)):
             continue
-        windows.append({
-            "label": str(w.label or "Credits"),
-            "percent": round(float(used), 1),
-            "resets_at": _iso_dt(w.reset_at),
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": str(w.label or "Credits"),
+                "percent": round(float(used), 1),
+                "resets_at": _iso_dt(w.reset_at),
+                "status": "ok",
+            }
+        )
     if windows:
         return {"id": "nous", "status": "ok", "windows": windows}
 
@@ -599,7 +636,11 @@ def fetch_copilot():
     snapshots = payload.get("quota_snapshots") or {}
     reset_at = payload.get("quota_reset_date") or payload.get("limited_user_reset_date")
     windows = []
-    for key, label in (("premium_interactions", "Premium requests"), ("chat", "Chat"), ("completions", "Completions")):
+    for key, label in (
+        ("premium_interactions", "Premium requests"),
+        ("chat", "Chat"),
+        ("completions", "Completions"),
+    ):
         entry = snapshots.get(key) or {}
         if not isinstance(entry, dict) or entry.get("unlimited"):
             continue
@@ -609,12 +650,14 @@ def fetch_copilot():
         remaining = entry.get("percent_remaining")
         if not isinstance(remaining, (int, float)):
             continue
-        windows.append({
-            "label": label,
-            "percent": round(max(0.0, min(100.0, 100.0 - float(remaining))), 1),
-            "resets_at": reset_at if isinstance(reset_at, str) else None,
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": label,
+                "percent": round(max(0.0, min(100.0, 100.0 - float(remaining))), 1),
+                "resets_at": reset_at if isinstance(reset_at, str) else None,
+                "status": "ok",
+            }
+        )
     if not windows:
         raise _Skip("copilot")
     return {"id": "copilot", "status": "ok", "windows": windows}
@@ -629,7 +672,9 @@ def fetch_deepseek():
     key = _secret("DEEPSEEK_API_KEY")
     if not key:
         raise _Skip("deepseek")
-    payload = _http_json("https://api.deepseek.com/user/balance", {"Authorization": "Bearer " + key})
+    payload = _http_json(
+        "https://api.deepseek.com/user/balance", {"Authorization": "Bearer " + key}
+    )
     money = []
     for info in payload.get("balance_infos") or []:
         if not isinstance(info, dict):
@@ -637,7 +682,13 @@ def fetch_deepseek():
         total = _num(info.get("total_balance"))
         if total is None:
             continue
-        money.append({"label": "Balance", "left": round(total, 2), "cur": str(info.get("currency") or "USD")[:8]})
+        money.append(
+            {
+                "label": "Balance",
+                "left": round(total, 2),
+                "cur": str(info.get("currency") or "USD")[:8],
+            }
+        )
     if not money:
         raise RuntimeError("DeepSeek returned no balance rows")
     return {"id": "deepseek", "status": "ok", "money": money}
@@ -709,29 +760,38 @@ def fetch_kimi():
         usage = payload.get("usage") or {}
         used, limit = _num(usage.get("used")), _num(usage.get("limit"))
         if used is not None and limit:
-            windows.append({
-                "label": "Weekly",
-                "percent": round(max(0.0, min(100.0, used / limit * 100.0)), 1),
-                "resets_at": usage.get("resetTime") if isinstance(usage.get("resetTime"), str) else None,
-                "status": "ok",
-            })
+            windows.append(
+                {
+                    "label": "Weekly",
+                    "percent": round(max(0.0, min(100.0, used / limit * 100.0)), 1),
+                    "resets_at": usage.get("resetTime")
+                    if isinstance(usage.get("resetTime"), str)
+                    else None,
+                    "status": "ok",
+                }
+            )
         for entry in payload.get("limits") or []:
             if not isinstance(entry, dict):
                 continue
             percent = _num(entry.get("percentage"))
             if percent is None:
                 continue
-            windows.append({
-                "label": str(entry.get("window") or entry.get("name") or "Limit"),
-                "percent": round(max(0.0, min(100.0, percent)), 1),
-                "resets_at": entry.get("resetTime") or entry.get("reset_time"),
-                "status": "ok",
-            })
+            windows.append(
+                {
+                    "label": str(entry.get("window") or entry.get("name") or "Limit"),
+                    "percent": round(max(0.0, min(100.0, percent)), 1),
+                    "resets_at": entry.get("resetTime") or entry.get("reset_time"),
+                    "status": "ok",
+                }
+            )
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
     available = _fetch_moonshot_balance(headers)
-    return {"id": "kimi-coding", "status": "ok",
-            "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}]}
+    return {
+        "id": "kimi-coding",
+        "status": "ok",
+        "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}],
+    }
 
 
 def fetch_zai():
@@ -782,12 +842,14 @@ def fetch_zai():
         reset_ms = item.get("nextResetTime")
         if isinstance(reset_ms, (int, float)) and reset_ms > 0:
             resets_at = _iso_epoch(reset_ms / 1000.0)
-        windows.append({
-            "label": label,
-            "percent": round(max(0.0, min(100.0, float(percent))), 1),
-            "resets_at": resets_at,
-            "status": "ok",
-        })
+        windows.append(
+            {
+                "label": label,
+                "percent": round(max(0.0, min(100.0, float(percent))), 1),
+                "resets_at": resets_at,
+                "status": "ok",
+            }
+        )
     if not windows:
         message = payload.get("msg") or payload.get("message")
         if isinstance(message, str) and message.strip():
@@ -906,12 +968,14 @@ def fetch_minimax():
             end_ms = row.get(end_key)
             if isinstance(end_ms, (int, float)) and end_ms > 0:
                 resets_at = _iso_epoch(end_ms / 1000.0)
-            windows.append({
-                "label": prefix + label,
-                "percent": round(max(0.0, min(100.0, float(percent))), 1),
-                "resets_at": resets_at,
-                "status": "ok",
-            })
+            windows.append(
+                {
+                    "label": prefix + label,
+                    "percent": round(max(0.0, min(100.0, float(percent))), 1),
+                    "resets_at": resets_at,
+                    "status": "ok",
+                }
+            )
     if not windows:
         raise RuntimeError("MiniMax returned no parseable plan rows")
     return {"id": "minimax", "status": "ok", "windows": windows}
@@ -1013,7 +1077,9 @@ def _collect():
         # profile secret scope and profile home live in the caller's context,
         # so run every task in a copy of it (the core's tools/daemon_pool.py
         # uses the same pattern).
-        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in to_fetch}
+        futures = {
+            pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in to_fetch
+        }
         for future in as_completed(futures):
             pid = futures[future]
             try:
