@@ -1,0 +1,6 @@
+# Review routing for the surfaces that carry credentials and the panel contract.
+# GitHub reads this file from the default branch. It requests a review; it does
+# not block a merge unless branch protection opts in to code-owner review.
+/dashboard/plugin_api.py    @PhoeniXAbhisheK
+/desktop/plugin.js          @PhoeniXAbhisheK
+/.github/                   @PhoeniXAbhisheK
