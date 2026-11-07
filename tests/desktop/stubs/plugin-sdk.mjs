@@ -27,3 +27,22 @@ const notAtImport = name => () => {
 export const useQuery = notAtImport('useQuery')
 export const useQueryClient = notAtImport('useQueryClient')
 export const useValue = notAtImport('useValue')
+
+/* The host door is only read inside components, which the tests build as
+ * elements rather than render, so the atoms exist and request rejects. */
+export const host = {
+  state: { focusedSessionId: atom(null), model: atom('') },
+  request: () => Promise.reject(new Error('host.request is not available in the desktop test stubs'))
+}
+
+export function SegmentedControl(props) {
+  return { type: 'SegmentedControl', props }
+}
+
+export function ScrollArea(props) {
+  return { type: 'ScrollArea', props }
+}
+
+export function Tip(props) {
+  return { type: 'Tip', props }
+}
