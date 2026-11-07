@@ -151,8 +151,11 @@ tests/                   unittest suite: backend fetchers and package metadata
   provider row can also carry `plan`, `error`, or `stale` with `hold_until` and
   a snapshot `fetched_at`; rows carry `eta_seconds` and `depletes_in_seconds`
   when a projection is available. Every window and money row also carries
-  `key`, `kind`, `used_pct`, `warn` and `actionable_eta`. The full contract,
-  including which fields are required, is in `schema/usage.schema.json`.
+  `key`, `kind`, `used_pct`, `warn` and `actionable_eta`, plus `history` when
+  recent samples exist: `[epoch seconds, value]` pairs, oldest first, at most 36
+  points over 6 hours. History is kept in memory only, so it resets when Hermes
+  restarts. The full contract, including which fields are required, is in
+  `schema/usage.schema.json`.
 
 ## License
 

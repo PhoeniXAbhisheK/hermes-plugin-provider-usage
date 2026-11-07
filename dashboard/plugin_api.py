@@ -1550,12 +1550,19 @@ def _project(key, current, target, now):
     return round(eta)
 
 
+def _history_key(pid, kind, row):
+    """The history key for a row: the window label, or the money label and currency."""
+    if kind == "money":
+        return (pid, "money:%s:%s" % (row.get("label") or "?", row.get("cur") or "?"))
+    return (pid, str(row.get("label") or "?"))
+
+
 def _decorate(pid, p, now):
     for w in p.get("windows") or []:
         v = w.get("percent")
         if not isinstance(v, (int, float)):
             continue
-        key = (pid, str(w.get("label") or "?"))
+        key = _history_key(pid, "window", w)
         _record(key, float(v), now)
         eta = _project(key, float(v), 100.0, now)
         if eta is not None:
@@ -1568,7 +1575,7 @@ def _decorate(pid, p, now):
         used = float(total) - float(left)
         # One row per currency: two balances with the same label must not share
         # a history.
-        key = (pid, "money:%s:%s" % (m.get("label") or "?", m.get("cur") or "?"))
+        key = _history_key(pid, "money", m)
         _record(key, used, now)
         eta = _project(key, used, float(total), now)
         if eta is not None:
@@ -1646,6 +1653,20 @@ def _money_actionable(row):
     return int(value)
 
 
+def _row_history(pid, kind, row, now):
+    """Bucketed recent samples for one row: [epoch seconds, value], oldest first."""
+    key = _history_key(pid, kind, row)
+    with _history_lock:
+        samples = list(_history.get(key) or ())
+    buckets = {}
+    for t, v in samples:
+        if now - t <= _HISTORY_WINDOW:
+            buckets[int(t // 600)] = [int(t), round(float(v), 2)]
+    if not buckets:
+        return None
+    return [buckets[b] for b in sorted(buckets)[-36:]]
+
+
 def _contract_rows(p, now):
     """Add the stable row contract fields to every window and money row."""
     seen = set()
@@ -1681,6 +1702,9 @@ def _contract_rows(p, now):
                     row.get("label") == "Key cap" and used is not None and used >= WARN_PCT
                 )
                 row["actionable_eta"] = _money_actionable(row)
+            history = _row_history(p.get("id"), kind, row, now)
+            if history:
+                row["history"] = history
 
 
 def _collect(deadline=None):
