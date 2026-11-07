@@ -19,7 +19,7 @@ WEEK = 7 * 86400
 MONTH = 30 * 86400
 
 
-def snap(windows, plan=None):
+def snap(windows, plan=None, raw=None, fetched_at=None):
     return SimpleNamespace(
         available=True,
         windows=[
@@ -31,13 +31,30 @@ def snap(windows, plan=None):
             )
             for window in windows
         ],
-        fetched_at=None,
+        fetched_at=fetched_at,
         plan=plan,
+        raw=raw,
     )
+
+
+def codex_raw(primary=None, secondary=None):
+    """An invented Codex body with the two rate_limit windows."""
+    return {
+        "plan_type": "free",
+        "rate_limit": {"primary_window": primary, "secondary_window": secondary},
+    }
 
 
 def in_seconds(seconds):
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def _stamp(when):
+    """The row's ISO form, floored to the minute like _iso_from_epoch."""
+    epoch = when.timestamp()
+    return datetime.fromtimestamp(epoch - epoch % 60.0, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 class SnapshotWindowFitTest(unittest.TestCase):
@@ -157,6 +174,164 @@ class SnapshotWindowFitTest(unittest.TestCase):
         row = p["windows"][0]
         self.assertEqual(row["label"], "Monthly")
         self.assertEqual(row["duration_seconds"], MONTH)
+
+
+class RawCodexSnapshotTest(unittest.TestCase):
+    """The snapshot's raw body wins: limit_window_seconds is the truth."""
+
+    def test_a_raw_thirty_day_window_resetting_in_three_days_is_monthly(self):
+        fetched = (datetime.now(timezone.utc) - timedelta(seconds=200)).replace(microsecond=0)
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [{"label": "Session", "used_percent": 12.0, "reset_at": in_seconds(3 * 86400)}],
+                plan="Free",
+                fetched_at=fetched,
+                raw=codex_raw(
+                    {
+                        "limit_window_seconds": MONTH,
+                        "reset_after_seconds": 3 * 86400,
+                        "used_percent": 12,
+                    }
+                ),
+            ),
+        )
+        row = p["windows"][0]
+        self.assertEqual(row["label"], "Monthly")
+        self.assertEqual(row["key"], "monthly")
+        self.assertEqual(row["duration_seconds"], MONTH)
+        self.assertEqual(row["resets_at"], _stamp(fetched + timedelta(seconds=3 * 86400)))
+        self.assertEqual(p["tag"], "Free")
+
+    def test_the_raw_path_counts_the_reset_from_the_snapshot_fetch_time(self):
+        fetched = (datetime.now(timezone.utc) - timedelta(seconds=200)).replace(microsecond=0)
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [{"label": "Session", "used_percent": 12.0, "reset_at": in_seconds(7200)}],
+                fetched_at=fetched,
+                raw=codex_raw(
+                    {
+                        "limit_window_seconds": FIVE_HOURS,
+                        "reset_after_seconds": 7200,
+                        "used_percent": 12,
+                    }
+                ),
+            ),
+        )
+        self.assertEqual(p["windows"][0]["resets_at"], _stamp(fetched + timedelta(seconds=7200)))
+
+    def test_a_raw_thirty_day_window_resetting_in_two_hours_is_monthly(self):
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [{"label": "Session", "used_percent": 12.0, "reset_at": in_seconds(2 * 3600)}],
+                raw=codex_raw(
+                    {
+                        "limit_window_seconds": MONTH,
+                        "reset_after_seconds": 2 * 3600,
+                        "used_percent": 12,
+                    }
+                ),
+            ),
+        )
+        row = p["windows"][0]
+        self.assertEqual(row["label"], "Monthly")
+        self.assertEqual(row["key"], "monthly")
+        self.assertEqual(row["duration_seconds"], MONTH)
+
+    def test_raw_five_hour_and_week_windows_keep_their_lengths(self):
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [
+                    {"label": "Session", "reset_at": in_seconds(3600)},
+                    {"label": "Weekly", "reset_at": in_seconds(86400)},
+                ],
+                raw=codex_raw(
+                    {
+                        "limit_window_seconds": FIVE_HOURS,
+                        "reset_after_seconds": 3600,
+                        "used_percent": 12,
+                    },
+                    {
+                        "limit_window_seconds": WEEK,
+                        "reset_after_seconds": 86400,
+                        "used_percent": 30,
+                    },
+                ),
+            ),
+        )
+        rows = p["windows"]
+        self.assertEqual([row["label"] for row in rows], ["5h", "Weekly"])
+        self.assertEqual([row["key"] for row in rows], ["5h", "weekly"])
+        self.assertEqual([row["duration_seconds"] for row in rows], [FIVE_HOURS, WEEK])
+
+    def test_a_raw_body_without_rate_limit_falls_back_to_the_guess(self):
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [{"label": "Session", "used_percent": 12.0, "reset_at": in_seconds(3 * 86400)}],
+                raw={"plan_type": "free"},
+            ),
+        )
+        self.assertEqual(p["windows"][0]["label"], "Weekly")
+        self.assertEqual(p["windows"][0]["duration_seconds"], WEEK)
+
+    def test_a_raw_body_with_null_windows_falls_back_to_the_guess(self):
+        p = API._snap_payload(
+            "openai-codex",
+            snap(
+                [{"label": "Session", "used_percent": 12.0, "reset_at": in_seconds(3 * 86400)}],
+                raw=codex_raw(),
+            ),
+        )
+        self.assertEqual(p["windows"][0]["label"], "Weekly")
+        self.assertEqual(p["windows"][0]["duration_seconds"], WEEK)
+
+    def test_a_non_dict_rate_limit_falls_back_to_the_guess(self):
+        for bad in ([{"limit_window_seconds": MONTH}], "not-a-mapping"):
+            with self.subTest(rate_limit=repr(bad)):
+                p = API._snap_payload(
+                    "openai-codex",
+                    snap(
+                        [
+                            {
+                                "label": "Session",
+                                "used_percent": 12.0,
+                                "reset_at": in_seconds(3 * 86400),
+                            }
+                        ],
+                        raw={"plan_type": "free", "rate_limit": bad},
+                    ),
+                )
+                self.assertEqual(p["windows"][0]["label"], "Weekly")
+                self.assertEqual(p["windows"][0]["duration_seconds"], WEEK)
+
+    def test_a_non_codex_snapshot_ignores_a_codex_shaped_raw_body(self):
+        p = API._snap_payload(
+            "anthropic",
+            snap(
+                [
+                    {
+                        "label": "Current week",
+                        "used_percent": 20.0,
+                        "reset_at": in_seconds(5 * 86400),
+                    }
+                ],
+                raw=codex_raw(
+                    {
+                        "limit_window_seconds": MONTH,
+                        "reset_after_seconds": 3 * 86400,
+                        "used_percent": 12,
+                    }
+                ),
+            ),
+        )
+        row = p["windows"][0]
+        self.assertEqual(row["label"], "Weekly")
+        self.assertEqual(row["key"], "weekly")
+        self.assertEqual(row["duration_seconds"], WEEK)
 
 
 class SnapshotPlanTagTest(unittest.TestCase):

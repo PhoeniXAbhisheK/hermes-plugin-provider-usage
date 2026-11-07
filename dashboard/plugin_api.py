@@ -615,6 +615,38 @@ def fetch_opencode_go():
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
+def _codex_response_windows(payload, now=None):
+    """Window rows from a Codex usage response; [] when it carries no window.
+
+    The published limit_window_seconds names the window, so the snapshot path
+    and the direct path read the same truth instead of guessing a length from
+    time-to-reset. Position is only the fallback for a response that omits the
+    length or sends one we do not recognise.
+    """
+    rate_limit = (payload or {}).get("rate_limit") or {}
+    if not isinstance(rate_limit, dict):
+        return []
+    now = time.time() if now is None else now
+    windows = []
+    for w, fallback in (
+        (rate_limit.get("primary_window"), "5h"),
+        (rate_limit.get("secondary_window"), "Weekly"),
+    ):
+        if not isinstance(w, dict):
+            continue
+        ra = w.get("reset_after_seconds")
+        resets_at = None
+        if isinstance(ra, (int, float)):
+            resets_at = _iso_from_epoch(now + ra)
+        seconds = _num(w.get("limit_window_seconds"))
+        match = _duration_match(seconds) if seconds is not None else None
+        label = match[0] if match is not None else fallback
+        row = _window(label, w.get("used_percent"), resets_at, duration=seconds)
+        if row is not None:
+            windows.append(row)
+    return windows
+
+
 def _codex_direct():
     """One direct Codex read with the CLI store's OAuth token."""
     tok = None
@@ -631,29 +663,7 @@ def _codex_direct():
         "https://chatgpt.com/backend-api/wham/usage",
         {"Authorization": "Bearer " + tok, "Accept": "application/json"},
     )
-    rl = d.get("rate_limit") or {}
-    now = time.time()
-    windows = []
-    for w, fallback in ((rl.get("primary_window"), "5h"), (rl.get("secondary_window"), "Weekly")):
-        if not isinstance(w, dict):
-            continue
-        ra = w.get("reset_after_seconds")
-        resets_at = None
-        if isinstance(ra, (int, float)):
-            resets_at = _iso_from_epoch(now + ra)
-        seconds = _num(w.get("limit_window_seconds"))
-        match = _duration_match(seconds) if seconds is not None else None
-        # The published length names the window; position is only the fallback
-        # for a response that omits it or sends a length we do not recognise.
-        label = match[0] if match is not None else fallback
-        row = _window(
-            label,
-            w.get("used_percent"),
-            resets_at,
-            duration=seconds,
-        )
-        if row is not None:
-            windows.append(row)
+    windows = _codex_response_windows(d)
     plan = (d.get("plan_type") or "").strip()
     if not windows:
         # Nothing to render: an ok card with no rows would show a fabricated 0%.
@@ -805,10 +815,19 @@ def _snap_payload(provider, snap):
     if snap is None or not getattr(snap, "available", False):
         return None
     windows = []
-    for w in getattr(snap, "windows", None) or ():
-        row = _snap_window(provider, w)
-        if row is not None:
-            windows.append(row)
+    raw = getattr(snap, "raw", None)
+    if provider == "openai-codex" and isinstance(raw, dict):
+        # The Codex snapshot carries the exact provider body, so its
+        # limit_window_seconds is the truth. Parse it with the direct path's
+        # helper instead of guessing a length from the reset time.
+        fetched = getattr(snap, "fetched_at", None)
+        base = fetched.timestamp() if isinstance(fetched, datetime) else None
+        windows = _codex_response_windows(raw, now=base)
+    if not windows:
+        for w in getattr(snap, "windows", None) or ():
+            row = _snap_window(provider, w)
+            if row is not None:
+                windows.append(row)
     if not windows:
         return None
     payload = {"id": provider, "status": "ok", "windows": windows}
