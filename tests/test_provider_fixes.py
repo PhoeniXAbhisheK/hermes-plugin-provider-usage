@@ -332,7 +332,7 @@ class KimiUsageTest(Base):
                 ]
             }
         )
-        self.assertEqual(p["windows"][0]["label"], "7d")
+        self.assertEqual(p["windows"][0]["label"], "Weekly")
 
     def test_bare_minute_unit_labels_five_hours(self):
         p = self._run(
@@ -362,7 +362,7 @@ class KimiUsageTest(Base):
                 ]
             }
         )
-        self.assertEqual([row["label"] for row in p["windows"]], ["5h", "7d"])
+        self.assertEqual([row["label"] for row in p["windows"]], ["5h", "Weekly"])
 
     def test_thirty_days_is_monthly(self):
         p = self._run(

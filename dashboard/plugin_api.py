@@ -376,17 +376,58 @@ def _num(value):
     return number if math.isfinite(number) else None
 
 
-def _window(label, percent, resets_at, status="ok"):
-    """One window row, or None when the percent isn't a usable number."""
+_DURATION_TOLERANCE = 0.1
+_DURATION_LABELS = (
+    (5 * 3600, "5h", "5h"),
+    (7 * 86400, "Weekly", "weekly"),
+    (30 * 86400, "Monthly", "monthly"),
+)
+
+
+def _duration_match(seconds):
+    """The shared label and key for a known window length, or None."""
+    for target, label, key in _DURATION_LABELS:
+        if abs(seconds - target) <= target * _DURATION_TOLERANCE:
+            return label, key
+    return None
+
+
+def _window(label, percent, resets_at, status="ok", *, duration=None, scope="account", model=None):
+    """One window row, or None when the percent isn't a usable number.
+
+    The row always states its scope. A usable ``duration`` is recorded, and a
+    known length replaces the caller's label with the shared one, so the direct
+    path, the Hermes snapshot path and the panel all name the same window the
+    same way. Rows the helper keys here carry that key through history and
+    projections; everything else is keyed by the contract pass.
+    """
     value = _num(percent)
     if value is None:
         return None
-    return {
+    row = {
         "label": label,
         "percent": round(max(0.0, min(100.0, value)), 1),
         "resets_at": resets_at,
         "status": status,
+        "scope": scope,
     }
+    seconds = _num(duration)
+    match = _duration_match(seconds) if seconds is not None and seconds > 0 else None
+    if scope == "model":
+        # A model row keeps the caller's label; its own name is the stable part.
+        row["key"] = _slug(label if model is None else model)
+        if match is not None:
+            row["key"] += ":" + match[1]
+    if seconds is None or seconds <= 0:
+        return row
+    length = int(round(seconds))
+    row["duration_seconds"] = length
+    if scope != "model" and match is not None:
+        row["label"] = match[0]
+        row["key"] = match[1]
+    elif scope != "model":
+        row["key"] = "%ds" % length
+    return row
 
 
 def _redact(text, secret=None):
@@ -533,35 +574,24 @@ def fetch_opencode_go():
         raise _Skip("opencode-go")  # 401/403: no usable Go plan
     u = d.get("usage") or {}
     windows = []
-    for wid, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "Monthly")):
+    for wid, label, duration in (
+        ("rolling", "5h", 5 * 3600),
+        ("weekly", "Weekly", 7 * 86400),
+        ("monthly", "Monthly", 30 * 86400),
+    ):
         w = u.get(wid) or {}
-        row = _window(label, w.get("percent"), w.get("resetsAt"), w.get("status", "ok"))
+        row = _window(
+            label,
+            w.get("percent"),
+            w.get("resetsAt"),
+            w.get("status", "ok"),
+            duration=duration,
+        )
         if row is not None:
             windows.append(row)
     if not windows:
         raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
-
-
-def _codex_label(window, fallback):
-    """Label a Codex window by its own length; the slot only decides the fallback."""
-    secs = window.get("limit_window_seconds")
-    if isinstance(secs, (int, float)) and secs > 0:
-        for target, label in ((5 * 3600, "5h"), (7 * 86400, "7d"), (30 * 86400, "Monthly")):
-            if abs(float(secs) - target) <= target * 0.1:
-                return label
-    return fallback
-
-
-def _codex_normalize(payload):
-    """Hermes labels Codex windows Session / Weekly; keep our usual 5h / 7d."""
-    for w in payload.get("windows") or []:
-        label = str(w.get("label") or "").strip().lower()
-        if label == "session":
-            w["label"] = "5h"
-        elif label == "weekly":
-            w["label"] = "7d"
-    return payload
 
 
 def _codex_direct():
@@ -583,25 +613,34 @@ def _codex_direct():
     rl = d.get("rate_limit") or {}
     now = time.time()
     windows = []
-    for w, fallback in ((rl.get("primary_window"), "5h"), (rl.get("secondary_window"), "7d")):
+    for w, fallback in ((rl.get("primary_window"), "5h"), (rl.get("secondary_window"), "Weekly")):
         if not isinstance(w, dict):
             continue
         ra = w.get("reset_after_seconds")
         resets_at = None
         if isinstance(ra, (int, float)):
             resets_at = _iso_from_epoch(now + ra)
-        row = _window(_codex_label(w, fallback), w.get("used_percent"), resets_at)
+        row = _window(
+            fallback,
+            w.get("used_percent"),
+            resets_at,
+            duration=w.get("limit_window_seconds"),
+        )
         if row is not None:
             windows.append(row)
     plan = (d.get("plan_type") or "").strip()
     if not windows:
         # Nothing to render: an ok card with no rows would show a fabricated 0%.
         raise _Skip("openai-codex")
-    return {"id": "openai-codex", "status": "ok", "plan": plan or None, "windows": windows}
+    payload = {"id": "openai-codex", "status": "ok", "plan": plan or None, "windows": windows}
+    if plan:
+        # The plan the token actually belongs to, not the meta default.
+        payload["tag"] = plan.title()
+    return payload
 
 
 def fetch_openai_codex():
-    return _helper_or_direct("openai-codex", _codex_direct, _codex_normalize)
+    return _helper_or_direct("openai-codex", _codex_direct)
 
 
 def fetch_openrouter():
@@ -685,17 +724,46 @@ def _snapshot_age(snap):
         return None
 
 
+_SNAP_WINDOWS = {
+    "anthropic": {
+        "current session": ("5h", 5 * 3600, "account", None),
+        "current week": ("Weekly", 7 * 86400, "account", None),
+        "opus week": ("Opus", 7 * 86400, "model", "opus"),
+        "sonnet week": ("Sonnet", 7 * 86400, "model", "sonnet"),
+    },
+    "openai-codex": {
+        "session": ("5h", 5 * 3600, "account", None),
+        "weekly": ("Weekly", 7 * 86400, "account", None),
+    },
+}
+
+
+def _snap_window(provider, w):
+    """One snapshot window as our row, using the core label map when it is known."""
+    label = str(getattr(w, "label", None) or "Window")
+    scope = str(getattr(w, "scope", None) or "account")
+    duration = None
+    model = None
+    known = _SNAP_WINDOWS.get(provider, {}).get(label.strip().lower())
+    if known is not None:
+        label, duration, scope, model = known
+    return _window(
+        label,
+        getattr(w, "used_percent", None),
+        _iso_dt(getattr(w, "reset_at", None)),
+        duration=duration,
+        scope=scope,
+        model=model,
+    )
+
+
 def _snap_payload(provider, snap):
     """Map a core snapshot onto our payload schema; None without a usable window."""
     if snap is None or not getattr(snap, "available", False):
         return None
     windows = []
     for w in getattr(snap, "windows", None) or ():
-        row = _window(
-            str(getattr(w, "label", None) or "Window"),
-            getattr(w, "used_percent", None),
-            _iso_dt(getattr(w, "reset_at", None)),
-        )
+        row = _snap_window(provider, w)
         if row is not None:
             windows.append(row)
     if not windows:
@@ -898,12 +966,39 @@ def _anthropic_direct():
         },
     )
     windows = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label, duration in (
+        ("five_hour", "5h", 5 * 3600),
+        ("seven_day", "Weekly", 7 * 86400),
+    ):
         w = d.get(key)
         if not isinstance(w, dict):
             continue
         resets = w.get("resets_at")
-        row = _window(label, w.get("utilization"), resets if isinstance(resets, str) else None)
+        row = _window(
+            label,
+            w.get("utilization"),
+            resets if isinstance(resets, str) else None,
+            duration=duration,
+        )
+        if row is not None:
+            windows.append(row)
+    # The per-model weekly caps ride in the same response: no extra request.
+    for key, label, model in (
+        ("seven_day_opus", "Opus", "opus"),
+        ("seven_day_sonnet", "Sonnet", "sonnet"),
+    ):
+        w = d.get(key)
+        if not isinstance(w, dict):
+            continue
+        resets = w.get("resets_at")
+        row = _window(
+            label,
+            w.get("utilization"),
+            resets if isinstance(resets, str) else None,
+            duration=7 * 86400,
+            scope="model",
+            model=model,
+        )
         if row is not None:
             windows.append(row)
     if not windows:
@@ -1154,18 +1249,24 @@ _KIMI_UNIT_SECONDS = {
 }
 
 
-def _kimi_label(entry, detail):
-    """A label from a dict window's duration, else the detail or entry name."""
+def _kimi_duration(entry):
+    """A dict window's length in seconds from its own unit and number, or None."""
     window = entry.get("window")
-    if isinstance(window, dict):
-        duration = _num(window.get("duration"))
-        factor = _KIMI_UNIT_SECONDS.get(str(window.get("timeUnit") or "").strip().upper())
-        if duration is not None and factor is not None:
-            label = _codex_label({"limit_window_seconds": duration * factor}, None)
-            if label:
-                return label
-        return str(detail.get("name") or entry.get("name") or "Limit")
-    return str(window or entry.get("name") or "Limit")
+    if not isinstance(window, dict):
+        return None
+    duration = _num(window.get("duration"))
+    factor = _KIMI_UNIT_SECONDS.get(str(window.get("timeUnit") or "").strip().upper())
+    if duration is None or factor is None:
+        return None
+    return duration * factor
+
+
+def _kimi_label(entry, detail):
+    """The detail or entry name; a known duration label wins in ``_window``."""
+    window = entry.get("window")
+    if not isinstance(window, dict):
+        return str(window or entry.get("name") or "Limit")
+    return str(detail.get("name") or entry.get("name") or "Limit")
 
 
 def fetch_kimi():
@@ -1228,6 +1329,7 @@ def fetch_kimi():
                     detail.get("resetTime"),
                     detail.get("reset_at"),
                 ),
+                duration=_kimi_duration(entry),
             )
             if row is not None:
                 windows.append(row)
@@ -1384,13 +1486,15 @@ def fetch_minimax():
             continue
         model_name = str(row.get("model_name") or "")
         # The M Plan reports a single aggregate row named "general".
-        prefix = "" if model_name in ("", "general") else model_name[:24] + " · "
-        for total_key, used_key, pct_key, end_key, label in (
+        model = "" if model_name in ("", "general") else model_name
+        prefix = model[:24] + " · " if model else ""
+        for total_key, used_key, pct_key, end_key, duration, label in (
             (
                 "current_interval_total_count",
                 "current_interval_usage_count",
                 "current_interval_remaining_percent",
                 "end_time",
+                5 * 3600,
                 "5h",
             ),
             (
@@ -1398,7 +1502,8 @@ def fetch_minimax():
                 "current_weekly_usage_count",
                 "current_weekly_remaining_percent",
                 "weekly_end_time",
-                "weekly",
+                7 * 86400,
+                "Weekly",
             ),
         ):
             # The meter is authoritative when present. On token_plan/remains the
@@ -1417,7 +1522,14 @@ def fetch_minimax():
             end_ms = row.get(end_key)
             if isinstance(end_ms, (int, float)) and end_ms > 0:
                 resets_at = _iso_epoch(end_ms / 1000.0)
-            window = _window(prefix + label, percent, resets_at)
+            window = _window(
+                prefix + label,
+                percent,
+                resets_at,
+                duration=duration,
+                scope="model" if model else "account",
+                model=model or None,
+            )
             if window is not None:
                 windows.append(window)
     if not windows:
@@ -1551,10 +1663,8 @@ def _project(key, current, target, now):
 
 
 def _history_key(pid, kind, row):
-    """The history key for a row: the window label, or the money label and currency."""
-    if kind == "money":
-        return (pid, "money:%s:%s" % (row.get("label") or "?", row.get("cur") or "?"))
-    return (pid, str(row.get("label") or "?"))
+    """The history key for a row: its stable contract key, whatever the kind."""
+    return (pid, str(row["key"]))
 
 
 def _decorate(pid, p, now):
@@ -1667,24 +1777,46 @@ def _row_history(pid, kind, row, now):
     return [buckets[b] for b in sorted(buckets)[-36:]]
 
 
-def _contract_rows(p, now):
-    """Add the stable row contract fields to every window and money row."""
+def _unique_key(base, seen):
+    """The base key, or the first free ":N" suffix of it."""
+    key = base
+    index = 2
+    while key in seen:
+        key = "%s:%d" % (base, index)
+        index += 1
+    return key
+
+
+def _assign_keys(p):
+    """Give every row its stable key, before history and projections run.
+
+    A key the window helper already set comes from the provider's own data and
+    is kept; everything else keeps the label slug this payload has always used.
+    Keys are unique within a provider.
+    """
     seen = set()
     groups = (("window", p.get("windows") or []), ("money", p.get("money") or []))
     for kind, rows in groups:
         for row in rows:
-            base = _slug(row.get("label") or "")
-            if kind == "money":
-                base = "money:" + base
-                if row.get("cur"):
-                    base = base + ":" + _slug(row.get("cur"))
-            key = base
-            index = 2
-            while key in seen:
-                key = "%s:%d" % (base, index)
-                index += 1
+            key = row.get("key")
+            if not key:
+                base = _slug(row.get("label") or "")
+                if kind == "money":
+                    base = "money:" + base
+                    if row.get("cur"):
+                        base = base + ":" + _slug(row.get("cur"))
+                key = _unique_key(base, seen)
+            elif key in seen:
+                key = _unique_key(str(key), seen)
             seen.add(key)
             row["key"] = key
+
+
+def _contract_rows(p, now):
+    """Add the stable row contract fields to every window and money row."""
+    groups = (("window", p.get("windows") or []), ("money", p.get("money") or []))
+    for kind, rows in groups:
+        for row in rows:
             row["kind"] = kind
             if kind == "window":
                 used = _num(row.get("percent"))
@@ -1812,6 +1944,7 @@ def _collect(deadline=None):
         p.setdefault("name", meta["name"])
         p.setdefault("tag", meta["tag"])
         p.setdefault("code", meta["code"])
+        _assign_keys(p)
         if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
         _contract_rows(p, now)

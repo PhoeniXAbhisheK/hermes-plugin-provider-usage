@@ -1,0 +1,84 @@
+{
+  "fetched_at": "2026-11-07T18:00:00Z",
+  "providers": [
+    {
+      "id": "anthropic",
+      "status": "ok",
+      "name": "Anthropic",
+      "tag": "Max",
+      "code": "claude",
+      "windows": [
+        {
+          "label": "5h",
+          "percent": 42.0,
+          "resets_at": "2026-11-07T20:00:00Z",
+          "status": "ok",
+          "scope": "account",
+          "duration_seconds": 18000,
+          "key": "5h",
+          "kind": "window",
+          "used_pct": 42.0,
+          "warn": false,
+          "actionable_eta": 7200
+        },
+        {
+          "label": "Weekly",
+          "percent": 88.0,
+          "resets_at": "2026-11-12T00:00:00Z",
+          "status": "ok",
+          "scope": "account",
+          "duration_seconds": 604800,
+          "key": "weekly",
+          "kind": "window",
+          "used_pct": 88.0,
+          "warn": true,
+          "actionable_eta": null
+        },
+        {
+          "label": "Opus",
+          "percent": 95.0,
+          "resets_at": "2026-11-12T00:00:00Z",
+          "status": "ok",
+          "scope": "model",
+          "duration_seconds": 604800,
+          "key": "opus:weekly",
+          "kind": "window",
+          "used_pct": 95.0,
+          "warn": true,
+          "actionable_eta": null
+        }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "status": "ok",
+      "name": "OpenRouter",
+      "tag": "Credits",
+      "code": "openrouter",
+      "money": [
+        {
+          "label": "Balance",
+          "left": 12.5,
+          "cur": "USD",
+          "total": 20.0,
+          "key": "money:balance:usd",
+          "kind": "money",
+          "used_pct": 37.5,
+          "warn": false,
+          "actionable_eta": null
+        },
+        {
+          "label": "Key cap",
+          "left": 2.0,
+          "cur": "USD",
+          "total": 10.0,
+          "key": "money:key_cap:usd",
+          "kind": "money",
+          "used_pct": 80.0,
+          "warn": true,
+          "actionable_eta": 5400
+        }
+      ]
+    }
+  ]
+}

@@ -138,14 +138,16 @@ class ProjectionTest(unittest.TestCase):
         self.seed(key, [(self._t0 - 3600, 0.0), (self._t0 - 1800, 10.0)])
         row = {"label": "5h", "percent": 20.0}
         payload = {"id": "zai", "status": "ok", "windows": [row]}
+        API._assign_keys(payload)
         API._decorate("zai", payload, self._t0)
         self.assertEqual(row["eta_seconds"], 14400)
 
     def test_money_depletion_time(self):
-        key = ("deepseek", "money:Balance:USD")
+        key = ("deepseek", "money:balance:usd")
         self.seed(key, [(self._t0, 0.0), (self._t0 + 1800, 10.0)])
         row = {"label": "Balance", "left": 90.0, "total": 100.0, "cur": "USD"}
         payload = {"id": "deepseek", "status": "ok", "money": [row]}
+        API._assign_keys(payload)
         API._decorate("deepseek", payload, self._t0 + 1800)
         self.assertEqual(row["depletes_in_seconds"], 16200)
 
@@ -164,6 +166,7 @@ class ProjectionTest(unittest.TestCase):
     def test_a_fresh_row_does_feed_history(self):
         row = {"label": "5h", "percent": 12.0}
         payload = {"id": "zai", "status": "ok", "windows": [row]}
+        API._assign_keys(payload)
         API._decorate("zai", payload, self._t0)
         self.assertIn(("zai", "5h"), API._history)
         self.assertEqual(API._history[("zai", "5h")][0][1], 12.0)

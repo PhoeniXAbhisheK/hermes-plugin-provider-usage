@@ -387,7 +387,7 @@ class CodexLabelTest(Base):
         API._hermes_usage = lambda provider: None
         API._read_text = lambda path: '{"tokens": {"access_token": "sentinel"}}'
         out = API.fetch_openai_codex()
-        self.assertEqual([w["label"] for w in out["windows"]], ["7d"])
+        self.assertEqual([w["label"] for w in out["windows"]], ["Weekly"])
 
     def test_monthly_only_reports_monthly(self):
         body = {
@@ -412,7 +412,7 @@ class CodexLabelTest(Base):
         API._hermes_usage = lambda provider: None
         API._read_text = lambda path: '{"tokens": {"access_token": "sentinel"}}'
         out = API.fetch_openai_codex()
-        self.assertEqual([w["label"] for w in out["windows"]], ["5h", "7d"])
+        self.assertEqual([w["label"] for w in out["windows"]], ["5h", "Weekly"])
         self.assertEqual([w["percent"] for w in out["windows"]], [10, 20])
 
 
@@ -456,8 +456,8 @@ class CurrencyIdentityTest(Base):
         API._collect()
         keys = sorted(key[1] for key in API._history if key[0] == "deepseek")
         self.assertEqual(len(keys), 2, keys)
-        self.assertIn("money:Balance:USD", keys)
-        self.assertIn("money:Balance:CNY", keys)
+        self.assertIn("money:balance:usd", keys)
+        self.assertIn("money:balance:cny", keys)
 
 
 class HelperTimeoutTest(Base):

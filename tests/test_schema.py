@@ -184,8 +184,8 @@ def seed_fresh_history(test):
     """A collection with enough seeded history to project windows and money."""
     now = time.time()
     API._secret = lambda *names: "sentinel"
-    API._history[("zai", "Session (5h)")] = [[now - 2400, 40.0], [now - 300, 55.0]]
-    API._history[("openrouter", "money:Balance:USD")] = [
+    API._history[("zai", "session_5h")] = [[now - 2400, 40.0], [now - 300, 55.0]]
+    API._history[("openrouter", "money:balance:usd")] = [
         [now - 2400, 30.0],
         [now - 300, 40.0],
     ]
@@ -256,7 +256,15 @@ class RarePayloadTest(Base):
         API._last_good["zai"] = {
             "id": "zai",
             "status": "ok",
-            "windows": [{"label": "5h", "percent": 42.0, "resets_at": None, "status": "ok"}],
+            "windows": [
+                {
+                    "label": "5h",
+                    "percent": 42.0,
+                    "resets_at": None,
+                    "status": "ok",
+                    "scope": "account",
+                }
+            ],
         }
         API._holds["zai"] = time.time() + 120
         payload = self.collect(("zai",))
@@ -330,7 +338,15 @@ class CoverageTest(Base):
         API._last_good["zai"] = {
             "id": "zai",
             "status": "ok",
-            "windows": [{"label": "5h", "percent": 42.0, "resets_at": None, "status": "ok"}],
+            "windows": [
+                {
+                    "label": "5h",
+                    "percent": 42.0,
+                    "resets_at": None,
+                    "status": "ok",
+                    "scope": "account",
+                }
+            ],
         }
         API._holds["zai"] = time.time() + 120
         payloads.append(("hold", self.collect(("zai",))))
@@ -391,6 +407,7 @@ class ContractRuleTest(unittest.TestCase):
 
     def rows(self, windows=(), money=()):
         p = {"windows": [dict(row) for row in windows], "money": [dict(row) for row in money]}
+        API._assign_keys(p)
         API._contract_rows(p, self.NOW)
         return p
 

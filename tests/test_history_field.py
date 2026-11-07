@@ -11,31 +11,38 @@ API = base.API
 
 
 class HistoryKeyTest(unittest.TestCase):
+    def keyed(self, kind, row):
+        p = {"windows": [], "money": []}
+        p["windows" if kind == "window" else "money"].append(row)
+        API._assign_keys(p)
+        return API._history_key("zai", kind, row)
+
     def test_a_window_key(self):
         self.assertEqual(
-            API._history_key("zai", "window", {"label": "Session (5h)"}),
-            ("zai", "Session (5h)"),
+            self.keyed("window", {"label": "Session (5h)", "percent": 10.0}), ("zai", "session_5h")
         )
 
     def test_a_money_key(self):
         self.assertEqual(
-            API._history_key("openrouter", "money", {"label": "Key cap", "cur": "USD"}),
-            ("openrouter", "money:Key cap:USD"),
+            self.keyed("money", {"label": "Key cap", "cur": "USD"}),
+            ("zai", "money:key_cap:usd"),
         )
 
     def test_missing_label_and_currency(self):
-        self.assertEqual(API._history_key("zai", "window", {}), ("zai", "?"))
-        self.assertEqual(API._history_key("zai", "money", {}), ("zai", "money:?:?"))
+        self.assertEqual(self.keyed("window", {}), ("zai", "row"))
+        self.assertEqual(self.keyed("money", {}), ("zai", "money:row"))
 
 
 class HistoryFieldTest(schema.Base):
     NOW = 1_000_000.0
 
     def window_payload(self, label="5h", percent=50.0):
-        return {
+        p = {
             "id": "zai",
             "windows": [{"label": label, "percent": percent, "resets_at": None, "status": "ok"}],
         }
+        API._assign_keys(p)
+        return p
 
     def test_pairs_oldest_first_and_rounded(self):
         API._history[("zai", "5h")] = [
@@ -97,6 +104,7 @@ class HistoryFieldTest(schema.Base):
 
     def test_a_money_row_without_a_total_has_no_history(self):
         p = {"id": "zai", "money": [{"label": "Balance", "left": 5.0, "cur": "USD"}]}
+        API._assign_keys(p)
         API._contract_rows(p, self.NOW)
         self.assertNotIn("history", p["money"][0])
 
