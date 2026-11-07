@@ -1744,6 +1744,307 @@ test('an open row carries the raised background and a closed one does not', asyn
   assert.equal(open.props.style.background, 'var(--ui-bg-elevated)')
 })
 
+/* ---------- per-window alert thresholds ---------- */
+
+test('alertThreshold reads only saved window steps', async () => {
+  const { alertThreshold } = await loadPlugin()
+  const row = { key: '5h', kind: 'window' }
+  assert.equal(alertThreshold({}, 'zai', row), null)
+  assert.equal(alertThreshold(null, 'zai', row), null)
+  assert.equal(alertThreshold({ 'zai:5h': 90 }, 'zai', row), 90)
+  assert.equal(alertThreshold({ 'zai:5h': 'off' }, 'zai', row), 'off')
+  assert.equal(alertThreshold({ 'zai:5h': 90 }, 'nous', row), null)
+  assert.equal(alertThreshold({ 'zai:5h': 80 }, 'zai', { key: 'weekly', kind: 'window' }), null)
+  assert.equal(alertThreshold({ 'zai:5h': 90 }, 'zai', { key: '5h', kind: 'money' }), null)
+  assert.equal(alertThreshold({ 'zai:5h': 'junk' }, 'zai', row), null)
+})
+
+test('the saved alert map drops junk on load and persists new picks', async () => {
+  const { default: plugin, currentAlertAt, setAlert } = await loadPlugin()
+  const { ctx, data } = fakeContext()
+  data.alertAt = { 'zai:5h': 90, 'zai:weekly': '40', 'nous:5h': 'off', 'x:y': 'junk' }
+  plugin.register(ctx)
+  assert.deepEqual(currentAlertAt(), { 'zai:5h': 90, 'nous:5h': 'off' })
+  setAlert('zai', '5h', 95)
+  assert.deepEqual(data.alertAt, { 'zai:5h': 95, 'nous:5h': 'off' })
+  const again = await loadPlugin()
+  const second = fakeContext()
+  second.data.alertAt = 'not an object'
+  again.default.register(second.ctx)
+  assert.deepEqual(again.currentAlertAt(), {})
+})
+
+test('a 90 threshold alarms at 92 and stays silent at 85', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('zai', '5h', 90)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 85, warn: true, resets_at: isoAt(NOW + 1800000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 0)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 92, warn: false, resets_at: isoAt(NOW + 3600000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].title, 'Zai: 5h at 92% used')
+  } finally {
+    restore()
+  }
+})
+
+test('a window exactly at the threshold fires', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('nous', 'weekly', 90)
+    checkAlerts({
+      providers: [
+        {
+          id: 'nous',
+          name: 'Nous',
+          status: 'ok',
+          windows: [{ key: 'weekly', label: 'Weekly', used_pct: 90, warn: false, resets_at: isoAt(NOW + 5400000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('an off threshold never fires', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('zai', '5h', 'off')
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 99, warn: true, resets_at: isoAt(NOW + 1800000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+test('a 50 threshold fires below the backend warn flag', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('zai', '5h', 50)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 55, warn: false, resets_at: isoAt(NOW + 1800000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('an unsaved threshold still follows the backend warn flag', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 99, warn: false, resets_at: isoAt(NOW + 1800000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 0)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 92, warn: true, resets_at: isoAt(NOW + 3600000) }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('a saved threshold does not change money alerts', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('or', 'money:key_cap:usd', 'off')
+    checkAlerts({
+      providers: [
+        {
+          id: 'or',
+          name: 'OpenRouter',
+          status: 'ok',
+          money: [
+            {
+              key: 'money:key_cap:usd',
+              label: 'Key cap',
+              kind: 'money',
+              total: 10,
+              left: 2,
+              cur: 'USD',
+              used_pct: 80,
+              warn: true
+            }
+          ]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('changing the threshold mid-cycle does not fire twice', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('zai', '5h', 90)
+    const payload = {
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 92, warn: true, resets_at: isoAt(NOW + 3600000) }]
+        }
+      ]
+    }
+    checkAlerts(payload)
+    setAlert('zai', '5h', 80)
+    checkAlerts(payload)
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('the chart follows the saved threshold and drops the line when off', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 40,
+    resets_at: new Date(now + 3600000).toISOString()
+  }
+  assert.deepEqual(chartModel(row, now).alert, { value: 80, y: 14.8 })
+  assert.deepEqual(chartModel(row, now, 90).alert, { value: 90, y: 8.4 })
+  assert.equal(chartModel(row, now, 'off').alert, null)
+  const loud = chartModel({ ...row, used_pct: 90, warn: false }, now, 50)
+  assert.equal(loud.colour, 'accent')
+})
+
+test('the expanded row shows the alert line label and the notification note', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [{ key: '5h', label: '5h', kind: 'window', used_pct: 40, resets_at: new Date(now + 3600000).toISOString() }]
+  }
+  const panel = expandedPanel(p, { mode: 'used', choice: {}, barIds: [], tab: '5h', alertAt: { 'zai:5h': 90 } })
+  assert.ok(nodeText(panel).includes('alert 90%'))
+  assert.ok(nodeText(panel).includes('Alert at 90%'))
+  assert.ok(nodeText(panel).includes('Notifications appear while Hermes is in the background.'))
+  const line = findNodes(panel, n => n.type === 'line' && n.props.key === 'alert')
+  assert.equal(line.length, 1)
+  assert.equal(line[0].props.y1, 8.4)
+  const offPanel = expandedPanel(p, { mode: 'used', choice: {}, barIds: [], tab: '5h', alertAt: { 'zai:5h': 'off' } })
+  assert.equal(findNodes(offPanel, n => n.type === 'line' && n.props.key === 'alert').length, 0)
+  assert.ok(nodeText(offPanel).includes('Alert off'))
+  assert.equal(nodeText(offPanel).includes('alert 80%'), false)
+})
+
+test('the alert control offers the six steps and reports a pick', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [{ key: '5h', label: '5h', kind: 'window', used_pct: 40 }]
+  }
+  const picks = []
+  const panel = expandedPanel(p, {
+    mode: 'used',
+    choice: {},
+    barIds: [],
+    tab: '5h',
+    alertAt: { 'zai:5h': 90 },
+    onAlert: (rowKey, value) => picks.push([rowKey, value])
+  })
+  const control = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'SegmentedControl')
+  assert.equal(control.length, 1)
+  assert.deepEqual(control[0].props.options.map(o => o.id), ['50', '70', '80', '90', '95', 'off'])
+  assert.equal(control[0].props.value, '90')
+  control[0].props.onChange('70')
+  control[0].props.onChange('off')
+  assert.deepEqual(picks, [
+    ['5h', 70],
+    ['5h', 'off']
+  ])
+  const moneyPanel = expandedPanel(
+    { id: 'or', name: 'OpenRouter', status: 'ok', money: [{ key: 'money:key_cap:usd', label: 'Key cap', kind: 'money', total: 10, left: 2, cur: 'USD', used_pct: 80 }] },
+    { mode: 'used', choice: {}, barIds: [], tab: 'money:key_cap:usd' }
+  )
+  assert.equal(findNodes(moneyPanel, n => typeof n.type === 'function' && n.type.name === 'SegmentedControl').length, 0)
+  assert.ok(nodeText(moneyPanel).includes('Notifications appear while Hermes is in the background.'))
+})
+
 test('a real payload shape drives the bar, the tip and the warn flag', async () => {
   const { readFile } = await import('node:fs/promises')
   const payload = JSON.parse(await readFile(new URL('./payload.json', import.meta.url), 'utf8'))

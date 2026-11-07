@@ -65,6 +65,7 @@ const $barQuota = atom({})
 const STORE_INTERVAL = 'intervalMs'
 const STORE_MODE = 'valueMode'
 const STORE_ALERTS = 'alerts'
+const STORE_ALERT_AT = 'alertAt'
 const STORE_BAR = 'barProviders'
 const STORE_BAR_QUOTA = 'barQuota'
 
@@ -92,6 +93,7 @@ function bindStorage(s) {
     if (Array.isArray(bar)) $barProviders.set(bar)
     const quota = storage.get(STORE_BAR_QUOTA, null)
     if (quota && typeof quota === 'object' && !Array.isArray(quota)) $barQuota.set(quota)
+    $alertAt.set(cleanAlertMap(storage.get(STORE_ALERT_AT, null)))
   } catch (e) {
     /* ignore malformed persisted state */
   }
@@ -99,6 +101,7 @@ function bindStorage(s) {
   $mode.listen(v => persist(STORE_MODE, v))
   $barProviders.listen(v => persist(STORE_BAR, v))
   $barQuota.listen(v => persist(STORE_BAR_QUOTA, v))
+  $alertAt.listen(v => persist(STORE_ALERT_AT, v))
 }
 
 async function fetchUsage(fresh, manual) {
@@ -204,6 +207,54 @@ export function providerWarn(p) {
 
 const $sessionProvider = atom(null)
 
+const $alertAt = atom({})
+const ALERT_STEPS = [50, 70, 80, 90, 95]
+const ALERT_OPTIONS = [
+  { id: '50', label: '50' },
+  { id: '70', label: '70' },
+  { id: '80', label: '80' },
+  { id: '90', label: '90' },
+  { id: '95', label: '95' },
+  { id: 'off', label: 'Off' }
+]
+
+function validAlertValue(value) {
+  if (value === 'off') return 'off'
+  const n = Number(value)
+  return ALERT_STEPS.indexOf(n) !== -1 ? n : null
+}
+
+function cleanAlertMap(raw) {
+  const out = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const key of Object.keys(raw)) {
+    const value = validAlertValue(raw[key])
+    if (value !== null) out[key] = value
+  }
+  return out
+}
+
+/* The saved threshold for one window row: a step, 'off', or null for the
+ * default (the backend's warn flag). Money rows have no threshold. */
+export function alertThreshold(choice, providerId, row) {
+  if (!row || row.kind === 'money' || !providerId) return null
+  const map = choice && typeof choice === 'object' ? choice : {}
+  const key = providerId + ':' + row.key
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return null
+  const value = validAlertValue(map[key])
+  return value === null ? null : value
+}
+
+export function currentAlertAt() {
+  return { ...$alertAt.get() }
+}
+
+export function setAlert(providerId, rowKey, value) {
+  const clean = validAlertValue(value)
+  if (!providerId || !rowKey || clean === null) return
+  $alertAt.set({ ...$alertAt.get(), [providerId + ':' + rowKey]: clean })
+}
+
 /* ---------- alerts (native notification, deduped) ---------- */
 
 /* Two polls seconds apart compute a reset time that differs by a few seconds.
@@ -246,7 +297,13 @@ export function checkAlerts(data) {
     for (const p of data.providers) {
       if (p.status !== 'ok') continue
       for (const w of p.windows || []) {
-        if (w.warn !== true) continue
+        const at = alertThreshold($alertAt.get(), p.id, w)
+        if (at === 'off') continue
+        if (at === null) {
+          if (w.warn !== true) continue
+        } else if ((Number(w.used_pct) || 0) < Number(at)) {
+          continue
+        }
         const eta = Number(w.actionable_eta)
         const bits = []
         if (isFinite(eta) && eta > 0) bits.push('At this rate, 100% in ' + fmtEta(eta))
@@ -563,7 +620,8 @@ const CHART_SCALE = 0.64
 const CHART_HISTORY_S = 21600
 
 function chartY(pct) {
-  return CHART_BASE - Math.max(0, Math.min(100, Number(pct) || 0)) * CHART_SCALE
+  const y = CHART_BASE - Math.max(0, Math.min(100, Number(pct) || 0)) * CHART_SCALE
+  return Math.round(y * 100) / 100
 }
 
 /* Burn rate in percentage points per second for a window, or null. */
@@ -578,11 +636,12 @@ function windowRate(row) {
  * rows store the used amount in the row's currency (see _row_history in
  * dashboard/plugin_api.py). Money values are divided by the row total so the
  * chart stays on the same 0-100 axis. */
-export function chartModel(row, nowMs) {
+export function chartModel(row, nowMs, alertAt) {
   if (!row) return null
   const isMoney = row.kind === 'money'
   const raw = row.used_pct
   if (raw === null || raw === undefined) return null
+  const threshold = alertAt === 'off' ? null : alertAt === null || alertAt === undefined ? 80 : Number(alertAt)
   const used = Math.max(0, Math.min(100, Number(raw) || 0))
   const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
   const total = Number(row.total) || 0
@@ -636,6 +695,7 @@ export function chartModel(row, nowMs) {
     valueAtReset: valueAtReset === null ? null : Math.round(valueAtReset),
     rate: rate,
     overflow: overflow,
+    alert: threshold === null ? null : { value: threshold, y: chartY(threshold) },
     colour: amber ? 'amber' : 'accent'
   }
 }
@@ -1070,25 +1130,29 @@ function chartElement(p, row, model) {
     className: amber ? 'text-amber-600' : undefined,
     style: amber ? undefined : { color: 'var(--ui-accent)' },
     children: [
-      jsx('line', {
-        key: 'alert',
-        x1: 0,
-        y1: 14.8,
-        x2: 336,
-        y2: 14.8,
-        stroke: 'currentColor',
-        strokeDasharray: '3 3',
-        opacity: 0.35
-      }),
-      jsx('text', {
-        key: 'alertLabel',
-        x: 0,
-        y: 11,
-        fontSize: 8.5,
-        fill: 'currentColor',
-        opacity: 0.55,
-        children: 'alert 80%'
-      }),
+      model.alert
+        ? jsx('line', {
+            key: 'alert',
+            x1: 0,
+            y1: model.alert.y,
+            x2: 336,
+            y2: model.alert.y,
+            stroke: 'currentColor',
+            strokeDasharray: '3 3',
+            opacity: 0.35
+          })
+        : null,
+      model.alert
+        ? jsx('text', {
+            key: 'alertLabel',
+            x: 0,
+            y: Math.max(9, model.alert.y - 3.8),
+            fontSize: 8.5,
+            fill: 'currentColor',
+            opacity: 0.55,
+            children: 'alert ' + model.alert.value + '%'
+          })
+        : null,
       model.series.length >= 2
         ? jsx('polyline', {
             key: 'history',
@@ -1175,7 +1239,9 @@ export function expandedPanel(p, ctx) {
         ? money(tabRow.left, tabRow.cur) + ' of ' + money(tabRow.total, tabRow.cur) + ' left'
         : money(tabRow.left, tabRow.cur) + ' left'
       : etaText(tabRow.resets_at)
-  const model = chartModel(tabRow, ctx.now)
+  const model = chartModel(tabRow, ctx.now, alertThreshold(ctx.alertAt, p.id, tabRow))
+  const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
+  const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
     style: {
       marginLeft: 16,
@@ -1231,21 +1297,47 @@ export function expandedPanel(p, ctx) {
       }),
       chartElement(p, tabRow, model),
       statsElement(tabRow),
-      jsx('button', {
-        key: 'bar',
-        type: 'button',
-        onClick: () => ctx.onShowInBar && ctx.onShowInBar(tabRow.key),
-        style: {
-          alignSelf: 'flex-start',
-          fontSize: 10.5,
-          padding: '3px 8px',
-          borderRadius: 6,
-          cursor: 'pointer',
-          border: '1px solid ' + (shownInBar ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
-          background: shownInBar ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
-          color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
-        },
-        children: shownInBar ? 'Shown in status bar' : 'Show ' + tabRow.label + ' in status bar'
+      jsxs('div', {
+        key: 'controls',
+        style: { display: 'flex', alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' },
+        children: [
+          jsx('button', {
+            type: 'button',
+            onClick: () => ctx.onShowInBar && ctx.onShowInBar(tabRow.key),
+            style: {
+              fontSize: 10.5,
+              padding: '3px 8px',
+              borderRadius: 6,
+              cursor: 'pointer',
+              border: '1px solid ' + (shownInBar ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
+              background: shownInBar ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
+              color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+            },
+            children: shownInBar ? 'Shown in status bar' : 'Show ' + tabRow.label + ' in status bar'
+          }),
+          tabRow.kind === 'money'
+            ? null
+            : jsxs('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: 3, marginLeft: 'auto', alignItems: 'flex-end' },
+                children: [
+                  jsx('span', {
+                    style: { fontSize: 10, color: 'var(--ui-text-tertiary)' },
+                    children: alertLabel
+                  }),
+                  jsx(SegmentedControl, {
+                    value: threshold === null ? '80' : String(threshold),
+                    onChange: id =>
+                      ctx.onAlert && ctx.onAlert(tabRow.key, id === 'off' ? 'off' : Number(id)),
+                    options: ALERT_OPTIONS
+                  })
+                ]
+              })
+        ]
+      }),
+      jsx('div', {
+        key: 'notify',
+        style: { fontSize: 10, color: 'var(--ui-text-tertiary)' },
+        children: 'Notifications appear while Hermes is in the background.'
       })
     ]
   })
@@ -1376,7 +1468,7 @@ export function providerRowElement(p, ctx) {
         style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 8 },
         children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols }))
       }),
-      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar }) : null
+      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar, alertAt: ctx.alertAt, onAlert: ctx.onAlert, now: ctx.now }) : null
     ]
   })
 }
@@ -1419,6 +1511,7 @@ function UsagePanel() {
   const pins = useValue($barProviders)
   const sessionProvider = useValue($sessionProvider)
   const choice = useValue($barQuota)
+  const alertAt = useValue($alertAt)
   const [view, setView] = useState('all')
   const [openId, setOpenId] = useState(null)
   const [tabs, setTabs] = useState({})
@@ -1468,6 +1561,8 @@ function UsagePanel() {
             onMore: () => setOpenId(p.id),
             onTab: key => setTabs(cur => ({ ...cur, [p.id]: key })),
             onShowInBar: key => setBarQuota(p.id, key),
+            alertAt: alertAt,
+            onAlert: (rowKey, value) => setAlert(p.id, rowKey, value),
             onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id))
           }))
         ]
