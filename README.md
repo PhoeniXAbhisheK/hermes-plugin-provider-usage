@@ -150,7 +150,9 @@ tests/                   unittest suite: backend fetchers and package metadata
   `{ fetched_at, providers: [{ id, name, tag, code, status, windows | money }] }`. A
   provider row can also carry `plan`, `error`, or `stale` with `hold_until` and
   a snapshot `fetched_at`; rows carry `eta_seconds` and `depletes_in_seconds`
-  when a projection is available.
+  when a projection is available. Every window and money row also carries
+  `key`, `kind`, `used_pct`, `warn` and `actionable_eta`. The full contract,
+  including which fields are required, is in `schema/usage.schema.json`.
 
 ## License
 

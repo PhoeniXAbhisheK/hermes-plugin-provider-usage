@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Provider usage payload",
+  "description": "The /usage response: one fetched_at stamp and one row per provider.",
+  "type": "object",
+  "properties": {
+    "fetched_at": {
+      "type": "string",
+      "description": "Collection time, ISO-8601 UTC."
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provider"
+      }
+    }
+  },
+  "required": ["fetched_at", "providers"],
+  "additionalProperties": false,
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ok", "error"]
+        },
+        "name": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/windowRow"
+          }
+        },
+        "money": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/moneyRow"
+          }
+        },
+        "error": {
+          "type": "string",
+          "description": "One line, credential redacted, capped at ERROR_MAX_CHARS."
+        },
+        "stale": {
+          "type": "boolean",
+          "description": "True when the rows are a previous reading."
+        },
+        "hold_until": {
+          "type": "string",
+          "description": "Rate-limit retry time, ISO-8601 UTC."
+        },
+        "fetched_at": {
+          "type": "string",
+          "description": "When the stale reading was taken."
+        },
+        "plan": {
+          "type": ["string", "null"],
+          "description": "Codex plan name, null when the body has none."
+        }
+      },
+      "required": ["id", "status", "name", "tag", "code"],
+      "additionalProperties": false
+    },
+    "windowRow": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resets_at": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "type": ["string", "null"],
+          "description": "Defaults to \"ok\"; OpenCode Go passes its own value through."
+        },
+        "eta_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Projected seconds to 100 percent, when history supports it."
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["window"]
+        },
+        "used_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "warn": {
+          "type": "boolean"
+        },
+        "actionable_eta": {
+          "type": ["integer", "null"]
+        }
+      },
+      "required": [
+        "label",
+        "percent",
+        "resets_at",
+        "status",
+        "key",
+        "kind",
+        "used_pct",
+        "warn",
+        "actionable_eta"
+      ],
+      "additionalProperties": false
+    },
+    "moneyRow": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "left": {
+          "type": "number"
+        },
+        "cur": {
+          "type": "string"
+        },
+        "total": {
+          "type": "number"
+        },
+        "depletes_in_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Projected seconds to exhaustion, when history supports it."
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["money"]
+        },
+        "used_pct": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "warn": {
+          "type": "boolean"
+        },
+        "actionable_eta": {
+          "type": ["integer", "null"]
+        }
+      },
+      "required": [
+        "label",
+        "left",
+        "cur",
+        "key",
+        "kind",
+        "used_pct",
+        "warn",
+        "actionable_eta"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

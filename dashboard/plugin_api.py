@@ -67,7 +67,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     wait,
 )
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -174,6 +174,7 @@ ALLOWED_HOSTS = {
 }
 
 ERROR_MAX_CHARS = 120  # payload error text: one line, no credential, short
+WARN_PCT = 80  # row contract: the desktop's amber threshold, copied here
 _LOG_DETAIL_MAX = 500  # server-side log detail keeps more context
 _TOKEN_SHAPED = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{8,}"
@@ -1574,6 +1575,114 @@ def _decorate(pid, p, now):
             m["depletes_in_seconds"] = eta
 
 
+def _slug(text):
+    """A stable key fragment: lower-case, runs of anything else become one _."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+    return slug or "row"
+
+
+_ISO_STAMP = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2})"
+    r"(?::(?P<second>\d{2})(?:\.(?P<fraction>\d+))?)?)?"
+    r"(?P<zone>Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def _epoch_from_iso(text):
+    """Epoch seconds for the ISO-8601 forms we accept, or None. Zone defaults to UTC."""
+    if not isinstance(text, str):
+        return None
+    match = _ISO_STAMP.match(text.strip())
+    if match is None:
+        return None
+    zone = match.group("zone") or "Z"
+    if zone == "Z":
+        offset = timezone.utc
+    else:
+        sign = -1 if zone[0] == "-" else 1
+        digits = zone[1:].replace(":", "")
+        hours, minutes = int(digits[:2]), int(digits[2:])
+        if hours > 23 or minutes > 59:
+            return None
+        offset = timezone(sign * timedelta(hours=hours, minutes=minutes))
+    fraction = (match.group("fraction") or "")[:6].ljust(6, "0")
+    date = match.group("date")
+    try:
+        when = datetime(
+            int(date[0:4]),
+            int(date[5:7]),
+            int(date[8:10]),
+            int(match.group("hour") or 0),
+            int(match.group("minute") or 0),
+            int(match.group("second") or 0),
+            int(fraction or 0),
+            tzinfo=offset,
+        )
+    except ValueError:
+        return None
+    try:
+        return when.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _window_actionable(row, now):
+    """Seconds to 100% only when it lands before the reset, or within a week."""
+    eta = _num(row.get("eta_seconds"))
+    if eta is None or eta <= 0:
+        return None
+    reset = _epoch_from_iso(row.get("resets_at"))
+    if reset is not None:
+        return int(eta) if eta < reset - now else None
+    return int(eta) if eta <= 7 * 86400 else None
+
+
+def _money_actionable(row):
+    """Seconds to exhaustion only when it lands inside fourteen days."""
+    value = _num(row.get("depletes_in_seconds"))
+    if value is None or value <= 0 or value >= 14 * 86400:
+        return None
+    return int(value)
+
+
+def _contract_rows(p, now):
+    """Add the stable row contract fields to every window and money row."""
+    seen = set()
+    groups = (("window", p.get("windows") or []), ("money", p.get("money") or []))
+    for kind, rows in groups:
+        for row in rows:
+            base = _slug(row.get("label") or "")
+            if kind == "money":
+                base = "money:" + base
+                if row.get("cur"):
+                    base = base + ":" + _slug(row.get("cur"))
+            key = base
+            index = 2
+            while key in seen:
+                key = "%s:%d" % (base, index)
+                index += 1
+            seen.add(key)
+            row["key"] = key
+            row["kind"] = kind
+            if kind == "window":
+                used = _num(row.get("percent"))
+                row["used_pct"] = used
+                row["warn"] = used is not None and used >= WARN_PCT
+                row["actionable_eta"] = _window_actionable(row, now)
+            else:
+                total = _num(row.get("total"))
+                left = _num(row.get("left"))
+                used = None
+                if total is not None and left is not None and total > 0:
+                    used = round(max(0.0, min(100.0, (total - left) / total * 100.0)), 1)
+                row["used_pct"] = used
+                row["warn"] = (
+                    row.get("label") == "Key cap" and used is not None and used >= WARN_PCT
+                )
+                row["actionable_eta"] = _money_actionable(row)
+
+
 def _collect(deadline=None):
     """Collect every provider inside one wall-clock deadline.
 
@@ -1681,6 +1790,7 @@ def _collect(deadline=None):
         p.setdefault("code", meta["code"])
         if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
+        _contract_rows(p, now)
         providers.append(p)
     _prune_history(now)
     return {
