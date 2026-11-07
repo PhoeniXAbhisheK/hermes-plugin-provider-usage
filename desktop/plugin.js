@@ -5,8 +5,9 @@
  * (/api/plugins/provider-usage/usage, served by dashboard/plugin_api.py),
  * so provider credentials stay on the local machine.
  *
- * Each provider header carries an eye toggle that shows/hides that provider
- * in the status bar; until one is touched, only the first provider shows.
+ * Each provider row carries a pin toggle; Pin all and Unpin all sit in the
+ * popover toolbar. With no pins the bar follows the focused session's
+ * provider, and shows plain "Usage" when that provider is not covered.
  *
  * Registered as a DATA contribution, so the app renders it with the exact
  * same chrome as the core context-usage gauge; `variant: 'menu'` opens the
@@ -23,9 +24,19 @@
  * Burn-rate ETA: the backend reports `actionable_eta` from observed history;
  * rows show "~2d" when it is present, and nothing otherwise.
  */
-import { STATUSBAR_AREAS, atom, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
+import {
+  STATUSBAR_AREAS,
+  ScrollArea,
+  SegmentedControl,
+  Tip,
+  atom,
+  host,
+  useQuery,
+  useQueryClient,
+  useValue
+} from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const USAGE_KEY = ['plugin-provider-usage', 'backend']
 
@@ -40,8 +51,9 @@ const INTERVALS = [
  * (namespaced under hermes.plugin.provider-usage.*) so they survive restarts. */
 const $interval = atom(300000)
 const $mode = atom('used') // 'used' | 'remaining'
-/* Which providers appear in the status bar. null = default (first provider
- * only); an array of ids = an explicit choice from the panel's eye toggles. */
+/* Which providers appear in the status bar. null = never touched; an array
+ * of ids = the pinned providers (carried over unchanged from the old eye
+ * toggles, so a saved choice still applies). */
 const $barProviders = atom(null)
 
 const STORE_INTERVAL = 'intervalMs'
@@ -178,20 +190,9 @@ export function providerWarn(p) {
   return false
 }
 
-/* Bar visibility: default is the FIRST provider only (provider list order);
- * once the user touches a toggle, an explicit id list decides. */
-export function barVisible(set, id, ids) {
-  if (!Array.isArray(ids)) return false
-  if (set === null) return ids.length > 0 && ids[0] === id
-  return set.indexOf(id) !== -1
-}
+/* ---------- session provider (read on focus/model change only) ---------- */
 
-function toggleBarProvider(id, ids) {
-  const cur = $barProviders.get()
-  const effective = cur === null ? (ids.length ? [ids[0]] : []) : cur.slice()
-  const next = effective.indexOf(id) === -1 ? effective.concat([id]) : effective.filter(x => x !== id)
-  $barProviders.set(next)
-}
+const $sessionProvider = atom(null)
 
 /* ---------- alerts (native notification, deduped) ---------- */
 
@@ -341,12 +342,346 @@ export function summary(p, mode) {
   return rowView(pick || wins[0], mode).value
 }
 
+/* ---------- redesign phase 1: pins, session follow, grouping, bar layout ---------- */
+
+/* A pin set is the same atom, and the same storage key, the eye toggles
+ * wrote: null = never touched (a saved array therefore carries over
+ * unchanged), an array = the pinned provider ids. */
+export function pinnedIds(set, ids) {
+  const pinned = Array.isArray(set) ? set : []
+  if (!Array.isArray(ids)) return []
+  return ids.filter(id => pinned.indexOf(id) !== -1)
+}
+
+export function togglePin(set, id) {
+  const pins = Array.isArray(set) ? set.slice() : []
+  return pins.indexOf(id) === -1 ? pins.concat([id]) : pins.filter(x => x !== id)
+}
+
+export function allPinned(set, ids) {
+  if (!Array.isArray(ids) || !ids.length) return false
+  return pinnedIds(set, ids).length === ids.length
+}
+
+/* Hermes provider aliases (hermes_cli/auth.py `_PROVIDER_ALIASES`) for the
+ * ids this plugin covers, plus the regional ids that report as their own
+ * provider. Anything else passes through lower-cased. */
+const PROVIDER_ALIASES = {
+  'minimax-cn': 'minimax',
+  'kimi-coding-cn': 'kimi-coding',
+  'copilot-acp': 'copilot',
+  glm: 'zai',
+  'z-ai': 'zai',
+  'z.ai': 'zai',
+  zhipu: 'zai',
+  kimi: 'kimi-coding',
+  'kimi-for-coding': 'kimi-coding',
+  moonshot: 'kimi-coding',
+  'kimi-cn': 'kimi-coding',
+  'moonshot-cn': 'kimi-coding',
+  'minimax-china': 'minimax',
+  minimax_cn: 'minimax',
+  claude: 'anthropic',
+  'claude-code': 'anthropic',
+  go: 'opencode-go',
+  'opencode-go-sub': 'opencode-go',
+  github: 'copilot',
+  'github-copilot': 'copilot',
+  'github-models': 'copilot',
+  'github-model': 'copilot',
+  or: 'openrouter'
+}
+
+export function normaliseProvider(raw) {
+  if (typeof raw !== 'string') return null
+  const id = raw.trim().toLowerCase()
+  if (!id) return null
+  return PROVIDER_ALIASES[id] || id
+}
+
+/* Pins win. With no pins the bar follows the focused session's provider,
+ * and falls back to plain "Usage" when that provider is not ours. */
+export function barProviderIds(set, ids, sessionProvider) {
+  const known = Array.isArray(ids) ? ids : []
+  const pins = pinnedIds(set, known)
+  if (pins.length) return pins
+  const id = normaliseProvider(sessionProvider)
+  return id !== null && known.indexOf(id) !== -1 ? [id] : []
+}
+
+const SESSION_READ_TIMEOUT_MS = 4000
+
+/* Read the focused session's provider from `model.options` once per focus or
+ * model change, never per poll. `host` needs only `request`, so a test can
+ * pass a stub. A missing API, a throw, a timeout, a missing session id or a
+ * non-string provider all count as null. */
+export function readSessionProvider(host, sessionId, timeoutMs) {
+  if (!host || typeof host.request !== 'function') return Promise.resolve(null)
+  if (!sessionId) return Promise.resolve(null)
+  const budget = isFinite(Number(timeoutMs)) ? Number(timeoutMs) : SESSION_READ_TIMEOUT_MS
+  return new Promise(resolve => {
+    let settled = false
+    const done = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => done(null), budget)
+    let request
+    try {
+      request = host.request('model.options', { session_id: sessionId })
+    } catch (e) {
+      done(null)
+      return
+    }
+    Promise.resolve(request).then(
+      res => done(res && typeof res.provider === 'string' ? res.provider : null),
+      () => done(null)
+    )
+  })
+}
+
+/* A provider needs attention when it is ok and one of its rows is warned or
+ * already carries an actionable ETA. */
+export function providerAttention(p) {
+  if (!p || p.status !== 'ok') return false
+  const rows = (p.windows || []).concat(p.money || [])
+  for (const row of rows) {
+    if (!row) continue
+    if (row.warn === true) return true
+    if (row.actionable_eta !== null && row.actionable_eta !== undefined) return true
+  }
+  return false
+}
+
+/* The earliest actionable ETA in the provider, worded for its kind. */
+export function attentionNote(p) {
+  if (!p || p.status !== 'ok') return ''
+  let best = null
+  const consider = (row, money) => {
+    const raw = row && row.actionable_eta
+    if (raw === null || raw === undefined) return
+    const eta = Number(raw)
+    if (!isFinite(eta) || eta <= 0) return
+    if (best === null || eta < best.eta) best = { eta: eta, money: money }
+  }
+  for (const w of p.windows || []) consider(w, false)
+  for (const m of p.money || []) consider(m, true)
+  if (best === null) return ''
+  return (best.money ? 'runs out ' : 'full ') + fmtEta(best.eta)
+}
+
+/* Attention first, backend order kept inside each group. */
+export function groupProviders(providers, view, set) {
+  const rows = Array.isArray(providers) ? providers : []
+  const pins = pinnedIds(set, rows.map(p => p.id))
+  const kept = view === 'pinned' ? rows.filter(p => pins.indexOf(p.id) !== -1) : rows.slice()
+  const attention = kept.filter(providerAttention)
+  const rest = kept.filter(p => !providerAttention(p))
+  const groups = []
+  if (attention.length) groups.push({ title: 'Needs attention', rows: attention })
+  if (rest.length) groups.push({ title: attention.length ? 'Everything else' : 'Providers', rows: rest })
+  return groups
+}
+
+/* A provider's quotas are its windows then its money rows. */
+function quotaEntries(p) {
+  const list = []
+  for (const w of Array.isArray(p && p.windows) ? p.windows : []) {
+    list.push({ row: w, money: false, index: list.length })
+  }
+  for (const m of Array.isArray(p && p.money) ? p.money : []) {
+    list.push({ row: m, money: true, index: list.length })
+  }
+  return list
+}
+
+function quotaUsed(row) {
+  const raw = row && row.used_pct
+  if (raw === null || raw === undefined) return -Infinity
+  const n = Number(raw)
+  return isFinite(n) ? n : -Infinity
+}
+
+/* The quota the bar summarises today. */
+export function barQuotaKey(p) {
+  if (!p) return null
+  const moneyRows = Array.isArray(p.money) ? p.money : []
+  if (moneyRows.length) {
+    const cap = moneyRows.find(m => String(m.key || '').indexOf('money:key_cap') === 0) || moneyRows[0]
+    return cap ? cap.key : null
+  }
+  const wins = (Array.isArray(p.windows) ? p.windows : []).filter(w => w.scope !== 'model')
+  if (!wins.length) return null
+  let pick = null
+  for (const w of wins) {
+    const d = Number(w.duration_seconds)
+    if (!isFinite(d) || d <= 0) continue
+    if (pick === null || d < Number(pick.duration_seconds)) pick = w
+  }
+  return (pick || wins[0]).key
+}
+
+/* Three or fewer quotas: all of them. More: the three highest by used_pct
+ * (null lowest, ties in payload order) plus the bar quota, displayed as
+ * windows by length ascending (unknown last), then money rows. */
+export function visibleQuotas(p, barKey) {
+  const all = quotaEntries(p)
+  if (all.length <= 3) return { shown: all.map(e => e.row), more: 0 }
+  const ranked = all.slice().sort((a, b) => {
+    const diff = quotaUsed(b.row) - quotaUsed(a.row)
+    return diff !== 0 ? diff : a.index - b.index
+  })
+  const top = ranked.slice(0, 3)
+  if (barKey && !top.some(e => e.row && e.row.key === barKey)) {
+    const bar = ranked.find(e => e.row && e.row.key === barKey)
+    if (bar) top[top.length - 1] = bar
+  }
+  const windows = top.filter(e => !e.money).sort((a, b) => {
+    const da = Number(a.row.duration_seconds)
+    const db = Number(b.row.duration_seconds)
+    const va = isFinite(da) && da > 0 ? da : Infinity
+    const vb = isFinite(db) && db > 0 ? db : Infinity
+    if (va !== vb) return va - vb
+    return a.index - b.index
+  })
+  const money = top.filter(e => e.money).sort((a, b) => a.index - b.index)
+  const shown = windows.concat(money).map(e => e.row)
+  return { shown: shown, more: all.length - shown.length }
+}
+
+/* ---------- status-bar compaction ---------- */
+
+const CHAR_PX = 6.5
+
+function barOrder(entries) {
+  const list = Array.isArray(entries) ? entries.slice() : []
+  return list.filter(e => e && e.attention).concat(list.filter(e => !(e && e.attention)))
+}
+
+function barValue(entry, bare) {
+  const value = String((entry && entry.value) || '')
+  return bare ? value.replace(/%$/, '') : value
+}
+
+function barText(entries, bare) {
+  return entries.map(e => (e && e.code) + ' ' + barValue(e, bare)).join(' · ')
+}
+
+/* Full (1 to 3) steps down to bare (4 to 6) and then meters (7 or more) while
+ * the estimated text width exceeds availPx; null means no limit. `following`
+ * is true when the bar follows the session rather than pins, so the meter
+ * caption only counts pins when the bar is actually pinned. */
+export function barLayout(entries, following, availPx) {
+  const ordered = barOrder(entries)
+  if (!ordered.length) return { mode: 'none' }
+  let shape = ordered.length <= 3 ? 'full' : ordered.length <= 6 ? 'bare' : 'meters'
+  const limit = availPx === null || availPx === undefined ? Infinity : Number(availPx)
+  const tooWide = text => isFinite(limit) && text.length * CHAR_PX > limit
+  if (shape === 'full' && tooWide(barText(ordered, false))) shape = 'bare'
+  if (shape === 'bare' && tooWide(barText(ordered, true))) shape = 'meters'
+  if (shape === 'meters') {
+    return {
+      mode: 'meters',
+      meters: ordered.map(e => {
+        const raw = e.used_pct
+        const height = raw === null || raw === undefined
+          ? 30
+          : Math.max(0, Math.min(100, Number(raw) || 0))
+        return { code: e.code, height: height }
+      }),
+      summary: (() => {
+        const urgent = ordered.find(e => e.attention)
+        return urgent ? urgent.code + ' ' + urgent.value : 'all ok'
+      })(),
+      pinned: following ? '' : ordered.length + ' pinned'
+    }
+  }
+  return { mode: shape, text: barText(ordered, shape === 'bare') }
+}
+
+/* What the bar tooltip lists, one line per bar provider, same order. */
+export function tipEntries(entries) {
+  return barOrder(entries).map(e => ({
+    name: e.name,
+    label: e.label,
+    value: e.value,
+    attention: e.attention === true
+  }))
+}
+
 /* ---------- bar item (live) ---------- */
+
+export function barModel(providers, set, sessionProvider, mode, availPx) {
+  const rows = Array.isArray(providers) ? providers : []
+  /* Every provider id, in payload order: a pinned provider whose fetch failed
+   * must stay in the bar as '-' rather than vanish. */
+  const known = rows.map(p => p.id)
+  const following = !(Array.isArray(set) && set.length)
+  const ids = barProviderIds(set, known, sessionProvider)
+  const visible = rows.filter(p => ids.indexOf(p.id) !== -1)
+  const entries = visible.map(p => {
+    const key = barQuotaKey(p)
+    const row = (p.windows || []).concat(p.money || []).find(r => r && r.key === key) || null
+    return {
+      id: p.id,
+      code: p.code || code(p),
+      value: summary(p, mode),
+      used_pct: row ? row.used_pct : null,
+      attention: providerAttention(p),
+      name: p.name,
+      label: row ? row.label : ''
+    }
+  })
+  return { following: following, entries: entries, layout: barLayout(entries, following, availPx) }
+}
+
+/* Wires the two host atoms to the reader. One subscription set per mount;
+ * the effect in BarDetail runs once, so renders and polls never re-read. */
+export function watchSessionProvider(hostApi, focusAtom, modelAtom, onValue) {
+  let live = true
+  let seq = 0
+  const read = () => {
+    const ticket = ++seq
+    readSessionProvider(hostApi, focusAtom.get()).then(v => {
+      /* A slow reply for the previous session must not overwrite the current
+       * one: only the latest read, while live, may publish. */
+      if (live && ticket === seq) onValue(v)
+    })
+  }
+  read()
+  const offFocus = focusAtom.listen(read)
+  const offModel = modelAtom.listen(read)
+  return () => {
+    live = false
+    offFocus()
+    offModel()
+  }
+}
+
+function useAvailPx() {
+  const read = () => (typeof window === 'undefined' ? null : Math.max(120, Math.round(window.innerWidth * 0.3)))
+  const [avail, setAvail] = useState(read)
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onResize = () => setAvail(read())
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return avail
+}
 
 function BarDetail() {
   const { data, isError } = useUsage()
   const mode = useValue($mode)
   const barSet = useValue($barProviders)
+  const sessionProvider = useValue($sessionProvider)
+  const avail = useAvailPx()
+
+  useEffect(() => {
+    return watchSessionProvider(host, host.state.focusedSessionId, host.state.model, v => $sessionProvider.set(v))
+  }, [])
 
   useEffect(() => {
     if (data) checkAlerts(data)
@@ -354,21 +689,51 @@ function BarDetail() {
 
   if (isError) return 'backend down'
   if (!data) return '…'
-  const provs = data.providers || []
-  const visible = barSet === null
-    ? provs.slice(0, 1)
-    : provs.filter(p => barSet.indexOf(p.id) !== -1)
+  return barContent(barModel(data.providers || [], barSet, sessionProvider, mode, avail))
+}
+
+/* Hook-free render of a bar model: tests build the model and read this. */
+export function barContent(model) {
+  const layout = model.layout
+  if (layout.mode === 'none') return 'Usage'
+  const ordered = barOrder(model.entries)
+  if (layout.mode === 'meters') {
+    const urgent = ordered.some(e => e.attention)
+    return jsxs('span', {
+      style: { display: 'inline-flex', alignItems: 'center', gap: 5, color: 'var(--ui-text-tertiary)' },
+      children: [
+        ...ordered.map((e, i) => jsx('span', {
+          key: e.id,
+          className: e.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
+          style: {
+            width: 4,
+            height: Math.max(2, Math.round((layout.meters[i] ? layout.meters[i].height : 30) * 0.12)),
+            borderRadius: 2,
+            display: 'inline-block',
+            flex: 'none'
+          }
+        })),
+        jsx('span', {
+          key: 'summary',
+          className: urgent ? 'text-amber-600' : undefined,
+          style: { marginLeft: 2 },
+          children: layout.summary
+        }),
+        layout.pinned
+          ? jsx('span', { key: 'pinned', style: { opacity: 0.7 }, children: layout.pinned })
+          : null
+      ]
+    })
+  }
   const parts = []
-  visible.forEach((p, i) => {
+  ordered.forEach((e, i) => {
     if (i) parts.push(' · ')
     parts.push(jsx('span', {
-      key: p.id,
-      className: providerWarn(p) ? 'text-amber-600' : undefined,
-      children: code(p) + ' ' + summary(p, mode)
+      key: e.id,
+      className: e.attention ? 'text-amber-600' : undefined,
+      children: e.code + ' ' + barValue(e, layout.mode === 'bare')
     }))
   })
-  // The host renders plugin detail content in text-muted-foreground/80 (a
-  // double-dimmed tone); force the same token built-in statusbar values use.
   return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
 }
 
@@ -394,262 +759,298 @@ export function tipLine(p, mode) {
     .join(' · ')
 }
 
+export function tipBody(lines, stamp) {
+  const body = lines.length
+    ? lines.map((line, i) =>
+        jsxs('div', {
+          key: 'q' + i,
+          style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
+          children: [
+            jsx('span', {
+              className: line.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
+              style: { width: 4, height: 10, borderRadius: 2, display: 'inline-block', flex: 'none' }
+            }),
+            jsx('span', { style: { fontWeight: 600, whiteSpace: 'nowrap' }, children: line.name }),
+            jsx('span', { style: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: line.label }),
+            jsx('span', {
+              className: line.attention ? 'text-amber-600' : undefined,
+              style: { marginLeft: 'auto', fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+              children: line.value
+            })
+          ]
+        })
+      )
+    : [jsx('div', { key: 'empty', children: 'Pin a provider, or open a chat that uses one' })]
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 250, fontSize: 11, textAlign: 'left' },
+    children: [
+      ...body,
+      jsx('div', {
+        key: 'foot',
+        style: {
+          borderTop: '1px solid var(--ui-stroke-tertiary)',
+          paddingTop: 4,
+          marginTop: 2,
+          color: 'var(--ui-text-tertiary)'
+        },
+        children: 'Click to open · updated ' + (stamp || '')
+      })
+    ]
+  })
+}
+
 function BarTip() {
   const { data } = useUsage()
   const mode = useValue($mode)
+  const barSet = useValue($barProviders)
+  const sessionProvider = useValue($sessionProvider)
   const rows = data && Array.isArray(data.providers) ? data.providers : []
-  return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 235, fontSize: 11, textAlign: 'left' },
-    children: rows.length
-      ? rows.map(p =>
-          jsxs('div', {
-            key: p.id,
-            style: { display: 'flex', justifyContent: 'space-between', gap: 12 },
-            children: [
-              jsx('span', { style: { fontWeight: 600 }, children: p.name }),
-              jsx('span', { style: { opacity: 0.8, fontVariantNumeric: 'tabular-nums' }, children: tipLine(p, mode) })
-            ]
-          })
-        )
-      : [jsx('div', {
-          key: data ? 'empty' : 'load',
-          children: data ? 'Provider usage: no providers available' : 'Provider usage: loading…'
-        })]
-  })
+  const model = barModel(rows, barSet, sessionProvider, mode, null)
+  return tipBody(tipEntries(model.entries), data ? clockOf(data.fetched_at) : '')
 }
 
 /* ---------- popover panel ---------- */
 
 const MONO = 'tabular-nums'
 
-function Row({ label, value, width, meta, warn, eta }) {
-  const raw = Number(width)
-  const w = isFinite(raw) && raw > 0 ? Math.max(3, Math.min(100, raw)) : 0
+function clockOf(iso) {
+  const t = Date.parse(iso)
+  if (!isFinite(t)) return ''
+  return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+const PIN_PATH = 'M9 4h6M12 4v6m0 0 3 3v1H9v-1l3-3m-3 4h6l-1 6H10l-1-6'
+
+/* Stale providers say why their numbers are old, in the row header. */
+export function staleText(p) {
+  if (!p || p.stale !== true) return ''
+  const hold = Date.parse(p.hold_until)
+  if (isFinite(hold) && hold > Date.now()) return 'retry ' + clockOf(p.hold_until)
+  return p.fetched_at ? 'last reading ' + clockOf(p.fetched_at) : ''
+}
+
+function pinButton(p, pinned, onPin) {
+  const label = (pinned ? 'Unpin ' : 'Pin ') + p.name + (pinned ? ' from status bar' : ' to status bar')
+  return jsx('button', {
+    type: 'button',
+    'aria-pressed': pinned,
+    'aria-label': label,
+    title: label,
+    onClick: onPin,
+    style: {
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      width: 24, height: 24, flex: 'none', padding: 0, borderRadius: 6, cursor: 'pointer',
+      border: '1px solid ' + (pinned ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
+      background: pinned ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
+      color: pinned ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+    },
+    children: jsx('svg', {
+      viewBox: '0 0 24 24', width: 12, height: 12, fill: pinned ? 'currentColor' : 'none',
+      stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+      children: jsx('path', { key: 'pin', d: PIN_PATH })
+    })
+  })
+}
+
+function quotaCell(row, ctx) {
+  const view = rowView(row, ctx.mode)
+  const isMoney = row.kind === 'money'
+  /* Reset text only when the provider shows one quota: at 2 or 3 columns the
+   * row has no room for it, so the window keeps label and value only. */
+  const extra = isMoney
+    ? Number(row.total) > 0 ? '/ ' + money(row.total, row.cur) : ''
+    : ctx.columns === 1 ? etaText(row.resets_at) : ''
+  const dot = ctx.barHere && row.key === ctx.barKey
+  const hasWidth = row.used_pct !== null && row.used_pct !== undefined
+  const ellipsis = {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap'
+  }
   return jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
+    key: 'q' + (row.key || row.label),
+    style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
     children: [
-      jsx('span', {
-        style: { width: 72, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-        children: label
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'baseline', gap: 4, minWidth: 0 },
+        children: [
+          jsx('span', {
+            className: dot ? 'bg-(--ui-accent)' : undefined,
+            style: {
+              width: 5,
+              height: 5,
+              borderRadius: '50%',
+              flex: 'none',
+              alignSelf: 'center',
+              background: dot ? undefined : 'transparent'
+            }
+          }),
+          jsx('span', {
+            style: { fontSize: 10.5, color: 'var(--ui-text-tertiary)', flex: '0 1 auto', ...ellipsis },
+            children: row.label
+          }),
+          jsx('span', {
+            className: row.warn === true ? 'text-amber-600' : undefined,
+            style: { fontSize: 11, fontVariantNumeric: MONO, marginLeft: 'auto', flex: 'none' },
+            children: view.value
+          }),
+          extra
+            ? jsx('span', {
+                style: { fontSize: 10, color: 'var(--ui-text-tertiary)', flex: '0 1 auto', ...ellipsis },
+                children: extra
+              })
+            : null
+        ]
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
-        children: w > 0
+        style: {
+          height: 4,
+          borderRadius: 2,
+          overflow: 'hidden',
+          background: hasWidth ? 'var(--ui-stroke-tertiary)' : 'transparent'
+        },
+        children: hasWidth
           ? jsx('span', {
-              style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
+              className: row.warn === true ? 'bg-amber-600' : 'bg-(--ui-accent)',
+              style: {
+                display: 'block',
+                height: '100%',
+                width: Math.max(0, Math.min(100, Number(view.width) || 0)) + '%'
+              }
             })
           : null
-      }),
-      jsx('span', {
-        style: { width: 48, flex: 'none', textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO },
-        className: warn ? 'text-amber-600' : undefined,
-        children: value
-      }),
-      jsx('span', {
-        style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
-        children: eta
-          ? [meta, jsx('span', { key: 'eta', className: 'text-amber-600', style: { marginLeft: 4 }, children: eta })]
-          : meta
       })
     ]
   })
 }
 
-/* Money-row headings flip with the value mode so the number can never lie. */
+/* One provider row, hook-free so tests can build it directly. */
+export function providerRowElement(p, ctx) {
+  const pins = Array.isArray(ctx.pins) ? ctx.pins : []
+  const pinned = pins.indexOf(p.id) !== -1
+  const barKey = barQuotaKey(p)
+  const barHere = (ctx.barIds || []).indexOf(p.id) !== -1
+  const windows = Array.isArray(p.windows) ? p.windows : []
+  const moneyRows = Array.isArray(p.money) ? p.money : []
+  const all = windows.concat(moneyRows)
+  const toggle = pinButton(p, pinned, ctx.onPin)
+  const note = attentionNote(p)
+  const stale = staleText(p)
+  const expanded = ctx.expanded === true
+  const quotas = visibleQuotas(p, barKey)
+  const shown = expanded ? all : quotas.shown
+  const cols = expanded ? 3 : Math.max(1, Math.min(3, shown.length))
+  const rowStyle = opacity => ({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    padding: '7px 14px 9px',
+    borderBottom: '1px solid var(--ui-stroke-tertiary)',
+    opacity: opacity
+  })
 
-const EYE_PATH = 'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'
-
-function EyeIcon({ off }) {
-  return jsx('svg', {
-    viewBox: '0 0 24 24', width: 13, height: 13, fill: 'none', stroke: 'currentColor',
-    strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' },
+  const header = jsxs('div', {
+    style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
     children: [
-      jsx('path', { key: 'eye', d: EYE_PATH }),
-      jsx('circle', { key: 'pupil', cx: 12, cy: 12, r: 3 }),
-      off ? jsx('path', { key: 'slash', d: 'm3 3 18 18' }) : null
-    ]
-  })
-}
-
-/* Eye toggle: shows/hides one provider in the status bar. */
-function BarToggle({ p, ids }) {
-  const set = useValue($barProviders)
-  const on = barVisible(set, p.id, ids)
-  return jsx('button', {
-    type: 'button',
-    title: on ? 'Hide from status bar' : 'Show in status bar',
-    'aria-label': on ? 'Hide from status bar' : 'Show in status bar',
-    onClick: () => toggleBarProvider(p.id, ids),
-    style: {
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: 16, height: 20, padding: 0, border: 'none', borderRadius: 5,
-      background: 'transparent', color: 'inherit', cursor: 'pointer',
-      opacity: on ? 1 : 0.6, transform: 'translate(-1.5px, -2px)'
-    },
-    children: jsx(EyeIcon, { off: !on })
-  })
-}
-
-export function ProviderBlock({ p, first, mode, ids }) {
-  const rows = []
-  if (p.status !== 'ok') {
-    rows.push(jsx('div', { key: 'err', style: { fontSize: 11, opacity: 0.8 }, children: 'unavailable: ' + (p.error || 'fetch failed') }))
-  }
-  if (p.stale && (p.hold_until || p.fetched_at)) {
-    const clock = (v) => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    const bits = []
-    if (p.fetched_at) bits.push('last reading ' + clock(p.fetched_at))
-    if (p.hold_until) bits.push('retry after ' + clock(p.hold_until))
-    rows.push(jsx('div', { key: 'stale', style: { fontSize: 11, opacity: 0.8 }, children: bits.join(' · ') }))
-  }
-  for (const w of p.windows || []) {
-    const view = rowView(w, mode)
-    rows.push(jsx(Row, {
-      key: 'w' + w.key,
-      label: view.label,
-      value: view.value,
-      width: view.width,
-      meta: etaText(w.resets_at),
-      warn: w.warn === true,
-      eta: view.eta ? fmtEta(view.eta) : null
-    }))
-  }
-  for (const m of p.money || []) {
-    const view = rowView(m, mode)
-    rows.push(jsx(Row, {
-      key: 'm' + m.key,
-      label: view.label,
-      value: view.value,
-      width: view.width,
-      meta: view.totalText ? '/ ' + view.totalText : '',
-      warn: m.warn === true,
-      eta: view.eta ? fmtEta(view.eta) : null
-    }))
-  }
-  return jsxs('div', {
-    style: {
-      display: 'flex', flexDirection: 'column', gap: 3,
-      borderTop: first ? 'none' : '1px solid var(--ui-stroke-tertiary, #3a3f4a)',
-      paddingTop: first ? 0 : 6
-    },
-    children: [
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 1 },
-        children: [
-          jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 1 },
-            children: [
-              jsx(BarToggle, { p, ids }),
-              jsx('span', { style: { fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75 }, children: p.name })
-            ]
-          }),
-          jsx('span', { style: { fontSize: 11, opacity: 0.6 }, children: p.tag || '' })
-        ]
-      }),
-      ...rows
-    ]
-  })
-}
-
-/* ---------- footer controls ---------- */
-
-function ModeSelect() {
-  const mode = useValue($mode)
-  const seg = (key, label) => {
-    const active = mode === key
-    return jsx('button', {
-      type: 'button',
-      onClick: () => $mode.set(key),
-      style: {
-        padding: '1px 7px', fontSize: 11, lineHeight: '16px', cursor: 'pointer', borderRadius: 5,
-        border: '1px solid ' + (active ? 'var(--ui-accent, #6f9dff)' : 'var(--ui-stroke-tertiary, #3a3f4a)'),
-        background: active ? 'color-mix(in srgb, var(--ui-accent, #6f9dff) 30%, transparent)' : 'transparent',
-        color: 'inherit', opacity: active ? 1 : 0.72
-      },
-      children: label
-    }, key)
-  }
-  return jsx('span', {
-    style: { display: 'inline-flex', gap: 4 },
-    children: [seg('used', 'Used'), seg('remaining', 'Remaining')]
-  })
-}
-
-function IntervalSelect({ onChanged }) {
-  const interval = useValue($interval)
-  const [open, setOpen] = useState(false)
-  const wrapRef = useRef(null)
-
-  useEffect(() => {
-    if (!open) return undefined
-    const onDoc = e => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [open])
-
-  const current = INTERVALS.find(o => o.ms === interval) || INTERVALS[2]
-
-  return jsxs('span', {
-    ref: wrapRef,
-    style: { position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 },
-    children: [
-      jsx('span', { style: { opacity: 0.7 }, children: 'auto refresh' }),
-      jsxs('button', {
-        type: 'button',
-        onClick: () => setOpen(v => !v),
-        title: 'Refresh interval',
+      jsx('span', { style: { fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }, children: p.name }),
+      jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: p.tag || '' }),
+      jsx('span', {
+        className: note ? 'text-amber-600' : undefined,
         style: {
-          display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', fontSize: 11, lineHeight: '16px',
-          border: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', borderRadius: 5, background: 'transparent',
-          color: 'inherit', cursor: 'pointer'
+          marginLeft: 'auto',
+          fontSize: 10,
+          fontVariantNumeric: MONO,
+          whiteSpace: 'nowrap',
+          color: note ? undefined : 'var(--ui-text-tertiary)'
         },
-        children: [
-          jsx('span', { children: current.label }),
-          jsx('svg', {
-            viewBox: '0 0 24 24', width: 9, height: 9, fill: 'none', stroke: 'currentColor',
-            strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round',
-            children: jsx('path', { d: 'm6 9 6 6 6-6' })
-          })
-        ]
+        children: note || stale
       }),
-      open &&
-        jsx('div', {
-          style: {
-            position: 'absolute', bottom: 'calc(100% + 4px)', left: 0, zIndex: 40,
-            display: 'flex', flexDirection: 'column', gap: 1, minWidth: 58, padding: 3,
-            border: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', borderRadius: 7,
-            background: 'var(--ui-bg-elevated, #26272b)', boxShadow: '0 6px 18px rgba(0,0,0,.35)'
-          },
-          children: INTERVALS.map(o =>
-            jsx('button', {
-              key: o.ms,
-              type: 'button',
-              onClick: () => {
-                $interval.set(o.ms)
-                setOpen(false)
-                if (onChanged) onChanged(o.ms)
-              },
-              style: {
-                textAlign: 'left', padding: '2px 8px', fontSize: 11, border: 'none', borderRadius: 5, cursor: 'pointer',
-                color: 'inherit',
-                background: o.ms === interval ? 'color-mix(in srgb, var(--ui-accent, #6f9dff) 30%, transparent)' : 'transparent'
-              },
-              children: o.label
-            })
-          )
+      quotas.more > 0 || expanded
+        ? jsx('button', {
+            type: 'button',
+            onClick: ctx.onMore,
+            style: {
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--ui-text-tertiary)',
+              fontSize: 10,
+              cursor: 'pointer'
+            },
+            children: expanded ? 'Show less' : '+' + quotas.more + ' more'
+          })
+        : null,
+      toggle
+    ]
+  })
+
+  if (p.status !== 'ok' && !all.length) {
+    const text = p.error || 'fetch failed'
+    return jsxs('div', {
+      style: rowStyle(1),
+      children: [
+        header,
+        jsx(Tip, {
+          label: text,
+          children: jsx('span', {
+            style: {
+              fontSize: 11,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              color: 'var(--ui-text-tertiary)'
+            },
+            children: text
+          })
         })
+      ]
+    })
+  }
+
+  return jsxs('div', {
+    style: rowStyle(p.stale === true && all.length ? 0.6 : 1),
+    children: [
+      header,
+      jsx('div', {
+        style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 8 },
+        children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols }))
+      })
     ]
   })
 }
 
 /* ---------- popover ---------- */
 
+/* Pin all when not every provider is pinned, otherwise Unpin all. */
+export function pinAllSet(pins, ids) {
+  return allPinned(pins, ids) ? [] : ids.slice()
+}
+
+export function groupHeadingElement(title) {
+  return jsx('div', {
+    className: title === 'Needs attention' ? 'text-amber-600' : undefined,
+    style: {
+      fontSize: 10,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      padding: '8px 14px 2px',
+      color: title === 'Needs attention' ? undefined : 'var(--ui-text-tertiary)'
+    },
+    children: title
+  })
+}
+
 function UsagePanel() {
   const { data, isError } = useUsage()
   const qc = useQueryClient()
   const mode = useValue($mode)
+  const interval = useValue($interval)
+  const pins = useValue($barProviders)
+  const sessionProvider = useValue($sessionProvider)
+  const [view, setView] = useState('all')
+  const [expanded, setExpanded] = useState([])
   const [spinning, setSpinning] = useState(false)
 
   const refresh = () => {
@@ -662,42 +1063,63 @@ function UsagePanel() {
   }
 
   const stamp = data
-    ? 'updated ' + new Date(data.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    ? 'updated ' + clockOf(data.fetched_at)
     : isError
       ? 'unreachable'
       : 'loading…'
 
   const provs = data && Array.isArray(data.providers) ? data.providers : []
-  const body = []
   const ids = provs.map(x => x.id)
-  provs.forEach((p, i) => body.push(jsx(ProviderBlock, { p, first: i === 0, mode, ids }, p.id)))
+  const pinnedCount = pinnedIds(pins, ids).length
+  const barIds = barModel(provs, pins, sessionProvider, mode, null).entries.map(e => e.id)
+  const groups = groupProviders(provs, view, pins)
+
+  const body = []
   if (isError) {
     body.push(jsx('div', { key: 'down', style: { fontSize: 11 }, children: 'Backend unreachable. Enable the plugin and retry.' }))
   } else if (data && !provs.length) {
     body.push(jsx('div', { key: 'empty', style: { fontSize: 11 }, children: 'No providers available.' }))
+  } else {
+    groups.forEach(group => {
+      body.push(jsxs('div', {
+        key: group.title,
+        style: { display: 'flex', flexDirection: 'column' },
+        children: [
+          groupHeadingElement(group.title),
+          ...group.rows.map(p => providerRowElement(p, {
+            mode: mode,
+            pins: pins,
+            barIds: barIds,
+            expanded: expanded.indexOf(p.id) !== -1,
+            onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id)),
+            onMore: () => setExpanded(cur => cur.indexOf(p.id) === -1 ? cur.concat([p.id]) : cur.filter(x => x !== p.id))
+          }))
+        ]
+      }))
+    })
   }
 
   return jsxs('div', {
-    style: { display: 'flex', width: 320, flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
+    style: { display: 'flex', width: 390, maxHeight: 'min(700px, 70vh)', flexDirection: 'column', fontSize: 12 },
     children: [
       jsx('style', { key: 'kf', children: '@keyframes hermes-usage-spin{to{transform:rotate(360deg)}}' }),
       jsxs('div', {
         key: 'head',
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 12px 6px' },
         children: [
-          jsx('span', { style: { fontSize: 12, fontWeight: 650 }, children: 'Provider Usage' }),
+          jsx('span', { style: { fontSize: 13, fontWeight: 600 }, children: 'Provider Usage' }),
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, opacity: 0.75 },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--ui-text-tertiary)' },
             children: [
               jsx('span', { style: { fontVariantNumeric: MONO }, children: stamp }),
               jsx('button', {
                 type: 'button',
                 onClick: refresh,
-                title: 'Refresh usage',
-                'aria-label': 'Refresh usage',
+                title: 'Refresh now',
+                'aria-label': 'Refresh now',
                 style: {
-                  display: 'inline-flex', width: 21, height: 21, alignItems: 'center', justifyContent: 'center',
-                  border: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', borderRadius: 6,
+                  display: 'inline-flex', width: 26, height: 26, alignItems: 'center', justifyContent: 'center',
+                  border: '1px solid var(--ui-stroke-tertiary)', borderRadius: 6,
                   background: 'transparent', color: 'inherit', cursor: 'pointer'
                 },
                 children: jsx('svg', {
@@ -716,16 +1138,65 @@ function UsagePanel() {
           })
         ]
       }),
-      ...body,
+      jsxs('div', {
+        key: 'toolbar',
+        style: {
+          display: 'flex', alignItems: 'center', gap: 6, padding: '2px 12px 8px',
+          borderBottom: '1px solid var(--ui-stroke-tertiary)'
+        },
+        children: [
+          jsx(SegmentedControl, {
+            options: [{ id: 'all', label: 'All ' + provs.length }, { id: 'pinned', label: 'Pinned ' + pinnedCount }],
+            value: view,
+            onChange: setView
+          }),
+          jsx('button', {
+            type: 'button',
+            onClick: () => $barProviders.set(pinAllSet(pins, ids)),
+            style: {
+              padding: 0, border: 'none', background: 'transparent',
+              color: 'var(--ui-text-tertiary)', fontSize: 11, cursor: 'pointer'
+            },
+            children: everyPinned ? 'Unpin all' : 'Pin all'
+          }),
+          jsx('span', {
+            style: { marginLeft: 'auto', fontSize: 10, color: 'var(--ui-text-tertiary)' },
+            children: 'Sorted by risk'
+          })
+        ]
+      }),
+      jsx(ScrollArea, {
+        key: 'body',
+        className: 'min-h-0 flex-1 overflow-y-auto',
+        children: jsx('div', {
+          style: { display: 'flex', flexDirection: 'column' },
+          children: body
+        })
+      }),
       jsxs('div', {
         key: 'foot',
         style: {
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-          borderTop: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', paddingTop: 6, fontSize: 11
+          display: 'flex', alignItems: 'center', gap: 6,
+          borderTop: '1px solid var(--ui-stroke-tertiary)', padding: '8px 12px'
         },
         children: [
-          jsx(IntervalSelect, { onChanged: () => qc.refetchQueries({ queryKey: USAGE_KEY }) }, 'int'),
-          jsx(ModeSelect, {}, 'mode')
+          jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)' }, children: 'auto refresh' }),
+          jsx(SegmentedControl, {
+            options: INTERVALS.map(o => ({ id: String(o.ms), label: o.label })),
+            value: String(interval),
+            onChange: id => {
+              $interval.set(Number(id))
+              qc.refetchQueries({ queryKey: USAGE_KEY })
+            }
+          }),
+          jsx('span', {
+            style: { marginLeft: 'auto' },
+            children: jsx(SegmentedControl, {
+              options: [{ id: 'used', label: 'Used' }, { id: 'remaining', label: 'Remaining' }],
+              value: mode,
+              onChange: id => $mode.set(id)
+            })
+          })
         ]
       })
     ]
