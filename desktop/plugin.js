@@ -29,7 +29,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
 const USAGE_KEY = ['plugin-provider-usage', 'backend']
-const WARN_PCT = 80
+export const WARN_PCT = 80
 
 const INTERVALS = [
   { label: '30s', ms: 30000 },
@@ -101,8 +101,8 @@ function useUsage() {
 /* ---------- formatting / prediction helpers ---------- */
 
 const CUR = { USD: '$', CNY: '\u00a5' }
-const money = (v, cur) => (CUR[cur] || '$') + Number(v).toFixed(2)
-const pct = v => Math.round(Number(v) || 0) + '%'
+export const money = (v, cur) => (CUR[cur] || '$') + Number(v).toFixed(2)
+export const pct = v => Math.round(Number(v) || 0) + '%'
 const CODE = {
   'opencode-go': 'opencode',
   'openai-codex': 'codex',
@@ -115,9 +115,9 @@ const CODE = {
   minimax: 'minimax',
   deepseek: 'deepseek'
 }
-const code = p => CODE[p.id] || p.id
+export const code = p => CODE[p.id] || p.id
 
-function etaText(iso) {
+export function etaText(iso) {
   if (!iso) return ''
   const ms = Date.parse(iso) - Date.now()
   if (!isFinite(ms)) return ''
@@ -129,7 +129,7 @@ function etaText(iso) {
   return 'resets in ' + Math.round(hours / 24) + 'd'
 }
 
-function fmtEta(sec) {
+export function fmtEta(sec) {
   const s = Number(sec)
   if (!isFinite(s) || s <= 0) return ''
   const mins = Math.round(s / 60)
@@ -139,17 +139,17 @@ function fmtEta(sec) {
   return '~' + Math.round(hours / 24) + 'd'
 }
 
-function usedPercentOf(w) {
+export function usedPercentOf(w) {
   return Math.max(0, Math.min(100, Number(w && w.percent) || 0))
 }
 
-function capUsedPercent(m) {
+export function capUsedPercent(m) {
   const total = Number(m && m.total) || 0
   const left = Number(m && m.left) || 0
   return total > 0 ? Math.max(0, Math.min(100, ((total - left) / total) * 100)) : 0
 }
 
-function providerWarn(p) {
+export function providerWarn(p) {
   if (!p || p.status !== 'ok') return false
   for (const w of p.windows || []) if (usedPercentOf(w) >= WARN_PCT) return true
   for (const m of p.money || []) {
@@ -160,7 +160,7 @@ function providerWarn(p) {
 
 /* Bar visibility: default is the FIRST provider only (provider list order);
  * once the user touches a toggle, an explicit id list decides. */
-function barVisible(set, id, ids) {
+export function barVisible(set, id, ids) {
   if (!Array.isArray(ids)) return false
   if (set === null) return ids.length > 0 && ids[0] === id
   return set.indexOf(id) !== -1
@@ -176,7 +176,7 @@ function toggleBarProvider(id, ids) {
 /* A projection is actionable when the window would hit 100% BEFORE its own
  * reset (otherwise the reset saves you first). Without a reset time, only
  * projections inside a week are surfaced. */
-function actionableEta(w) {
+export function actionableEta(w) {
   const e = Number(w && w.eta_seconds)
   if (!isFinite(e) || e <= 0) return null
   if (w && w.resets_at) {
@@ -193,9 +193,9 @@ function actionableEta(w) {
 /* Two polls seconds apart compute a reset time that differs by a few seconds.
  * Compare reset times within a tolerance instead of bucketing them: bucketing
  * still flips when the value crosses a bucket edge. */
-const RESET_TOLERANCE_MS = 120000
+export const RESET_TOLERANCE_MS = 120000
 
-function sameReset(seen, prefix, stamp) {
+export function sameReset(seen, prefix, stamp) {
   const keys = Object.keys(seen)
   for (const key of keys) {
     if (key.indexOf(prefix) !== 0) continue
@@ -206,7 +206,7 @@ function sameReset(seen, prefix, stamp) {
   return false
 }
 
-function checkAlerts(data) {
+export function checkAlerts(data) {
   if (!storage || !data || !Array.isArray(data.providers)) return
   try {
     const seen = storage.get(STORE_ALERTS, {}) || {}
@@ -278,7 +278,7 @@ function checkAlerts(data) {
 /* One-line summary for the bar, in the CURRENT value mode:
  * quota providers show their 5h (rolling) window, used or remaining;
  * OpenRouter shows its key-cap amount (used or left). */
-function summary(p, mode) {
+export function summary(p, mode) {
   if (!p || p.status !== 'ok') return '-'
   const used = mode !== 'remaining'
   const moneyRows = Array.isArray(p.money) ? p.money : []
@@ -327,7 +327,7 @@ function BarDetail() {
   return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
 }
 
-function tipLine(p, mode) {
+export function tipLine(p, mode) {
   if (p.status !== 'ok') return 'unavailable'
   const used = mode !== 'remaining'
   const moneyRows = Array.isArray(p.money) ? p.money : []

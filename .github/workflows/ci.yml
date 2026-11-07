@@ -80,6 +80,8 @@ jobs:
         run: |
           cp desktop/plugin.js "${RUNNER_TEMP}/plugin.mjs"
           node --check "${RUNNER_TEMP}/plugin.mjs"
+      - name: Run the desktop tests
+        run: node --test tests/desktop/plugin.test.mjs
 
 # Not run here: `hermes plugins validate .`. Installing the CLI pulls the whole
 # Hermes runtime (about 120 pinned dependencies), which is too slow and too
