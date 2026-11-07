@@ -81,7 +81,23 @@ jobs:
           cp desktop/plugin.js "${RUNNER_TEMP}/plugin.mjs"
           node --check "${RUNNER_TEMP}/plugin.mjs"
       - name: Run the desktop tests
-        run: node --test tests/desktop/plugin.test.mjs
+        run: node --test tests/desktop/*.test.mjs
+
+  lint-desktop:
+    name: Desktop lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Run ESLint
+        run: |
+          npm ci --prefix tools/lint
+          node tools/lint/node_modules/eslint/bin/eslint.js --config tools/lint/eslint.config.mjs desktop tests/desktop
 
 # Not run here: `hermes plugins validate .`. Installing the CLI pulls the whole
 # Hermes runtime (about 120 pinned dependencies), which is too slow and too

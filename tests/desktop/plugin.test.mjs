@@ -2416,3 +2416,287 @@ test('tipEntries lists one line per bar provider in bar order', async () => {
     { name: 'Alpha', label: '5h', value: '1%', attention: false }
   ])
 })
+
+/* A hand-built v0.3.1-shaped payload: rows have no key and no used_pct. */
+const OLD_PAYLOAD = {
+  fetched_at: '2026-11-07T18:00:00Z',
+  providers: [
+    {
+      id: 'anthropic',
+      status: 'ok',
+      name: 'Anthropic',
+      tag: 'Max',
+      code: 'claude',
+      windows: [
+        {
+          label: '5h',
+          percent: 42,
+          resets_at: '2026-11-07T20:00:00Z',
+          status: 'ok',
+          scope: 'account'
+        }
+      ],
+      money: [{ label: 'Balance', left: 12.5, cur: 'USD', total: 20 }]
+    }
+  ]
+}
+
+test('staleBackend treats the old v0.3.1 payload as stale', async () => {
+  const { staleBackend } = await loadPlugin()
+  assert.equal(staleBackend(OLD_PAYLOAD), true)
+})
+
+test('staleBackend accepts the current payload', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const current = JSON.parse(await readFile(new URL('./payload.json', import.meta.url), 'utf8'))
+  const { staleBackend } = await loadPlugin()
+  assert.equal(staleBackend(current), false)
+})
+
+test('staleBackend accepts a money row with a null used_pct', async () => {
+  const { staleBackend } = await loadPlugin()
+  const data = {
+    providers: [
+      {
+        id: 'openrouter',
+        status: 'ok',
+        name: 'OpenRouter',
+        tag: 'Credits',
+        code: 'openrouter',
+        money: [
+          {
+            label: 'Balance',
+            left: 5,
+            cur: 'USD',
+            key: 'money:balance:usd',
+            kind: 'money',
+            used_pct: null,
+            warn: false,
+            actionable_eta: null
+          }
+        ]
+      }
+    ]
+  }
+  assert.equal(staleBackend(data), false)
+})
+
+test('staleBackend is false without data, on error and on an empty list', async () => {
+  const { staleBackend } = await loadPlugin()
+  assert.equal(staleBackend(null), false)
+  assert.equal(staleBackend({ providers: [] }), false)
+  assert.equal(
+    staleBackend({ providers: [{ id: 'x', status: 'error', name: 'X', tag: 'T', code: 'x' }] }),
+    false
+  )
+})
+
+test('checkAlerts fires nothing on a stale payload', async () => {
+  const plugin = await loadPlugin()
+  const { ctx, data, notices } = fakeContext()
+  plugin.default.register(ctx)
+  plugin.checkAlerts(OLD_PAYLOAD)
+  assert.equal(notices.length, 0)
+  assert.equal('alerts' in data, false)
+})
+
+const CURRENT_WINDOW = {
+  label: '5h',
+  key: '5h',
+  kind: 'window',
+  used_pct: 95,
+  warn: true,
+  actionable_eta: null,
+  resets_at: '2099-01-01T00:00:00Z'
+}
+
+test('checkAlerts does not fire on a stale payload that would otherwise alert', async () => {
+  const plugin = await loadPlugin()
+  const { ctx, notices } = fakeContext()
+  plugin.default.register(ctx)
+  const staleRow = {
+    label: 'Weekly',
+    percent: 50,
+    resets_at: '2099-01-02T00:00:00Z',
+    status: 'ok',
+    scope: 'account'
+  }
+  const data = {
+    providers: [
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [CURRENT_WINDOW, staleRow]
+      }
+    ]
+  }
+  plugin.checkAlerts(data)
+  assert.equal(notices.length, 0)
+})
+
+test('the same alert payload without the stale row notifies', async () => {
+  const plugin = await loadPlugin()
+  const { ctx, notices } = fakeContext()
+  plugin.default.register(ctx)
+  const data = {
+    providers: [
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [CURRENT_WINDOW]
+      }
+    ]
+  }
+  plugin.checkAlerts(data)
+  assert.equal(notices.length, 1)
+  assert.match(notices[0].title, /Anthropic: 5h at 95% used/)
+})
+
+test('staleBackend checks money rows too', async () => {
+  const { staleBackend } = await loadPlugin()
+  const data = {
+    providers: [
+      {
+        id: 'openrouter',
+        status: 'ok',
+        name: 'OpenRouter',
+        tag: 'Credits',
+        code: 'openrouter',
+        windows: [{ ...CURRENT_WINDOW, used_pct: 10, warn: false }],
+        money: [
+          {
+            label: 'Balance',
+            left: 5,
+            cur: 'USD',
+            total: 20,
+            kind: 'money',
+            used_pct: 75,
+            warn: false,
+            actionable_eta: null
+          }
+        ]
+      }
+    ]
+  }
+  assert.equal(staleBackend(data), true)
+})
+
+test('staleBackend ignores non-ok providers', async () => {
+  const { staleBackend } = await loadPlugin()
+  const data = {
+    providers: [
+      {
+        id: 'broken',
+        status: 'error',
+        name: 'Broken',
+        tag: 'Plan',
+        code: 'broken',
+        windows: [{ label: '5h', used_pct: 40, resets_at: '2099-01-01T00:00:00Z' }]
+      },
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [CURRENT_WINDOW]
+      }
+    ]
+  }
+  assert.equal(staleBackend(data), false)
+})
+
+test('staleBackend requires used_pct as well as key', async () => {
+  const { staleBackend } = await loadPlugin()
+  const data = {
+    providers: [
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [{ label: '5h', key: '5h', kind: 'window', warn: true, resets_at: '2099-01-01T00:00:00Z' }]
+      }
+    ]
+  }
+  assert.equal(staleBackend(data), true)
+})
+
+test('staleBackend requires key as well as used_pct', async () => {
+  const { staleBackend } = await loadPlugin()
+  const data = {
+    providers: [
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [{ label: '5h', kind: 'window', used_pct: 10, warn: false, resets_at: '2099-01-01T00:00:00Z' }]
+      }
+    ]
+  }
+  assert.equal(staleBackend(data), true)
+})
+
+function alertData() {
+  return {
+    providers: [
+      {
+        id: 'anthropic',
+        status: 'ok',
+        name: 'Anthropic',
+        tag: 'Max',
+        code: 'claude',
+        windows: [CURRENT_WINDOW]
+      }
+    ]
+  }
+}
+
+test('checkAlerts survives a storage read failure', async () => {
+  const plugin = await loadPlugin()
+  const ctx = {
+    storage: {
+      get() {
+        throw new Error('storage broken')
+      },
+      set() {}
+    },
+    os: { notify() {} },
+    rest: () => {},
+    register() {}
+  }
+  plugin.default.register(ctx)
+  assert.doesNotThrow(() => plugin.checkAlerts(alertData()))
+})
+
+test('checkAlerts survives a notification that throws', async () => {
+  const plugin = await loadPlugin()
+  const seen = {}
+  const ctx = {
+    storage: {
+      get: (key, fallback) => (key in seen ? seen[key] : fallback),
+      set: (key, value) => {
+        seen[key] = value
+      }
+    },
+    os: {
+      notify() {
+        throw new Error('no notification')
+      }
+    },
+    rest: () => {},
+    register() {}
+  }
+  plugin.default.register(ctx)
+  assert.doesNotThrow(() => plugin.checkAlerts(alertData()))
+  assert.equal(Object.keys(seen).length, 1)
+})

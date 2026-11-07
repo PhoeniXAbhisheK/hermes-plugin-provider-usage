@@ -1,3 +1,5 @@
+import { __runHook } from './react.mjs'
+
 export const STATUSBAR_AREAS = { right: 'right' }
 
 export function atom(initial) {
@@ -20,13 +22,9 @@ export function atom(initial) {
   }
 }
 
-const notAtImport = name => () => {
-  throw new Error(name + ' is not available in the desktop test stubs')
-}
-
-export const useQuery = notAtImport('useQuery')
-export const useQueryClient = notAtImport('useQueryClient')
-export const useValue = notAtImport('useValue')
+export const useQuery = options => __runHook('useQuery', [options])
+export const useQueryClient = () => __runHook('useQueryClient', [])
+export const useValue = value => __runHook('useValue', [value])
 
 /* The host door is only read inside components, which the tests build as
  * elements rather than render, so the atoms exist and request rejects. */
