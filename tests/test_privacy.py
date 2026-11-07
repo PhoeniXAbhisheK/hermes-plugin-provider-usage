@@ -220,6 +220,7 @@ class PrivacyHarness(unittest.TestCase):
         API._helper_cooldown.clear()
         API._holds.clear()
         API._last_good.clear()
+        API._HOST_WINNERS.clear()
         self._saved_modules = stub_core_modules()
         self._write_codex(access_token=SENTINEL["codex"])
         self._write_claude()

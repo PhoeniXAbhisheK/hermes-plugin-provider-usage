@@ -22,6 +22,27 @@ repository; the date is the release date.
   `test_error_rows_are_single_line_and_capped`.
 - A failed provider is logged server-side with the credential redacted, so the
   shape shown in the panel stays diagnosable.
+- [behaviour] One collection is bounded in wall-clock time: 30 seconds overall and
+  12 seconds per provider. A provider past its budget shows its last reading marked
+  stale, or a `timeout` row when there is none. A second worker is never started
+  for a provider whose previous read is still running.
+- [behaviour] A panel with a warm cache answers from the cache while a refresh
+  runs, and only one collection runs at a time.
+- [behaviour] The refresh button asks for a live helper read; scheduled polls keep
+  answering from a snapshot up to 4 minutes old.
+- [behaviour] A provider that answers with no rows is left out instead of showing a
+  card with a fabricated 0%.
+- [behaviour] Codex windows are labelled by their own length: 5h, 7d or Monthly. A
+  monthly-only plan used to show as 5h.
+- [behaviour] Balances in different currencies get distinct rows and separate
+  history, so two DeepSeek balances no longer collide.
+- Computed reset times are rounded to the minute and compared within a tolerance,
+  so an alert does not re-fire on every poll.
+- `fetched_at` is UTC in the payload; the panel still shows local time.
+- [behaviour] Anthropic and Codex keep a last reading for up to six hours, but
+  once it is more than ten minutes old the backend tries the provider's own token
+  at most once per five minutes. A failed or rate-limited attempt keeps the newest
+  reading available, so a good reading is never replaced by an older one.
 
 ## 0.3.1 (2026-10-23)
 

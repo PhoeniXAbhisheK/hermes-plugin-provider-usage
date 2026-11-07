@@ -47,9 +47,9 @@ providers are omitted from the panel entirely.
 | Provider | Credential (read-only) | Endpoint |
 |---|---|---|
 | OpenCode Go | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else the `opencode-go` entry of `~/.local/share/opencode/auth.json` (never the Zen key; without a Go plan the card stays hidden) | `https://opencode.ai/zen/go/v1/usage` |
-| OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else the OAuth access token in `~/.codex/auth.json`; the `OPENAI_API_KEY` entry in that file is never used | `https://chatgpt.com/backend-api/wham/usage` |
+| OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else the OAuth access token in `~/.codex/auth.json`; the `OPENAI_API_KEY` entry in that file is never used. A reading more than ten minutes old is refreshed with that token, at most once per five minutes | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
-| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`; a refused helper read keeps the last reading for up to six hours, marked stale | `https://api.anthropic.com/api/oauth/usage` |
+| Anthropic | Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`; a refused helper read keeps the last reading for up to six hours, marked stale, and once that reading is more than ten minutes old the direct token is tried at most once per five minutes | `https://api.anthropic.com/api/oauth/usage` |
 | GitHub Copilot | Hermes' Copilot token resolver | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | `https://portal.nousresearch.com/api/oauth/account` (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
@@ -101,6 +101,24 @@ Until then, install manually:
    plugin is listed under Settings, Capabilities, Plugins.
 
 Requires a Hermes build with the desktop plugin SDK (`>=0.21.0`).
+
+## Refresh and freshness
+
+A poll asks the backend for a refresh, and one collection is bounded in wall-clock
+time: 30 seconds for the whole panel and 12 seconds per provider. A provider that
+runs past its budget shows its last reading marked stale, or a `timeout` row when
+there is none. Results already on screen are reused while a refresh runs, and only
+one collection runs at a time: a second caller gets the results already there,
+while the caller that starts the collection waits for it, at most the budget.
+
+On the Hermes sign-in path the backend can answer from Hermes' own account-usage
+snapshot, which may be up to 4 minutes old. That keeps polls cheap. The refresh
+button skips that shortcut and reads the helper live.
+
+For Anthropic and Codex, a last reading up to six hours old is still served when
+the helper refuses. Once that reading is more than ten minutes old, the backend
+tries the provider's own token once per five minutes; if that read fails or is
+rate limited, the older reading is kept instead of an error card.
 
 ## Notes on projections
 
