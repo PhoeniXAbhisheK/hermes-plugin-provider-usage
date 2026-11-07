@@ -1,0 +1,33 @@
+{
+ "plan_type": "free",
+ "rate_limit": {
+  "allowed": true,
+  "limit_reached": false,
+  "primary_window": {
+   "limit_window_seconds": 2592000,
+   "reset_after_seconds": 1100000,
+   "reset_at": 1790000000,
+   "used_percent": 12
+  },
+  "secondary_window": null
+ },
+ "credits": {
+  "approx_cloud_messages": null,
+  "approx_local_messages": null,
+  "balance": null,
+  "has_credits": false,
+  "overage_limit_reached": false,
+  "unlimited": false
+ },
+ "rate_limit_reset_credits": {
+  "applicable_available_count": 0,
+  "available_count": 0
+ },
+ "spend_control": {
+  "individual_limit": null,
+  "reached": false
+ },
+ "code_review_rate_limit": null,
+ "additional_rate_limits": null,
+ "model_usage": {}
+}

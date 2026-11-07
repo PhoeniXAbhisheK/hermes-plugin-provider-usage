@@ -392,6 +392,27 @@ def _duration_match(seconds):
     return None
 
 
+def _duration_covering(seconds):
+    """The smallest shared duration that can still cover ``seconds``, or None.
+
+    A window that resets further out than its label allows cannot really be that
+    short. The next standard length that covers the reset is the honest label.
+    """
+    for target, label, key in _DURATION_LABELS:
+        if seconds <= target * (1 + _DURATION_TOLERANCE):
+            return target, label, key
+    return None
+
+
+def _seconds_until(when):
+    """Seconds from now until a datetime, or None when it is not a datetime."""
+    if not isinstance(when, datetime):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).total_seconds()
+
+
 def _window(label, percent, resets_at, status="ok", *, duration=None, scope="account", model=None):
     """One window row, or None when the percent isn't a usable number.
 
@@ -620,11 +641,16 @@ def _codex_direct():
         resets_at = None
         if isinstance(ra, (int, float)):
             resets_at = _iso_from_epoch(now + ra)
+        seconds = _num(w.get("limit_window_seconds"))
+        match = _duration_match(seconds) if seconds is not None else None
+        # The published length names the window; position is only the fallback
+        # for a response that omits it or sends a length we do not recognise.
+        label = match[0] if match is not None else fallback
         row = _window(
-            fallback,
+            label,
             w.get("used_percent"),
             resets_at,
-            duration=w.get("limit_window_seconds"),
+            duration=seconds,
         )
         if row is not None:
             windows.append(row)
@@ -747,10 +773,27 @@ def _snap_window(provider, w):
     known = _SNAP_WINDOWS.get(provider, {}).get(label.strip().lower())
     if known is not None:
         label, duration, scope, model = known
+    reset_at = _iso_dt(getattr(w, "reset_at", None))
+    if known is not None and duration:
+        remaining = _seconds_until(getattr(w, "reset_at", None))
+        if remaining is not None and remaining > duration * (1 + _DURATION_TOLERANCE):
+            # The mapped length cannot hold this reset: the label is wrong for
+            # this account. Use the smallest shared length that covers it, or
+            # fall back to the core's own label with no duration at all.
+            fit = _duration_covering(remaining)
+            if fit is not None:
+                duration = fit[0]
+                if scope != "model":
+                    # Account rows take the shared label. A model row keeps its
+                    # model name ("Opus"); only its length and key change.
+                    label = fit[1]
+            else:
+                label = str(getattr(w, "label", None) or "Window")
+                duration = None
     return _window(
         label,
         getattr(w, "used_percent", None),
-        _iso_dt(getattr(w, "reset_at", None)),
+        reset_at,
         duration=duration,
         scope=scope,
         model=model,
@@ -768,7 +811,12 @@ def _snap_payload(provider, snap):
             windows.append(row)
     if not windows:
         return None
-    return {"id": provider, "status": "ok", "windows": windows}
+    payload = {"id": provider, "status": "ok", "windows": windows}
+    plan = getattr(snap, "plan", None)
+    if isinstance(plan, str) and plan.strip():
+        # The plan the reading belongs to, title-cased like the direct path.
+        payload["tag"] = plan.strip().title()
+    return payload
 
 
 def _last_reading(provider, snap):
