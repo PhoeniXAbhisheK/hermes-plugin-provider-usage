@@ -94,8 +94,22 @@ OPAQUE_TOKENS = [
 INVISIBLE = ["\x9b", "\u202e", "\u200b"]
 
 
+FIXTURE_PATHS = {
+    "anthropic_usage": "anthropic/ok.json",
+    "codex_usage": "openai-codex/ok.json",
+    "copilot_user": "copilot/ok_limited.json",
+    "deepseek_balance": "deepseek/ok.json",
+    "kimi_usages": "kimi-coding/ok.json",
+    "minimax_remains": "minimax/ok.json",
+    "opencode_go_usage": "opencode-go/ok.json",
+    "openrouter_credits": "openrouter/ok_credits.json",
+    "openrouter_key": "openrouter/ok_key.json",
+    "zai_limits": "zai/ok.json",
+}
+
+
 def fixture(name):
-    return (FIXTURES / (name + ".json")).read_text(encoding="utf-8")
+    return (FIXTURES / FIXTURE_PATHS[name]).read_text(encoding="utf-8")
 
 
 def host_of(url):
@@ -235,6 +249,7 @@ class PrivacyHarness(unittest.TestCase):
         API._fetch_usage = self._saved["fetch"]
         API._holds.clear()
         API._last_good.clear()
+        API._HOST_WINNERS.clear()
         restore_core_modules(self._saved_modules)
         self.tmp.cleanup()
 

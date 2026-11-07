@@ -1,0 +1,6 @@
+{
+  "base_resp": {
+    "status_code": 1001,
+    "status_msg": "internal error"
+  }
+}

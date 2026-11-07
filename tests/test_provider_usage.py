@@ -1043,6 +1043,7 @@ class MinimaxFetcherTest(unittest.TestCase):
     def setUp(self):
         self._orig_secret, self._orig_http = API._secret, API._http_json
         self.urls = []
+        API._HOST_WINNERS.clear()  # in-process host memory must not cross tests
 
     def tearDown(self):
         API._secret, API._http_json = self._orig_secret, self._orig_http

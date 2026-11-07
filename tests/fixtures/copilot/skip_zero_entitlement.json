@@ -1,0 +1,13 @@
+{
+  "quota_snapshots": {
+    "premium_interactions": {
+      "entitlement": 0,
+      "percent_remaining": 100.0
+    },
+    "chat": {
+      "entitlement": 0,
+      "percent_remaining": 100.0
+    }
+  },
+  "quota_reset_date": "2026-12-01"
+}
