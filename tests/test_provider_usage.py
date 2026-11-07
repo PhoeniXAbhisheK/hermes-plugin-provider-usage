@@ -236,7 +236,7 @@ class KimiFetcherTest(unittest.TestCase):
         row = p["money"][0]
         self.assertEqual(row["label"], "Balance")
         self.assertEqual(row["left"], 18.02)  # nested data.available_balance, rounded
-        self.assertEqual(row["cur"], "CNY")
+        self.assertEqual(row["cur"], "USD")
 
     def test_falls_back_to_cn_region_when_ai_rejects_key(self):
         self._key()
