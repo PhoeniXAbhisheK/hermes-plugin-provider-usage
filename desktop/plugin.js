@@ -77,7 +77,7 @@ function persist(key, value) {
   if (!storage) return
   try {
     storage.set(key, value)
-  } catch (e) {
+  } catch {
     /* storage unavailable, session-only */
   }
 }
@@ -94,7 +94,7 @@ function bindStorage(s) {
     const quota = storage.get(STORE_BAR_QUOTA, null)
     if (quota && typeof quota === 'object' && !Array.isArray(quota)) $barQuota.set(quota)
     $alertAt.set(cleanAlertMap(storage.get(STORE_ALERT_AT, null)))
-  } catch (e) {
+  } catch {
     /* ignore malformed persisted state */
   }
   $interval.listen(v => persist(STORE_INTERVAL, v))
@@ -134,7 +134,7 @@ function moneyFormatter(code) {
   if (formatter !== undefined) return formatter
   try {
     formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: code })
-  } catch (e) {
+  } catch {
     return null
   }
   MONEY_FORMATS.set(code, formatter)
@@ -275,6 +275,7 @@ export function sameReset(seen, prefix, stamp) {
 
 export function checkAlerts(data) {
   if (!storage || !data || !Array.isArray(data.providers)) return
+  if (staleBackend(data)) return
   try {
     const seen = storage.get(STORE_ALERTS, {}) || {}
     const now = Date.now()
@@ -288,7 +289,7 @@ export function checkAlerts(data) {
       if (osNotify) {
         try {
           osNotify({ title: title, body: body })
-        } catch (e) {
+        } catch {
           /* native notification unavailable */
         }
       }
@@ -340,7 +341,7 @@ export function checkAlerts(data) {
         .slice(0, 80)
       storage.set(STORE_ALERTS, Object.fromEntries(entries))
     }
-  } catch (e) {
+  } catch {
     /* never break the bar over alerts */
   }
 }
@@ -486,7 +487,7 @@ export function readSessionProvider(host, sessionId, timeoutMs) {
     let request
     try {
       request = host.request('model.options', { session_id: sessionId })
-    } catch (e) {
+    } catch {
       done(null)
       return
     }
@@ -496,6 +497,24 @@ export function readSessionProvider(host, sessionId, timeoutMs) {
     )
   })
 }
+
+/* The current backend stamps every row with `key` and `used_pct`. A loaded
+ * backend from before that contract has neither, so its rows would read as
+ * 100% with no key. A money row may legitimately carry used_pct null (no
+ * total), so presence, not value, is what counts. */
+export function staleBackend(data) {
+  if (!data || !Array.isArray(data.providers)) return false
+  for (const p of data.providers) {
+    if (!p || p.status !== 'ok') continue
+    for (const row of (p.windows || []).concat(p.money || [])) {
+      if (!row || typeof row !== 'object') continue
+      if (!('key' in row) || !('used_pct' in row)) return true
+    }
+  }
+  return false
+}
+
+const STALE_BACKEND_TEXT = 'Restart the Hermes dashboard to finish updating.'
 
 /* A provider needs attention when it is ok and one of its rows is warned or
  * already carries an actionable ETA. */
@@ -874,6 +893,7 @@ function BarDetail() {
 
   if (isError) return 'backend down'
   if (!data) return '…'
+  if (staleBackend(data)) return 'restart dashboard'
   return barContent(barModel(data.providers || [], barSet, sessionProvider, mode, avail, choice))
 }
 
@@ -991,6 +1011,7 @@ function BarTip() {
   const sessionProvider = useValue($sessionProvider)
   const choice = useValue($barQuota)
   const rows = data && Array.isArray(data.providers) ? data.providers : []
+  if (staleBackend(data)) return STALE_BACKEND_TEXT
   const model = barModel(rows, barSet, sessionProvider, mode, null, choice)
   return tipBody(tipEntries(model.entries), data ? clockOf(data.fetched_at) : '')
 }
@@ -1535,11 +1556,19 @@ function UsagePanel() {
   const provs = data && Array.isArray(data.providers) ? data.providers : []
   const ids = provs.map(x => x.id)
   const pinnedCount = pinnedIds(pins, ids).length
+  const everyPinned = allPinned(pins, ids)
   const barIds = barModel(provs, pins, sessionProvider, mode, null, choice).entries.map(e => e.id)
   const groups = groupProviders(provs, view, pins)
+  const stale = staleBackend(data)
 
   const body = []
-  if (isError) {
+  if (stale) {
+    body.push(jsx('div', {
+      key: 'stale',
+      style: { fontSize: 11, padding: '8px 14px', color: 'var(--ui-text-tertiary)' },
+      children: STALE_BACKEND_TEXT
+    }))
+  } else if (isError) {
     body.push(jsx('div', { key: 'down', style: { fontSize: 11 }, children: 'Backend unreachable. Enable the plugin and retry.' }))
   } else if (data && !provs.length) {
     body.push(jsx('div', { key: 'empty', style: { fontSize: 11 }, children: 'No providers available.' }))
@@ -1695,12 +1724,12 @@ export default {
     if (!storage) bindStorage(ctx.storage)
     try {
       osNotify = ctx.os && typeof ctx.os.notify === 'function' ? ctx.os.notify.bind(ctx.os) : null
-    } catch (e) {
+    } catch {
       osNotify = null
     }
     try {
       rest = ctx.rest || null
-    } catch (e) {
+    } catch {
       rest = null
     }
     ctx.register({
