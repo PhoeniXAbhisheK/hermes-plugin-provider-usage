@@ -98,8 +98,32 @@ function useUsage() {
 
 /* ---------- formatting / prediction helpers ---------- */
 
-const CUR = { USD: '$', CNY: '\u00a5' }
-export const money = (v, cur) => (CUR[cur] || '$') + Number(v).toFixed(2)
+/* One formatter per currency: a Map lookup is cheaper than rebuilding an
+ * Intl formatter on every render. The locale is fixed, so output never
+ * depends on the machine's locale. An invalid code is caught once at the
+ * constructor and shown verbatim rather than thrown. */
+const MONEY_FORMATS = new Map()
+
+function moneyFormatter(code) {
+  let formatter = MONEY_FORMATS.get(code)
+  if (formatter !== undefined) return formatter
+  try {
+    formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: code })
+  } catch (e) {
+    return null
+  }
+  MONEY_FORMATS.set(code, formatter)
+  return formatter
+}
+
+export function money(v, cur) {
+  const code = String(cur || 'USD').toUpperCase()
+  const formatter = moneyFormatter(code)
+  const amount = Number(v)
+  if (formatter === null) return code + ' ' + amount.toFixed(2)
+  return formatter.format(amount)
+}
+
 export const pct = v => Math.round(Number(v) || 0) + '%'
 const CODE = {
   'opencode-go': 'opencode',

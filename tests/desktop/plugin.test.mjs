@@ -35,13 +35,23 @@ function fakeContext() {
   return { ctx, data, notices, registrations }
 }
 
-test('money formats USD, CNY and an unknown currency', async () => {
+test('money follows the row currency and the en-US locale', async () => {
   const { money } = await loadPlugin()
   assert.equal(money(9.02, 'USD'), '$9.02')
-  assert.equal(money(9.02, 'CNY'), '\u00a59.02')
-  assert.equal(money(9.02, 'EUR'), '$9.02')
-  assert.equal(money(1, 'USD'), '$1.00')
+  assert.equal(money(9.02, 'CNY'), 'CN¥9.02')
+  assert.equal(money(9.02, 'EUR'), '€9.02')
+  assert.equal(money(9.02, 'GBP'), '£9.02')
+  assert.equal(money(9.02, 'CAD'), 'CA$9.02')
+  assert.equal(money(1234.5, 'USD'), '$1,234.50')
+  assert.equal(money(1234567.5, 'USD'), '$1,234,567.50')
   assert.equal(money('3.5', 'USD'), '$3.50')
+  assert.equal(money(3.5), '$3.50')
+  assert.equal(money(3.5, ''), '$3.50')
+  assert.equal(money(3.5, 'usd'), '$3.50')
+  assert.equal(money(1234.5, 'JPY'), '¥1,235')
+  assert.equal(money(1.5, 'DOLLARS'), 'DOLLARS 1.50')
+  assert.equal(money(1.5, 'dollars'), 'DOLLARS 1.50')
+  assert.equal(money(1.5, 'US'), 'US 1.50')
 })
 
 test('pct rounds and treats a non-number as zero', async () => {
@@ -184,6 +194,12 @@ test('rowView renders money in both modes and keys the heading on the row key', 
     'used'
   )
   assert.equal(cap.label, 'Cap used')
+  const euro = rowView(
+    { key: 'money:balance:eur', label: 'Balance', kind: 'money', total: 20, left: 12.5, cur: 'EUR', used_pct: 37.5 },
+    'used'
+  )
+  assert.equal(euro.value, '€7.50')
+  assert.equal(euro.totalText, '€20.00')
   const noTotal = rowView({ key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }, 'used')
   assert.equal(noTotal.value, '$7.00')
   assert.equal(noTotal.totalText, '')
