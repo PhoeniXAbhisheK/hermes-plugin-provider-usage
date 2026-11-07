@@ -146,6 +146,8 @@ tests/                   unittest suite: backend fetchers and package metadata
 - `python -m unittest discover -s tests -t .` runs the suite. It needs `httpx`
   and `fastapi`, so run it with the interpreter that serves the dashboard, or
   with a throwaway venv that has those two packages.
+- `node --test tests/desktop/plugin.test.mjs` runs the desktop helper tests with
+  no install.
 - The backend served payload is a single JSON object:
   `{ fetched_at, providers: [{ id, name, tag, code, status, windows | money }] }`. A
   provider row can also carry `plan`, `error`, or `stale` with `hold_until` and
