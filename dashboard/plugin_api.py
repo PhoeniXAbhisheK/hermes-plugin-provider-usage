@@ -251,34 +251,6 @@ class _ProviderError(RuntimeError, ValueError):
         self.secret = secret
 
 
-PROVIDER_META = {
-    "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
-    "openai-codex": {"name": "OpenAI Codex", "tag": "Plus"},
-    "openrouter": {"name": "OpenRouter", "tag": "Credits"},
-    "anthropic": {"name": "Anthropic", "tag": "Claude Code"},
-    "copilot": {"name": "GitHub Copilot", "tag": "Quota"},
-    "nous": {"name": "Nous", "tag": "Portal"},
-    "zai": {"name": "Z.AI", "tag": "GLM"},
-    "kimi-coding": {"name": "Kimi", "tag": "Coding"},
-    "minimax": {"name": "MiniMax", "tag": "Coding"},
-    "deepseek": {"name": "DeepSeek", "tag": "Balance"},
-}
-
-# Display and fetch order for the panel.
-FETCH_ORDER = (
-    "opencode-go",
-    "openai-codex",
-    "openrouter",
-    "anthropic",
-    "copilot",
-    "nous",
-    "zai",
-    "kimi-coding",
-    "minimax",
-    "deepseek",
-)
-
-
 def _read_text(path):
     """UTF-8 text from a small config file, tolerating undecodable bytes.
 
@@ -1095,22 +1067,47 @@ _MOONSHOT_BALANCE_URLS = (
 )
 
 
-def _fetch_moonshot_balance(headers):
-    """The available balance and the host that answered, as ``(amount, url)``."""
+class _NextHost(Exception):
+    """The host answered but its body is unusable: try the next host."""
+
+    def __init__(self, error):
+        super().__init__(str(error))
+        self.error = error
+
+
+def _probe_hosts(family, urls, headers, accept):
+    """The first accepted body and the host that served it, as ``(value, url)``.
+
+    Hosts are tried in ``_prefer`` order. A rate limit or timeout propagates at
+    once. Any other request failure is remembered and the next host is tried.
+    ``accept`` turns a body into a value, or raises ``_NextHost`` to rule its
+    host out; any other exception from ``accept`` propagates. When every host
+    fails, the last remembered error is raised.
+    """
     last_error = None
-    for url in _prefer("moonshot", _MOONSHOT_BALANCE_URLS):
+    for url in _prefer(family, urls):
         try:
-            payload = _http_json(url, headers)
-        except _RateLimited:
-            raise
-        except _Timeout:
+            body = _http_json(url, headers)
+        except (_RateLimited, _Timeout):
             raise
         except Exception as exc:
-            # 401/403: the key belongs to the other region; 404: the endpoint
-            # is not offered there; anything else (transport, non-JSON body)
-            # rules this host out too. Any failure only rules out THIS host.
+            # 401/403, 404, transport, a non-JSON body: this host is out.
             last_error = exc
             continue
+        try:
+            value = accept(body)
+        except _NextHost as exc:
+            last_error = exc.error
+            continue
+        _won(family, url)
+        return value, url
+    raise last_error if last_error is not None else RuntimeError("no host answered")
+
+
+def _fetch_moonshot_balance(headers):
+    """The available balance and the host that answered, as ``(amount, url)``."""
+
+    def accept(payload):
         available = _kimi_balance(payload)
         if available is None:
             # The host answered and understood the key; a body without a
@@ -1119,9 +1116,9 @@ def _fetch_moonshot_balance(headers):
                 "Moonshot balance response carried no available_balance",
                 secret=str(headers.get("Authorization") or "").removeprefix("Bearer "),
             )
-        _won("moonshot", url)
-        return available, url
-    raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
+        return available
+
+    return _probe_hosts("moonshot", _MOONSHOT_BALANCE_URLS, headers, accept)
 
 
 def _reset_text(*values):
@@ -1350,28 +1347,25 @@ def fetch_minimax():
     last_error = None
     for family, key, urls in credentials:
         headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-        for url in _prefer(family, urls):
-            try:
-                candidate = _http_json(url, headers)
-            except _RateLimited:
-                raise
-            except _Timeout:
-                raise
-            except Exception as exc:
-                last_error = exc
-                continue
+
+        def accept(candidate, key=key):
             if isinstance(candidate, dict) and candidate.get("model_remains"):
-                payload = candidate
-                _won(family, url)
-                break
+                return candidate
             # A reachable host serving the other region answers 200 with a
             # base_resp error and no rows: remember it, keep probing.
             msg = None
             if isinstance(candidate, dict):
                 msg = (candidate.get("base_resp") or {}).get("status_msg")
-            last_error = _ProviderError(str(msg or "no quota rows"), secret=key)
-        if payload is not None:
-            break
+            raise _NextHost(_ProviderError(str(msg or "no quota rows"), secret=key))
+
+        try:
+            payload, _url = _probe_hosts(family, urls, headers, accept)
+        except (_RateLimited, _Timeout):
+            raise
+        except Exception as exc:
+            last_error = exc
+            continue
+        break
     if not isinstance(payload, dict):
         detail = _error_message(last_error) if last_error is not None else "no endpoint"
         raise _ProviderError(
@@ -1435,18 +1429,66 @@ def fetch_minimax():
     return {"id": "minimax", "status": "ok", "windows": windows}
 
 
-FETCHERS = {
-    "opencode-go": fetch_opencode_go,
-    "openai-codex": fetch_openai_codex,
-    "openrouter": fetch_openrouter,
-    "anthropic": fetch_anthropic,
-    "copilot": fetch_copilot,
-    "nous": fetch_nous,
-    "zai": fetch_zai,
-    "kimi-coding": fetch_kimi,
-    "minimax": fetch_minimax,
-    "deepseek": fetch_deepseek,
+# Every provider the panel knows, in display order. The three names below derive
+# from it; runtime code reads those names, so a test can replace them.
+PROVIDERS = {
+    "opencode-go": {
+        "name": "OpenCode Go",
+        "tag": "Plan",
+        "code": "opencode",
+        "fetch": fetch_opencode_go,
+    },
+    "openai-codex": {
+        "name": "OpenAI Codex",
+        "tag": "Plus",
+        "code": "codex",
+        "fetch": fetch_openai_codex,
+    },
+    "openrouter": {
+        "name": "OpenRouter",
+        "tag": "Credits",
+        "code": "openrouter",
+        "fetch": fetch_openrouter,
+    },
+    "anthropic": {
+        "name": "Anthropic",
+        "tag": "Claude Code",
+        "code": "claude",
+        "fetch": fetch_anthropic,
+    },
+    "copilot": {
+        "name": "GitHub Copilot",
+        "tag": "Quota",
+        "code": "copilot",
+        "fetch": fetch_copilot,
+    },
+    "nous": {"name": "Nous", "tag": "Portal", "code": "nous", "fetch": fetch_nous},
+    "zai": {"name": "Z.AI", "tag": "GLM", "code": "zai", "fetch": fetch_zai},
+    "kimi-coding": {
+        "name": "Kimi",
+        "tag": "Coding",
+        "code": "kimi",
+        "fetch": fetch_kimi,
+    },
+    "minimax": {
+        "name": "MiniMax",
+        "tag": "Coding",
+        "code": "minimax",
+        "fetch": fetch_minimax,
+    },
+    "deepseek": {
+        "name": "DeepSeek",
+        "tag": "Balance",
+        "code": "deepseek",
+        "fetch": fetch_deepseek,
+    },
 }
+
+FETCH_ORDER = tuple(PROVIDERS)
+PROVIDER_META = {
+    pid: {"name": p["name"], "tag": p["tag"], "code": p["code"]} for pid, p in PROVIDERS.items()
+}
+FETCHERS = {pid: p["fetch"] for pid, p in PROVIDERS.items()}
 
 # --------------------------------------------------------------------------- #
 # Burn-rate history: every fresh collection records (time, value) samples, and
@@ -1626,6 +1668,7 @@ def _collect(deadline=None):
         meta = PROVIDER_META[pid]
         p.setdefault("name", meta["name"])
         p.setdefault("tag", meta["tag"])
+        p.setdefault("code", meta["code"])
         if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
         providers.append(p)
