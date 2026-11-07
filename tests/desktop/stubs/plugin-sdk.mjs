@@ -46,3 +46,15 @@ export function ScrollArea(props) {
 export function Tip(props) {
   return { type: 'Tip', props }
 }
+
+export function Tabs(props) {
+  return { type: 'Tabs', props }
+}
+
+export function TabsList(props) {
+  return { type: 'TabsList', props }
+}
+
+export function TabsTrigger(props) {
+  return { type: 'TabsTrigger', props }
+}

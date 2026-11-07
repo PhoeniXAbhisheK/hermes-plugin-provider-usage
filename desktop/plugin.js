@@ -28,6 +28,9 @@ import {
   STATUSBAR_AREAS,
   ScrollArea,
   SegmentedControl,
+  Tabs,
+  TabsList,
+  TabsTrigger,
   Tip,
   atom,
   host,
@@ -55,11 +58,15 @@ const $mode = atom('used') // 'used' | 'remaining'
  * of ids = the pinned providers (carried over unchanged from the old eye
  * toggles, so a saved choice still applies). */
 const $barProviders = atom(null)
+/* Which quota the bar shows per provider: { providerId: rowKey }. Empty means
+ * the default (highest used_pct row). Persisted like the other atoms. */
+const $barQuota = atom({})
 
 const STORE_INTERVAL = 'intervalMs'
 const STORE_MODE = 'valueMode'
 const STORE_ALERTS = 'alerts'
 const STORE_BAR = 'barProviders'
+const STORE_BAR_QUOTA = 'barQuota'
 
 let storage = null
 let osNotify = null
@@ -83,12 +90,15 @@ function bindStorage(s) {
     if (mode === 'used' || mode === 'remaining') $mode.set(mode)
     const bar = storage.get(STORE_BAR, null)
     if (Array.isArray(bar)) $barProviders.set(bar)
+    const quota = storage.get(STORE_BAR_QUOTA, null)
+    if (quota && typeof quota === 'object' && !Array.isArray(quota)) $barQuota.set(quota)
   } catch (e) {
     /* ignore malformed persisted state */
   }
   $interval.listen(v => persist(STORE_INTERVAL, v))
   $mode.listen(v => persist(STORE_MODE, v))
   $barProviders.listen(v => persist(STORE_BAR, v))
+  $barQuota.listen(v => persist(STORE_BAR_QUOTA, v))
 }
 
 async function fetchUsage(fresh, manual) {
@@ -320,26 +330,14 @@ export function rowView(row, mode) {
   }
 }
 
-/* One-line summary for the bar, in the CURRENT value mode: the shortest
- * account-scope window, or the key-cap money row. A model-scope row never
- * summarises the provider. */
-export function summary(p, mode) {
+/* One-line summary for the bar, in the CURRENT value mode: the bar quota row. */
+export function summary(p, mode, choice) {
   if (!p || p.status !== 'ok') return '-'
-  const moneyRows = Array.isArray(p.money) ? p.money : []
-  if (moneyRows.length) {
-    const cap =
-      moneyRows.find(m => String(m.key || '').indexOf('money:key_cap') === 0) || moneyRows[0]
-    return rowView(cap, mode).value
-  }
-  const wins = (Array.isArray(p.windows) ? p.windows : []).filter(w => w.scope !== 'model')
-  if (!wins.length) return '-'
-  let pick = null
-  for (const w of wins) {
-    const d = Number(w.duration_seconds)
-    if (!isFinite(d) || d <= 0) continue
-    if (pick === null || d < Number(pick.duration_seconds)) pick = w
-  }
-  return rowView(pick || wins[0], mode).value
+  const key = barQuotaKey(p, choice)
+  const row = (Array.isArray(p.windows) ? p.windows : [])
+    .concat(Array.isArray(p.money) ? p.money : [])
+    .find(r => r && r.key === key)
+  return row ? rowView(row, mode).value : '-'
 }
 
 /* ---------- redesign phase 1: pins, session follow, grouping, bar layout ---------- */
@@ -504,23 +502,28 @@ function quotaUsed(row) {
   return isFinite(n) ? n : -Infinity
 }
 
-/* The quota the bar summarises today. */
-export function barQuotaKey(p) {
+/* The quota the bar shows: the user's choice when it still names one of this
+ * provider's current rows, else the highest used_pct across windows and money
+ * (null lowest, ties in payload order, no usable value at all = first row). */
+export function barQuotaKey(p, choice) {
   if (!p) return null
-  const moneyRows = Array.isArray(p.money) ? p.money : []
-  if (moneyRows.length) {
-    const cap = moneyRows.find(m => String(m.key || '').indexOf('money:key_cap') === 0) || moneyRows[0]
-    return cap ? cap.key : null
+  const rows = (Array.isArray(p.windows) ? p.windows : []).concat(Array.isArray(p.money) ? p.money : [])
+  if (!rows.length) return null
+  const picked = choice && typeof choice === 'object' ? choice[p.id] : null
+  if (picked && rows.some(r => r && r.key === picked)) return picked
+  let best = null
+  let bestUsed = -Infinity
+  for (const row of rows) {
+    if (!row) continue
+    const raw = row.used_pct
+    const used = raw === null || raw === undefined ? -Infinity : Number(raw)
+    const score = isFinite(used) ? used : -Infinity
+    if (best === null || score > bestUsed) {
+      best = row
+      bestUsed = score
+    }
   }
-  const wins = (Array.isArray(p.windows) ? p.windows : []).filter(w => w.scope !== 'model')
-  if (!wins.length) return null
-  let pick = null
-  for (const w of wins) {
-    const d = Number(w.duration_seconds)
-    if (!isFinite(d) || d <= 0) continue
-    if (pick === null || d < Number(pick.duration_seconds)) pick = w
-  }
-  return (pick || wins[0]).key
+  return best ? best.key : null
 }
 
 /* Three or fewer quotas: all of them. More: the three highest by used_pct
@@ -549,6 +552,127 @@ export function visibleQuotas(p, barKey) {
   const money = top.filter(e => e.money).sort((a, b) => a.index - b.index)
   const shown = windows.concat(money).map(e => e.row)
   return { shown: shown, more: all.length - shown.length }
+}
+
+/* ---------- detail chart ---------- */
+
+const CHART_W = 336
+const CHART_HISTORY_W = 220
+const CHART_BASE = 66
+const CHART_SCALE = 0.64
+const CHART_HISTORY_S = 21600
+
+function chartY(pct) {
+  return CHART_BASE - Math.max(0, Math.min(100, Number(pct) || 0)) * CHART_SCALE
+}
+
+/* Burn rate in percentage points per second for a window, or null. */
+function windowRate(row) {
+  const used = Number(row.used_pct)
+  const eta = Number(row.eta_seconds)
+  if (!isFinite(used) || !isFinite(eta) || eta <= 0) return null
+  return (100 - used) / eta
+}
+
+/* History is [epoch seconds, value]; windows store the used percent, money
+ * rows store the used amount in the row's currency (see _row_history in
+ * dashboard/plugin_api.py). Money values are divided by the row total so the
+ * chart stays on the same 0-100 axis. */
+export function chartModel(row, nowMs) {
+  if (!row) return null
+  const isMoney = row.kind === 'money'
+  const raw = row.used_pct
+  if (raw === null || raw === undefined) return null
+  const used = Math.max(0, Math.min(100, Number(raw) || 0))
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const total = Number(row.total) || 0
+  const history = Array.isArray(row.history) ? row.history : []
+  const points = []
+  for (const sample of history) {
+    if (!Array.isArray(sample) || sample.length < 2) continue
+    const t = Number(sample[0])
+    const v = Number(sample[1])
+    if (!isFinite(t) || !isFinite(v)) continue
+    const age = now / 1000 - t
+    if (age < 0 || age > CHART_HISTORY_S) continue
+    const pct = isMoney ? (total > 0 ? (v / total) * 100 : v) : v
+    points.push([CHART_HISTORY_W - (age / CHART_HISTORY_S) * CHART_HISTORY_W, chartY(pct)])
+  }
+  points.sort((a, b) => a[0] - b[0])
+  const series = points.length >= 2 ? points : [[CHART_HISTORY_W, chartY(used)]]
+  const rate = isMoney ? null : windowRate(row)
+  let projection = null
+  let valueAtReset = null
+  let overflow = false
+  if (isMoney) {
+    const depletes = Number(row.depletes_in_seconds)
+    if (isFinite(depletes) && depletes > 0) {
+      projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: CHART_W, y1: chartY(100) }
+      valueAtReset = 100
+      overflow = true
+    }
+  } else {
+    const reset = Date.parse(row.resets_at)
+    if (isFinite(reset) && reset > now) {
+      const seconds = (reset - now) / 1000
+      valueAtReset = used + (rate === null ? 0 : rate * seconds)
+      if (valueAtReset >= 100) {
+        overflow = true
+        const to100 = rate > 0 ? (100 - used) / rate : seconds
+        const x = Math.min(CHART_W, CHART_HISTORY_W + (to100 / seconds) * (CHART_W - CHART_HISTORY_W))
+        projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: x, y1: chartY(100) }
+      } else {
+        projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: CHART_W, y1: chartY(valueAtReset) }
+      }
+    }
+  }
+  const amber =
+    row.warn === true ||
+    (row.actionable_eta !== null && row.actionable_eta !== undefined)
+  return {
+    series: series,
+    current: [CHART_HISTORY_W, chartY(used)],
+    projection: projection,
+    valueAtReset: valueAtReset === null ? null : Math.round(valueAtReset),
+    rate: rate,
+    overflow: overflow,
+    colour: amber ? 'amber' : 'accent'
+  }
+}
+
+export function statsFor(row, nowMs) {
+  if (!row) return []
+  const raw = row.used_pct
+  const used = raw === null || raw === undefined ? null : Math.max(0, Math.min(100, Number(raw) || 0))
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  if (row.kind === 'money') {
+    const left = Number(row.left)
+    const depletes = Number(row.depletes_in_seconds)
+    const spend =
+      isFinite(left) && isFinite(depletes) && depletes > 0
+        ? money((left / depletes) * 86400, row.cur) + '/d'
+        : '-'
+    return [
+      { label: 'Spend', value: spend },
+      { label: 'Lasts', value: isFinite(depletes) && depletes > 0 ? fmtEta(depletes) : '-' },
+      { label: 'Used', value: used === null ? '-' : pct(used) }
+    ]
+  }
+  const rate = windowRate(row)
+  const reset = Date.parse(row.resets_at)
+  const atReset =
+    used !== null && rate !== null && isFinite(reset) && reset > now
+      ? used + rate * ((reset - now) / 1000)
+      : null
+  return [
+    { label: 'Burn', value: rate === null ? '-' : (rate * 3600).toFixed(1) + '%/h' },
+    {
+      label: 'At reset',
+      value: atReset === null ? '-' : atReset >= 100 ? 'runs out' : '~' + Math.round(atReset) + '%',
+      warn: atReset !== null && atReset >= 100
+    },
+    { label: 'Pace', value: atReset === null ? '-' : (atReset / 100).toFixed(1) + '×' }
+  ]
 }
 
 /* ---------- status-bar compaction ---------- */
@@ -613,7 +737,7 @@ export function tipEntries(entries) {
 
 /* ---------- bar item (live) ---------- */
 
-export function barModel(providers, set, sessionProvider, mode, availPx) {
+export function barModel(providers, set, sessionProvider, mode, availPx, choice) {
   const rows = Array.isArray(providers) ? providers : []
   /* Every provider id, in payload order: a pinned provider whose fetch failed
    * must stay in the bar as '-' rather than vanish. */
@@ -622,12 +746,12 @@ export function barModel(providers, set, sessionProvider, mode, availPx) {
   const ids = barProviderIds(set, known, sessionProvider)
   const visible = rows.filter(p => ids.indexOf(p.id) !== -1)
   const entries = visible.map(p => {
-    const key = barQuotaKey(p)
+    const key = barQuotaKey(p, choice)
     const row = (p.windows || []).concat(p.money || []).find(r => r && r.key === key) || null
     return {
       id: p.id,
       code: p.code || code(p),
-      value: summary(p, mode),
+      value: summary(p, mode, choice),
       used_pct: row ? row.used_pct : null,
       attention: providerAttention(p),
       name: p.name,
@@ -677,6 +801,7 @@ function BarDetail() {
   const mode = useValue($mode)
   const barSet = useValue($barProviders)
   const sessionProvider = useValue($sessionProvider)
+  const choice = useValue($barQuota)
   const avail = useAvailPx()
 
   useEffect(() => {
@@ -689,7 +814,7 @@ function BarDetail() {
 
   if (isError) return 'backend down'
   if (!data) return '…'
-  return barContent(barModel(data.providers || [], barSet, sessionProvider, mode, avail))
+  return barContent(barModel(data.providers || [], barSet, sessionProvider, mode, avail, choice))
 }
 
 /* Hook-free render of a bar model: tests build the model and read this. */
@@ -804,8 +929,9 @@ function BarTip() {
   const mode = useValue($mode)
   const barSet = useValue($barProviders)
   const sessionProvider = useValue($sessionProvider)
+  const choice = useValue($barQuota)
   const rows = data && Array.isArray(data.providers) ? data.providers : []
-  const model = barModel(rows, barSet, sessionProvider, mode, null)
+  const model = barModel(rows, barSet, sessionProvider, mode, null, choice)
   return tipBody(tipEntries(model.entries), data ? clockOf(data.fetched_at) : '')
 }
 
@@ -925,11 +1051,211 @@ function quotaCell(row, ctx) {
   })
 }
 
+function chartElement(p, row, model) {
+  if (!model) {
+    return jsx('div', {
+      style: { fontSize: 10.5, color: 'var(--ui-text-tertiary)' },
+      children: 'No cap, so no chart'
+    })
+  }
+  const amber = model.colour === 'amber'
+  const series = model.series.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' ')
+  const proj = model.projection
+  return jsxs('svg', {
+    viewBox: '0 0 336 70',
+    width: '100%',
+    role: 'img',
+    'aria-label':
+      p.name + ' ' + row.label + ' ' + (model.overflow ? 'projected to run out before reset' : 'on track'),
+    className: amber ? 'text-amber-600' : undefined,
+    style: amber ? undefined : { color: 'var(--ui-accent)' },
+    children: [
+      jsx('line', {
+        key: 'alert',
+        x1: 0,
+        y1: 14.8,
+        x2: 336,
+        y2: 14.8,
+        stroke: 'currentColor',
+        strokeDasharray: '3 3',
+        opacity: 0.35
+      }),
+      jsx('text', {
+        key: 'alertLabel',
+        x: 0,
+        y: 11,
+        fontSize: 8.5,
+        fill: 'currentColor',
+        opacity: 0.55,
+        children: 'alert 80%'
+      }),
+      model.series.length >= 2
+        ? jsx('polyline', {
+            key: 'history',
+            points: series,
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeLinejoin: 'round',
+            strokeLinecap: 'round'
+          })
+        : jsx('circle', { key: 'current', cx: 220, cy: model.current[1], r: 3, fill: 'currentColor' }),
+      proj
+        ? jsx('line', {
+            key: 'proj',
+            x1: proj.x0,
+            y1: proj.y0,
+            x2: proj.x1,
+            y2: proj.y1,
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeDasharray: '4 3'
+          })
+        : null,
+      proj ? jsx('circle', { key: 'end', cx: proj.x1, cy: proj.y1, r: 3, fill: 'currentColor' }) : null,
+      jsx('line', {
+        key: 'now',
+        x1: 220,
+        y1: 0,
+        x2: 220,
+        y2: 70,
+        stroke: 'currentColor',
+        strokeDasharray: '2 3',
+        opacity: 0.35
+      }),
+      jsx('text', {
+        key: 'nowLabel',
+        x: 223,
+        y: 68,
+        fontSize: 8.5,
+        fill: 'currentColor',
+        opacity: 0.55,
+        children: 'now'
+      })
+    ]
+  })
+}
+
+function statsElement(row) {
+  const stats = statsFor(row)
+  return jsx('div', {
+    style: { display: 'flex', gap: 8 },
+    children: stats.map(s =>
+      jsxs('div', {
+        key: s.label,
+        style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 1 },
+        children: [
+          jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)' }, children: s.label }),
+          jsx('span', {
+            className: s.warn ? 'text-amber-600' : undefined,
+            style: { fontSize: 12, fontVariantNumeric: MONO },
+            children: s.value
+          })
+        ]
+      })
+    )
+  })
+}
+
+/* The open row's detail panel: tabs per quota, chart, three stats, and the
+ * "show this quota in the status bar" action. Hook-free for tests. */
+export function expandedPanel(p, ctx) {
+  const quotas = (Array.isArray(p.windows) ? p.windows : []).concat(
+    Array.isArray(p.money) ? p.money : []
+  )
+  if (!quotas.length) return null
+  const barKey = barQuotaKey(p, ctx.choice)
+  const picked = ctx.tab && quotas.some(q => q && q.key === ctx.tab) ? ctx.tab : barKey
+  const tabRow = quotas.find(q => q && q.key === picked) || quotas[0]
+  const barHere = (ctx.barIds || []).indexOf(p.id) !== -1
+  const shownInBar = barHere && tabRow.key === barKey
+  const extra =
+    tabRow.kind === 'money'
+      ? Number(tabRow.total) > 0
+        ? money(tabRow.left, tabRow.cur) + ' of ' + money(tabRow.total, tabRow.cur) + ' left'
+        : money(tabRow.left, tabRow.cur) + ' left'
+      : etaText(tabRow.resets_at)
+  const model = chartModel(tabRow, ctx.now)
+  return jsxs('div', {
+    style: {
+      marginLeft: 16,
+      padding: 10,
+      border: '1px solid var(--ui-stroke-tertiary)',
+      borderRadius: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 9
+    },
+    children: [
+      jsxs('div', {
+        key: 'top',
+        style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
+        children: [
+          jsx(Tabs, {
+            value: picked,
+            onValueChange: ctx.onTab,
+            children: jsx(TabsList, {
+              className: 'h-auto gap-1 bg-transparent p-0',
+              children: quotas.map(q =>
+                jsxs(TabsTrigger, {
+                  key: q.key,
+                  value: q.key,
+                  className: 'h-auto gap-1 px-1.5 py-0.5 text-[10.5px]',
+                  children: [
+                    jsx('span', {
+                      className: barHere && q.key === barKey ? 'bg-(--ui-accent)' : undefined,
+                      style: {
+                        width: 5,
+                        height: 5,
+                        borderRadius: '50%',
+                        flex: 'none',
+                        background: barHere && q.key === barKey ? undefined : 'transparent'
+                      }
+                    }),
+                    q.label
+                  ]
+                })
+              )
+            })
+          }),
+          jsx('span', {
+            style: {
+              marginLeft: 'auto',
+              fontSize: 10.5,
+              color: 'var(--ui-text-tertiary)',
+              whiteSpace: 'nowrap'
+            },
+            children: extra
+          })
+        ]
+      }),
+      chartElement(p, tabRow, model),
+      statsElement(tabRow),
+      jsx('button', {
+        key: 'bar',
+        type: 'button',
+        onClick: () => ctx.onShowInBar && ctx.onShowInBar(tabRow.key),
+        style: {
+          alignSelf: 'flex-start',
+          fontSize: 10.5,
+          padding: '3px 8px',
+          borderRadius: 6,
+          cursor: 'pointer',
+          border: '1px solid ' + (shownInBar ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
+          background: shownInBar ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
+          color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+        },
+        children: shownInBar ? 'Shown in status bar' : 'Show ' + tabRow.label + ' in status bar'
+      })
+    ]
+  })
+}
+
 /* One provider row, hook-free so tests can build it directly. */
 export function providerRowElement(p, ctx) {
   const pins = Array.isArray(ctx.pins) ? ctx.pins : []
   const pinned = pins.indexOf(p.id) !== -1
-  const barKey = barQuotaKey(p)
+  const barKey = barQuotaKey(p, ctx.choice)
   const barHere = (ctx.barIds || []).indexOf(p.id) !== -1
   const windows = Array.isArray(p.windows) ? p.windows : []
   const moneyRows = Array.isArray(p.money) ? p.money : []
@@ -937,23 +1263,56 @@ export function providerRowElement(p, ctx) {
   const toggle = pinButton(p, pinned, ctx.onPin)
   const note = attentionNote(p)
   const stale = staleText(p)
-  const expanded = ctx.expanded === true
+  const open = ctx.open === true
   const quotas = visibleQuotas(p, barKey)
-  const shown = expanded ? all : quotas.shown
-  const cols = expanded ? 3 : Math.max(1, Math.min(3, shown.length))
+  const shown = quotas.shown
+  const cols = Math.max(1, Math.min(3, shown.length))
   const rowStyle = opacity => ({
     display: 'flex',
     flexDirection: 'column',
     gap: 6,
     padding: '7px 14px 9px',
     borderBottom: '1px solid var(--ui-stroke-tertiary)',
+    background: open ? 'var(--ui-bg-elevated)' : 'transparent',
     opacity: opacity
   })
 
   const header = jsxs('div', {
     style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
     children: [
-      jsx('span', { style: { fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }, children: p.name }),
+      jsxs('button', {
+        type: 'button',
+        'aria-expanded': open,
+        onClick: ctx.onToggle,
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: 0,
+          border: 'none',
+          background: 'transparent',
+          color: 'inherit',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontWeight: 600,
+          whiteSpace: 'nowrap'
+        },
+        children: [
+          p.name,
+          jsx('svg', {
+            viewBox: '0 0 24 24',
+            width: 9,
+            height: 9,
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            style: { transform: open ? 'rotate(90deg)' : 'none' },
+            children: jsx('path', { d: 'm9 6 6 6-6 6' })
+          })
+        ]
+      }),
       jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: p.tag || '' }),
       jsx('span', {
         className: note ? 'text-amber-600' : undefined,
@@ -966,7 +1325,7 @@ export function providerRowElement(p, ctx) {
         },
         children: note || stale
       }),
-      quotas.more > 0 || expanded
+      quotas.more > 0
         ? jsx('button', {
             type: 'button',
             onClick: ctx.onMore,
@@ -978,7 +1337,7 @@ export function providerRowElement(p, ctx) {
               fontSize: 10,
               cursor: 'pointer'
             },
-            children: expanded ? 'Show less' : '+' + quotas.more + ' more'
+            children: '+' + quotas.more + ' more'
           })
         : null,
       toggle
@@ -1016,7 +1375,8 @@ export function providerRowElement(p, ctx) {
       jsx('div', {
         style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 8 },
         children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols }))
-      })
+      }),
+      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar }) : null
     ]
   })
 }
@@ -1026,6 +1386,15 @@ export function providerRowElement(p, ctx) {
 /* Pin all when not every provider is pinned, otherwise Unpin all. */
 export function pinAllSet(pins, ids) {
   return allPinned(pins, ids) ? [] : ids.slice()
+}
+
+/* One provider opens at a time: the same id closes, another replaces it. */
+export function nextOpenId(current, id) {
+  return current === id ? null : id
+}
+
+export function setBarQuota(providerId, key) {
+  $barQuota.set({ ...$barQuota.get(), [providerId]: key })
 }
 
 export function groupHeadingElement(title) {
@@ -1049,8 +1418,10 @@ function UsagePanel() {
   const interval = useValue($interval)
   const pins = useValue($barProviders)
   const sessionProvider = useValue($sessionProvider)
+  const choice = useValue($barQuota)
   const [view, setView] = useState('all')
-  const [expanded, setExpanded] = useState([])
+  const [openId, setOpenId] = useState(null)
+  const [tabs, setTabs] = useState({})
   const [spinning, setSpinning] = useState(false)
 
   const refresh = () => {
@@ -1071,7 +1442,7 @@ function UsagePanel() {
   const provs = data && Array.isArray(data.providers) ? data.providers : []
   const ids = provs.map(x => x.id)
   const pinnedCount = pinnedIds(pins, ids).length
-  const barIds = barModel(provs, pins, sessionProvider, mode, null).entries.map(e => e.id)
+  const barIds = barModel(provs, pins, sessionProvider, mode, null, choice).entries.map(e => e.id)
   const groups = groupProviders(provs, view, pins)
 
   const body = []
@@ -1090,9 +1461,14 @@ function UsagePanel() {
             mode: mode,
             pins: pins,
             barIds: barIds,
-            expanded: expanded.indexOf(p.id) !== -1,
-            onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id)),
-            onMore: () => setExpanded(cur => cur.indexOf(p.id) === -1 ? cur.concat([p.id]) : cur.filter(x => x !== p.id))
+            choice: choice,
+            open: openId === p.id,
+            tab: tabs[p.id],
+            onToggle: () => setOpenId(cur => nextOpenId(cur, p.id)),
+            onMore: () => setOpenId(p.id),
+            onTab: key => setTabs(cur => ({ ...cur, [p.id]: key })),
+            onShowInBar: key => setBarQuota(p.id, key),
+            onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id))
           }))
         ]
       }))

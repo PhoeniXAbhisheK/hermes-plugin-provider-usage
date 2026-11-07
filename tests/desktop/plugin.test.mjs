@@ -216,7 +216,7 @@ test('sameReset compares stamps inside the tolerance and skips junk keys', async
   assert.equal(sameReset({ ['zai:7d:' + isoAt(stamp)]: 1 }, prefix, stamp), false)
 })
 
-test('summary picks the shortest account window and the key cap', async () => {
+test('summary shows the highest used quota across windows and money', async () => {
   const { summary } = await loadPlugin()
   const cap = {
     status: 'ok',
@@ -266,14 +266,14 @@ test('summary picks the shortest account window and the key cap', async () => {
   }
   assert.equal(summary(windows, 'used'), '20%')
   assert.equal(summary(windows, 'remaining'), '80%')
-  const modelShorter = {
+  const modelHigher = {
     status: 'ok',
     windows: [
       { key: '5h', label: '5h', percent: 10, used_pct: 10, scope: 'account', duration_seconds: 18000 },
       { key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model', duration_seconds: 3600 }
     ]
   }
-  assert.equal(summary(modelShorter, 'used'), '10%')
+  assert.equal(summary(modelHigher, 'used'), '90%')
   const noDurations = {
     status: 'ok',
     windows: [
@@ -281,10 +281,10 @@ test('summary picks the shortest account window and the key cap', async () => {
       { key: 'second', label: 'Second', percent: 60, used_pct: 60, scope: 'account' }
     ]
   }
-  assert.equal(summary(noDurations, 'used'), '30%')
+  assert.equal(summary(noDurations, 'used'), '60%')
   assert.equal(
     summary({ status: 'ok', windows: [{ key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model' }] }, 'used'),
-    '-'
+    '90%'
   )
   assert.equal(summary({ status: 'ok' }, 'used'), '-')
   assert.equal(summary({ status: 'error' }, 'used'), '-')
@@ -312,6 +312,25 @@ test('summary picks the shortest account window and the key cap', async () => {
     ]
   }
   assert.equal(summary(capSecond, 'used'), '$6.00')
+  assert.equal(summary(capSecond, 'remaining'), '$4.00')
+  assert.equal(summary(capSecond, 'used', { zai: 'money:balance:usd' }), '$6.00')
+})
+
+test('summary follows a chosen bar quota', async () => {
+  const { summary } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', used_pct: 20, scope: 'account', duration_seconds: 18000 },
+      { key: 'weekly', label: 'Weekly', used_pct: 40, scope: 'account', duration_seconds: 604800 }
+    ]
+  }
+  assert.equal(summary(p, 'used'), '40%')
+  assert.equal(summary(p, 'used', { zai: '5h' }), '20%')
+  assert.equal(summary(p, 'remaining', { zai: '5h' }), '80%')
+  assert.equal(summary(p, 'used', { zai: 'gone' }), '40%')
+  assert.equal(summary(p, 'used', { other: '5h' }), '40%')
 })
 
 test('tipLine uses the actionable eta and the row keys', async () => {
@@ -1029,7 +1048,7 @@ test('providerRowElement keys the pin toggle and the bar quota dot', async () =>
   assert.equal(findNodes(noDot, n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%').length, 0)
 })
 
-test('providerRowElement shows +N more and expands on request', async () => {
+test('providerRowElement shows +N more and the open row renders its panel', async () => {
   const { providerRowElement } = await loadPlugin()
   const p = {
     id: 'zai',
@@ -1043,13 +1062,14 @@ test('providerRowElement shows +N more and expands on request', async () => {
       { key: 'd', label: 'D', kind: 'window', used_pct: 60, warn: false }
     ]
   }
-  const collapsed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], expanded: false })
+  const collapsed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: false })
   const more = findNodes(collapsed, n => n.type === 'button' && nodeText(n) === '+1 more')
   assert.equal(more.length, 1)
-  assert.equal(nodeText(collapsed).includes('D'), false)
-  const expanded = providerRowElement(p, { mode: 'used', pins: [], barIds: [], expanded: true })
-  assert.equal(findNodes(expanded, n => n.type === 'button' && nodeText(n) === 'Show less').length, 1)
-  assert.equal(nodeText(expanded).includes('D'), true)
+  assert.equal(findNodes(collapsed, n => typeof n.type === 'function' && n.type.name === 'Tabs').length, 0)
+  const open = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: true })
+  assert.equal(findNodes(open, n => typeof n.type === 'function' && n.type.name === 'Tabs').length, 1)
+  assert.equal(findNodes(open, n => n.type === 'button' && nodeText(n) === 'Show less').length, 0)
+  assert.equal(nodeText(open).includes('D'), true)
 })
 
 test('providerRowElement distinguishes retry from a last reading', async () => {
@@ -1266,13 +1286,471 @@ test('desktop/plugin.js no longer ships an eye icon', async () => {
   assert.equal(/EyeIcon|EYE_PATH/.test(source), false)
 })
 
+/* ---------- detail chart and expanded row ---------- */
+
+test('chartModel maps history and projects under the reset', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 50,
+    eta_seconds: 7200,
+    resets_at: new Date(now + 3600 * 1000).toISOString(),
+    history: [
+      [now / 1000 - 3600, 30],
+      [now / 1000, 50]
+    ]
+  }
+  const m = chartModel(row, now)
+  assert.equal(m.series.length, 2)
+  assert.ok(Math.abs(m.series[0][0] - (220 - 220 / 6)) < 0.01)
+  assert.ok(Math.abs(m.series[0][1] - 46.8) < 0.01)
+  assert.ok(Math.abs(m.series[1][0] - 220) < 0.01)
+  assert.ok(Math.abs(m.series[1][1] - 34) < 0.01)
+  assert.equal(m.projection.x1, 336)
+  assert.ok(Math.abs(m.projection.y1 - 18) < 0.01)
+  assert.equal(m.valueAtReset, 75)
+  assert.equal(m.overflow, false)
+  assert.equal(m.colour, 'accent')
+  const warned = chartModel({ ...row, warn: true }, now)
+  assert.equal(warned.colour, 'amber')
+})
+
+test('chartModel stops the projection where it reaches 100', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 90,
+    eta_seconds: 1000,
+    resets_at: new Date(now + 3600 * 1000).toISOString()
+  }
+  const m = chartModel(row, now)
+  assert.equal(m.overflow, true)
+  assert.equal(m.valueAtReset, 126)
+  assert.ok(Math.abs(m.projection.x1 - (220 + (1000 / 3600) * 116)) < 0.01)
+  assert.equal(m.projection.y1, 2)
+})
+
+test('chartModel leaves a window without a reset unprojected', async () => {
+  const { chartModel } = await loadPlugin()
+  const m = chartModel({ key: 'w', label: 'W', kind: 'window', used_pct: 40 }, Date.now())
+  assert.equal(m.projection, null)
+  assert.equal(m.series.length, 1)
+  assert.equal(m.series[0][0], 220)
+})
+
+test('chartModel charts money through its total and refuses a null used_pct', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const money = {
+    key: 'money:key_cap:usd',
+    label: 'Key cap',
+    kind: 'money',
+    total: 100,
+    left: 60,
+    cur: 'USD',
+    used_pct: 40,
+    depletes_in_seconds: 86400,
+    history: [
+      [now / 1000 - 3600, 20],
+      [now / 1000, 40]
+    ]
+  }
+  const m = chartModel(money, now)
+  assert.ok(Math.abs(m.series[0][1] - 53.2) < 0.01)
+  assert.equal(m.projection.x1, 336)
+  assert.equal(m.projection.y1, 2)
+  assert.equal(m.valueAtReset, 100)
+  assert.equal(m.overflow, true)
+  assert.equal(chartModel({ ...money, used_pct: null }, now), null)
+})
+
+test('statsFor reads a window and a money row', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const window = {
+    kind: 'window',
+    used_pct: 40,
+    eta_seconds: 3600,
+    resets_at: new Date(now + 1800 * 1000).toISOString()
+  }
+  assert.deepEqual(statsFor(window, now), [
+    { label: 'Burn', value: '60.0%/h' },
+    { label: 'At reset', value: '~70%', warn: false },
+    { label: 'Pace', value: '0.7×' }
+  ])
+  const over = {
+    kind: 'window',
+    used_pct: 90,
+    eta_seconds: 3600,
+    resets_at: new Date(now + 7200 * 1000).toISOString()
+  }
+  const overStats = statsFor(over, now)
+  assert.equal(overStats[1].value, 'runs out')
+  assert.equal(overStats[1].warn, true)
+  const noEta = statsFor({ kind: 'window', used_pct: 55 }, now)
+  assert.deepEqual(noEta, [
+    { label: 'Burn', value: '-' },
+    { label: 'At reset', value: '-', warn: false },
+    { label: 'Pace', value: '-' }
+  ])
+  const money = statsFor(
+    { kind: 'money', total: 100, left: 20, cur: 'USD', used_pct: 80, depletes_in_seconds: 86400 },
+    now
+  )
+  assert.deepEqual(money, [
+    { label: 'Spend', value: '$20.00/d' },
+    { label: 'Lasts', value: '~24h' },
+    { label: 'Used', value: '80%' }
+  ])
+  assert.deepEqual(statsFor({ kind: 'money', used_pct: null, left: 5, cur: 'USD' }, now), [
+    { label: 'Spend', value: '-' },
+    { label: 'Lasts', value: '-' },
+    { label: 'Used', value: '-' }
+  ])
+})
+
+test('expandedPanel opens on the bar quota and lists every quota tab', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', kind: 'window', used_pct: 20, resets_at: new Date(now + 1800 * 1000).toISOString() },
+      { key: 'weekly', label: 'Weekly', kind: 'window', used_pct: 60 },
+      { key: 'monthly', label: 'Monthly', kind: 'window', used_pct: 10 }
+    ]
+  }
+  const panel = expandedPanel(p, { mode: 'used', choice: { zai: 'weekly' }, barIds: ['zai'], now: now })
+  const tabs = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'Tabs')
+  assert.equal(tabs.length, 1)
+  assert.equal(tabs[0].props.value, 'weekly')
+  const triggers = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'TabsTrigger')
+  assert.equal(triggers.length, 3)
+  assert.deepEqual(triggers.map(t => t.props.value), ['5h', 'weekly', 'monthly'])
+  assert.equal(nodeText(panel).includes('Shown in status bar'), true)
+  const plus = findNodes(
+    panel,
+    n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%'
+  )
+  assert.equal(plus.length, 1)
+})
+
+test('the show-in-bar button sets the tab quota and then reads Shown', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', kind: 'window', used_pct: 20 },
+      { key: 'weekly', label: 'Weekly', kind: 'window', used_pct: 60 }
+    ]
+  }
+  const chosen = []
+  const panel = expandedPanel(p, {
+    mode: 'used',
+    choice: {},
+    barIds: ['zai'],
+    tab: '5h',
+    onShowInBar: key => chosen.push(key)
+  })
+  const button = findNodes(panel, n => n.type === 'button' && nodeText(n) === 'Show 5h in status bar')
+  assert.equal(button.length, 1)
+  assert.equal(nodeText(panel).includes('40%'), false)
+  button[0].props.onClick()
+  assert.deepEqual(chosen, ['5h'])
+  const shown = expandedPanel(p, { mode: 'used', choice: { zai: '5h' }, barIds: ['zai'], tab: '5h' })
+  assert.equal(findNodes(shown, n => n.type === 'button' && nodeText(n) === 'Shown in status bar').length, 1)
+})
+
+test('expandedPanel shows a money tab as left of total', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const p = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    status: 'ok',
+    money: [
+      { key: 'money:key_cap:usd', label: 'Key cap', kind: 'money', total: 10, left: 7, cur: 'USD', used_pct: 30 }
+    ]
+  }
+  const panel = expandedPanel(p, { mode: 'used', choice: {}, barIds: [], tab: 'money:key_cap:usd' })
+  assert.ok(nodeText(panel).includes('$7.00 of $10.00 left'))
+})
+
+test('the provider name button carries aria-expanded and the chevron', async () => {
+  const { providerRowElement } = await loadPlugin()
+  const p = { id: 'zai', name: 'Zai', tag: 'Pro', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20 }] }
+  const closed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: false })
+  const closedButton = findNodes(closed, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)
+  assert.equal(closedButton.length, 1)
+  assert.equal(closedButton[0].props['aria-expanded'], false)
+  const closedChevron = findNodes(closedButton[0], n => n.type === 'svg' && n.props.style)
+  assert.equal(closedChevron[0].props.style.transform, 'none')
+  const open = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: true })
+  const openButton = findNodes(open, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)
+  assert.equal(openButton[0].props['aria-expanded'], true)
+  const openChevron = findNodes(openButton[0], n => n.type === 'svg' && n.props.style)
+  assert.equal(openChevron[0].props.style.transform, 'rotate(90deg)')
+})
+
+test('nextOpenId keeps one provider open at a time', async () => {
+  const { nextOpenId } = await loadPlugin()
+  assert.equal(nextOpenId(null, 'a'), 'a')
+  assert.equal(nextOpenId('a', 'b'), 'b')
+  assert.equal(nextOpenId('a', 'a'), null)
+})
+
+test('the bar quota choice persists under barQuota', async () => {
+  const { default: plugin, setBarQuota } = await loadPlugin()
+  const { ctx, data } = fakeContext()
+  data.barQuota = { zai: 'weekly' }
+  plugin.register(ctx)
+  setBarQuota('nous', '5h')
+  assert.deepEqual(data.barQuota, { zai: 'weekly', nous: '5h' })
+})
+
+test('the tooltip and the dot follow the chosen bar quota', async () => {
+  const { barModel, tipEntries, providerRowElement } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    tag: 'Pro',
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', kind: 'window', used_pct: 20, warn: false },
+      { key: 'weekly', label: 'Weekly', kind: 'window', used_pct: 60, warn: false }
+    ]
+  }
+  const chosen = barModel([p], ['zai'], null, 'used', null, { zai: '5h' })
+  assert.equal(chosen.entries[0].label, '5h')
+  assert.deepEqual(tipEntries(chosen.entries), [{ name: 'Zai', label: '5h', value: '20%', attention: false }])
+  const row = providerRowElement(p, { mode: 'used', pins: [], barIds: ['zai'], choice: { zai: '5h' } })
+  const grid = row.props.children[1]
+  const cells = grid.props.children
+  const dotOn = cells.filter(cell =>
+    findNodes(cell, n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%').length
+  )
+  assert.equal(dotOn.length, 1)
+  assert.ok(nodeText(dotOn[0]).includes('5h'))
+})
+
+test('a zero eta yields no rate and a dash for burn', async () => {
+  const { statsFor } = await loadPlugin()
+  const stats = statsFor({ kind: 'window', used_pct: 40, eta_seconds: 0 })
+  assert.deepEqual(stats, [
+    { label: 'Burn', value: '-' },
+    { label: 'At reset', value: '-', warn: false },
+    { label: 'Pace', value: '-' }
+  ])
+})
+
+test('chartModel clamps history values to the chart height', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      history: [
+        [now / 1000 - 3600, 150],
+        [now / 1000 - 1800, -20],
+        [now / 1000, 40]
+      ]
+    },
+    now
+  )
+  assert.equal(m.series.length, 3)
+  assert.equal(m.series[0][1], 2)
+  assert.equal(m.series[1][1], 66)
+})
+
+test('chartModel drops a sample stamped in the future', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      history: [
+        [now / 1000 + 600, 90],
+        [now / 1000, 40]
+      ]
+    },
+    now
+  )
+  assert.equal(m.series.length, 1)
+  assert.equal(m.series[0][0], 220)
+  assert.ok(Math.abs(m.series[0][1] - 40.4) < 0.01)
+})
+
+test('chartModel drops a sample older than six hours', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      history: [
+        [now / 1000 - 7 * 3600, 10],
+        [now / 1000, 40]
+      ]
+    },
+    now
+  )
+  assert.equal(m.series.length, 1)
+  assert.equal(m.series[0][0], 220)
+})
+
+test('chartModel maps money history through the row total', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'money',
+      total: 20,
+      left: 15,
+      cur: 'USD',
+      used_pct: 25,
+      history: [
+        [now / 1000 - 3600, 5],
+        [now / 1000, 5]
+      ]
+    },
+    now
+  )
+  assert.equal(m.series[0][1], 50)
+})
+
+test('chartModel sorts samples given newest first', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      history: [
+        [now / 1000, 40],
+        [now / 1000 - 3600, 20]
+      ]
+    },
+    now
+  )
+  assert.ok(Math.abs(m.series[0][0] - (220 - 220 / 6)) < 0.01)
+  assert.equal(m.series[1][0], 220)
+})
+
+test('chartModel ignores a reset that already passed', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const m = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      eta_seconds: 600,
+      resets_at: new Date(now - 3600 * 1000).toISOString()
+    },
+    now
+  )
+  assert.equal(m.projection, null)
+  assert.equal(m.valueAtReset, null)
+})
+
+test('chartModel turns amber on an actionable eta alone', async () => {
+  const { chartModel } = await loadPlugin()
+  const m = chartModel(
+    { kind: 'window', used_pct: 40, warn: false, actionable_eta: 600, resets_at: null },
+    Date.now()
+  )
+  assert.equal(m.colour, 'amber')
+})
+
+test('a money tab without a used_pct shows the no-cap text and no chart', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const p = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    status: 'ok',
+    money: [
+      { key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }
+    ]
+  }
+  const panel = expandedPanel(p, { mode: 'used', choice: {}, barIds: [], tab: 'money:balance:usd' })
+  assert.ok(nodeText(panel).includes('No cap, so no chart'))
+  assert.equal(findNodes(panel, n => n.type === 'svg').length, 0)
+})
+
+test('the chart aria-label names the provider, quota and forecast', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const over = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [
+      {
+        key: '5h',
+        label: '5h',
+        kind: 'window',
+        used_pct: 90,
+        eta_seconds: 1000,
+        resets_at: new Date(now + 3600 * 1000).toISOString()
+      }
+    ]
+  }
+  const overPanel = expandedPanel(over, { mode: 'used', choice: {}, barIds: [], tab: '5h', now: now })
+  const overSvg = findNodes(overPanel, n => n.type === 'svg' && n.props.role === 'img')
+  assert.equal(overSvg.length, 1)
+  assert.equal(overSvg[0].props['aria-label'], 'Zai 5h projected to run out before reset')
+  const calm = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [
+      {
+        key: '5h',
+        label: '5h',
+        kind: 'window',
+        used_pct: 40,
+        eta_seconds: 7200,
+        resets_at: new Date(now + 3600 * 1000).toISOString()
+      }
+    ]
+  }
+  const calmPanel = expandedPanel(calm, { mode: 'used', choice: {}, barIds: [], tab: '5h', now: now })
+  const calmSvg = findNodes(calmPanel, n => n.type === 'svg' && n.props.role === 'img')
+  assert.equal(calmSvg[0].props['aria-label'], 'Zai 5h on track')
+})
+
+test('an open row carries the raised background and a closed one does not', async () => {
+  const { providerRowElement } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    tag: 'Pro',
+    status: 'ok',
+    windows: [{ key: '5h', label: '5h', kind: 'window', used_pct: 20 }]
+  }
+  const closed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: false })
+  assert.equal(closed.props.style.background, 'transparent')
+  const open = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: true })
+  assert.equal(open.props.style.background, 'var(--ui-bg-elevated)')
+})
+
 test('a real payload shape drives the bar, the tip and the warn flag', async () => {
   const { readFile } = await import('node:fs/promises')
   const payload = JSON.parse(await readFile(new URL('./payload.json', import.meta.url), 'utf8'))
   const { summary, tipLine, providerWarn } = await loadPlugin()
   const [anthropic, openrouter] = payload.providers
-  assert.equal(summary(anthropic, 'used'), '42%')
-  assert.equal(summary(anthropic, 'remaining'), '58%')
+  assert.equal(summary(anthropic, 'used'), '95%')
+  assert.equal(summary(anthropic, 'remaining'), '5%')
   assert.equal(summary(openrouter, 'used'), '$8.00')
   assert.equal(summary(openrouter, 'remaining'), '$2.00')
   assert.equal(tipLine(anthropic, 'used'), '5h 42% (~2h) · Weekly 88% · Opus 95%')
@@ -1488,9 +1966,10 @@ test('visibleQuotas orders windows by length, then money', async () => {
   assert.equal(out.more, 2)
 })
 
-test('barQuotaKey matches summary', async () => {
+test('barQuotaKey defaults to the highest used row and honours a choice', async () => {
   const { barQuotaKey, summary } = await loadPlugin()
   const money = {
+    id: 'or',
     status: 'ok',
     money: [
       { key: 'money:balance:usd', kind: 'money', total: 10, left: 9, cur: 'USD', used_pct: 10 },
@@ -1499,7 +1978,10 @@ test('barQuotaKey matches summary', async () => {
   }
   assert.equal(barQuotaKey(money), 'money:key_cap:usd')
   assert.equal(summary(money, 'used'), '$8.00')
+  assert.equal(barQuotaKey(money, { or: 'money:balance:usd' }), 'money:balance:usd')
+  assert.equal(summary(money, 'used', { or: 'money:balance:usd' }), '$1.00')
   const windows = {
+    id: 'zai',
     status: 'ok',
     windows: [
       { key: 'weekly', scope: 'account', duration_seconds: 604800, used_pct: 10 },
@@ -1507,10 +1989,32 @@ test('barQuotaKey matches summary', async () => {
       { key: 'opus', scope: 'model', duration_seconds: 1800, used_pct: 99 }
     ]
   }
-  assert.equal(barQuotaKey(windows), '5h')
-  assert.equal(summary(windows, 'used'), '20%')
+  assert.equal(barQuotaKey(windows), 'opus')
+  assert.equal(summary(windows, 'used'), '99%')
+  assert.equal(barQuotaKey(windows, { zai: '5h' }), '5h')
+  assert.equal(summary(windows, 'used', { zai: '5h' }), '20%')
+  assert.equal(barQuotaKey(windows, { zai: 'gone' }), 'opus')
+  assert.equal(barQuotaKey(windows, { other: '5h' }), 'opus')
   const plain = { status: 'ok', windows: [{ key: 'weekly', scope: 'account', used_pct: 10 }] }
   assert.equal(barQuotaKey(plain), 'weekly')
+  const noPct = {
+    id: 'x',
+    status: 'ok',
+    windows: [
+      { key: 'a', used_pct: null },
+      { key: 'b', used_pct: null }
+    ]
+  }
+  assert.equal(barQuotaKey(noPct), 'a')
+  const ties = {
+    id: 'y',
+    status: 'ok',
+    windows: [
+      { key: 't1', used_pct: 50 },
+      { key: 't2', used_pct: 50 }
+    ]
+  }
+  assert.equal(barQuotaKey(ties), 't1')
 })
 
 test('barLayout renders 1 to 3 entries full, attention first', async () => {
