@@ -56,6 +56,7 @@ import copy
 import contextvars
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -338,10 +339,27 @@ def _iso_dt(dt):
 
 
 def _num(value):
+    """A finite float, or None. Bools, NaN and infinities are not numbers here."""
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _window(label, percent, resets_at, status="ok"):
+    """One window row, or None when the percent isn't a usable number."""
+    value = _num(percent)
+    if value is None:
+        return None
+    return {
+        "label": label,
+        "percent": round(max(0.0, min(100.0, value)), 1),
+        "resets_at": resets_at,
+        "status": status,
+    }
 
 
 def _redact(text, secret=None):
@@ -490,17 +508,9 @@ def fetch_opencode_go():
     windows = []
     for wid, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "Monthly")):
         w = u.get(wid) or {}
-        percent = _num(w.get("percent"))
-        if percent is None:
-            continue  # missing metric: never render a fabricated 0% bar
-        windows.append(
-            {
-                "label": label,
-                "percent": percent,
-                "resets_at": w.get("resetsAt"),
-                "status": w.get("status", "ok"),
-            }
-        )
+        row = _window(label, w.get("percent"), w.get("resetsAt"), w.get("status", "ok"))
+        if row is not None:
+            windows.append(row)
     if not windows:
         raise _Skip("opencode-go")
     return {"id": "opencode-go", "status": "ok", "windows": windows}
@@ -553,14 +563,9 @@ def _codex_direct():
         resets_at = None
         if isinstance(ra, (int, float)):
             resets_at = _iso_from_epoch(now + ra)
-        windows.append(
-            {
-                "label": _codex_label(w, fallback),
-                "percent": w.get("used_percent"),
-                "resets_at": resets_at,
-                "status": "ok",
-            }
-        )
+        row = _window(_codex_label(w, fallback), w.get("used_percent"), resets_at)
+        if row is not None:
+            windows.append(row)
     plan = (d.get("plan_type") or "").strip()
     if not windows:
         # Nothing to render: an ok card with no rows would show a fabricated 0%.
@@ -659,17 +664,13 @@ def _snap_payload(provider, snap):
         return None
     windows = []
     for w in getattr(snap, "windows", None) or ():
-        used = getattr(w, "used_percent", None)
-        if not isinstance(used, (int, float)):
-            continue
-        windows.append(
-            {
-                "label": str(getattr(w, "label", None) or "Window"),
-                "percent": round(float(used), 1),
-                "resets_at": _iso_dt(getattr(w, "reset_at", None)),
-                "status": "ok",
-            }
+        row = _window(
+            str(getattr(w, "label", None) or "Window"),
+            getattr(w, "used_percent", None),
+            _iso_dt(getattr(w, "reset_at", None)),
         )
+        if row is not None:
+            windows.append(row)
     if not windows:
         return None
     return {"id": provider, "status": "ok", "windows": windows}
@@ -874,18 +875,10 @@ def _anthropic_direct():
         w = d.get(key)
         if not isinstance(w, dict):
             continue
-        percent = _num(w.get("utilization"))
-        if percent is None:
-            continue  # missing metric: skip the row, never a fabricated 0%
         resets = w.get("resets_at")
-        windows.append(
-            {
-                "label": label,
-                "percent": round(max(0.0, min(100.0, percent)), 1),
-                "resets_at": resets if isinstance(resets, str) else None,
-                "status": "ok",
-            }
-        )
+        row = _window(label, w.get("utilization"), resets if isinstance(resets, str) else None)
+        if row is not None:
+            windows.append(row)
     if not windows:
         raise _Skip("anthropic")
     return {"id": "anthropic", "status": "ok", "windows": windows}
@@ -937,17 +930,13 @@ def fetch_nous():
         raise _Skip("nous")
     windows = []
     for w in snap.windows or ():
-        used = w.used_percent
-        if not isinstance(used, (int, float)):
-            continue
-        windows.append(
-            {
-                "label": str(w.label or "Credits"),
-                "percent": round(float(used), 1),
-                "resets_at": _iso_dt(w.reset_at),
-                "status": "ok",
-            }
+        row = _window(
+            str(w.label or "Credits"),
+            w.used_percent,
+            _iso_dt(w.reset_at),
         )
+        if row is not None:
+            windows.append(row)
     if windows:
         return {"id": "nous", "status": "ok", "windows": windows}
 
@@ -996,17 +985,16 @@ def fetch_copilot():
         entitlement = entry.get("entitlement")
         if isinstance(entitlement, (int, float)) and entitlement <= 0:
             continue
-        remaining = entry.get("percent_remaining")
-        if not isinstance(remaining, (int, float)):
+        remaining = _num(entry.get("percent_remaining"))
+        if remaining is None:
             continue
-        windows.append(
-            {
-                "label": label,
-                "percent": round(max(0.0, min(100.0, 100.0 - float(remaining))), 1),
-                "resets_at": reset_at if isinstance(reset_at, str) else None,
-                "status": "ok",
-            }
+        row = _window(
+            label,
+            100.0 - remaining,
+            reset_at if isinstance(reset_at, str) else None,
         )
+        if row is not None:
+            windows.append(row)
     if not windows:
         raise _Skip("copilot")
     return {"id": "copilot", "status": "ok", "windows": windows}
@@ -1181,14 +1169,13 @@ def fetch_kimi():
             if remaining is not None:
                 used = limit - remaining
         if used is not None and limit:
-            windows.append(
-                {
-                    "label": "Weekly",
-                    "percent": round(max(0.0, min(100.0, used / limit * 100.0)), 1),
-                    "resets_at": _reset_text(usage.get("resetTime"), usage.get("reset_at")),
-                    "status": "ok",
-                }
+            row = _window(
+                "Weekly",
+                used / limit * 100.0,
+                _reset_text(usage.get("resetTime"), usage.get("reset_at")),
             )
+            if row is not None:
+                windows.append(row)
         for entry in payload.get("limits") or []:
             if not isinstance(entry, dict):
                 continue
@@ -1205,19 +1192,18 @@ def fetch_kimi():
                 if used is None or not limit:
                     continue
                 percent = used / limit * 100.0
-            windows.append(
-                {
-                    "label": _kimi_label(entry, detail),
-                    "percent": round(max(0.0, min(100.0, percent)), 1),
-                    "resets_at": _reset_text(
-                        entry.get("resetTime"),
-                        entry.get("reset_time"),
-                        detail.get("resetTime"),
-                        detail.get("reset_at"),
-                    ),
-                    "status": "ok",
-                }
+            row = _window(
+                _kimi_label(entry, detail),
+                percent,
+                _reset_text(
+                    entry.get("resetTime"),
+                    entry.get("reset_time"),
+                    detail.get("resetTime"),
+                    detail.get("reset_at"),
+                ),
             )
+            if row is not None:
+                windows.append(row)
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
     available, balance_url = _fetch_moonshot_balance(headers)
@@ -1264,8 +1250,6 @@ def fetch_zai():
             base = total if isinstance(total, (int, float)) else usage_value
             if isinstance(current, (int, float)) and isinstance(base, (int, float)) and base:
                 percent = float(current) / float(base) * 100.0
-        if percent is None:
-            continue
         if kind == "TOKENS_LIMIT":
             label = "Session (5h)"
         elif kind == "TIME_LIMIT":
@@ -1283,14 +1267,9 @@ def fetch_zai():
         reset_ms = item.get("nextResetTime")
         if isinstance(reset_ms, (int, float)) and reset_ms > 0:
             resets_at = _iso_epoch(reset_ms / 1000.0)
-        windows.append(
-            {
-                "label": label,
-                "percent": round(max(0.0, min(100.0, float(percent))), 1),
-                "resets_at": resets_at,
-                "status": "ok",
-            }
-        )
+        row = _window(label, percent, resets_at)
+        if row is not None:
+            windows.append(row)
     if not windows:
         message = payload.get("msg") or payload.get("message")
         if isinstance(message, str) and message.strip():
@@ -1407,20 +1386,13 @@ def fetch_minimax():
                 total, used = row.get(total_key), row.get(used_key)
                 if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
                     percent = min(max(used, 0), total) / total * 100.0
-            if percent is None:
-                continue
             resets_at = None
             end_ms = row.get(end_key)
             if isinstance(end_ms, (int, float)) and end_ms > 0:
                 resets_at = _iso_epoch(end_ms / 1000.0)
-            windows.append(
-                {
-                    "label": prefix + label,
-                    "percent": round(max(0.0, min(100.0, float(percent))), 1),
-                    "resets_at": resets_at,
-                    "status": "ok",
-                }
-            )
+            window = _window(prefix + label, percent, resets_at)
+            if window is not None:
+                windows.append(window)
     if not windows:
         raise _ProviderError(
             "MiniMax returned no parseable plan rows",
