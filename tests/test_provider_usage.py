@@ -374,7 +374,7 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["label"], "5h")
         self.assertEqual(p["windows"][0]["percent"], 40.3)
         self.assertEqual(p["windows"][0]["resets_at"], "2026-10-02T07:06:00.000000+00:00")
-        self.assertEqual(p["windows"][1]["label"], "7d")
+        self.assertEqual(p["windows"][1]["label"], "Weekly")
         self.assertEqual(p["windows"][1]["percent"], 0.0)  # real 0%, not fabricated
 
     def test_fallback_headers(self):
@@ -1082,9 +1082,9 @@ class MinimaxFetcherTest(unittest.TestCase):
         p = API.fetch_minimax()
         by_label = {w["label"]: w for w in p["windows"]}
         self.assertEqual(by_label["5h"]["percent"], 1.0)
-        self.assertEqual(by_label["weekly"]["percent"], 16.0)
+        self.assertEqual(by_label["Weekly"]["percent"], 16.0)
         self.assertEqual(by_label["5h"]["resets_at"], API._iso_epoch(1792757203914 / 1000.0))
-        self.assertEqual(by_label["weekly"]["resets_at"], API._iso_epoch(1793344003914 / 1000.0))
+        self.assertEqual(by_label["Weekly"]["resets_at"], API._iso_epoch(1793344003914 / 1000.0))
 
     def test_other_region_answer_falls_through_to_the_next_host(self):
         # A reachable host serving the other region answers 200 + base_resp error
@@ -1144,6 +1144,9 @@ class MinimaxFetcherTest(unittest.TestCase):
                     "percent": 25.0,
                     "resets_at": None,
                     "status": "ok",
+                    "scope": "model",
+                    "key": "minimax_m2:5h",
+                    "duration_seconds": 18000,
                 }
             ],
         )

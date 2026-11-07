@@ -14,22 +14,20 @@
  * (bottom-right, instant) and a refresh-interval picker (30s/1m/5m/10m).
  * Every scheduled poll refreshes the underlying values (?fresh=1).
  *
- * Near-limit tint: any window or the OpenRouter key cap at >= 80% used
- * renders amber in the bar and in the popover rows.
+ * Near-limit tint: the backend sets `warn` on any row that is at or past its
+ * own threshold; the bar and the popover rows follow that flag.
  *
- * Native notification (ctx.os.notify) fires once per threshold crossing,
- * deduped per window cycle (keyed by reset time) and per day for the cap.
+ * Native notification (ctx.os.notify) fires once per warned row, deduped per
+ * window cycle (keyed by the row key and reset time) and per day for money.
  *
- * Burn-rate projections: the backend reports `eta_seconds` /
- * `depletes_in_seconds` from observed history; rows show "~2d" when a
- * window would hit 100% before its reset (or a cap depletes soon).
+ * Burn-rate ETA: the backend reports `actionable_eta` from observed history;
+ * rows show "~2d" when it is present, and nothing otherwise.
  */
 import { STATUSBAR_AREAS, atom, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
 const USAGE_KEY = ['plugin-provider-usage', 'backend']
-export const WARN_PCT = 80
 
 const INTERVALS = [
   { label: '30s', ms: 30000 },
@@ -140,7 +138,7 @@ export function fmtEta(sec) {
 }
 
 export function usedPercentOf(w) {
-  return Math.max(0, Math.min(100, Number(w && w.percent) || 0))
+  return Math.max(0, Math.min(100, Number(w && w.used_pct) || 0))
 }
 
 export function capUsedPercent(m) {
@@ -151,10 +149,8 @@ export function capUsedPercent(m) {
 
 export function providerWarn(p) {
   if (!p || p.status !== 'ok') return false
-  for (const w of p.windows || []) if (usedPercentOf(w) >= WARN_PCT) return true
-  for (const m of p.money || []) {
-    if (m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT) return true
-  }
+  const rows = (p.windows || []).concat(p.money || [])
+  for (const row of rows) if (row.warn === true) return true
   return false
 }
 
@@ -171,21 +167,6 @@ function toggleBarProvider(id, ids) {
   const effective = cur === null ? (ids.length ? [ids[0]] : []) : cur.slice()
   const next = effective.indexOf(id) === -1 ? effective.concat([id]) : effective.filter(x => x !== id)
   $barProviders.set(next)
-}
-
-/* A projection is actionable when the window would hit 100% BEFORE its own
- * reset (otherwise the reset saves you first). Without a reset time, only
- * projections inside a week are surfaced. */
-export function actionableEta(w) {
-  const e = Number(w && w.eta_seconds)
-  if (!isFinite(e) || e <= 0) return null
-  if (w && w.resets_at) {
-    const toReset = (Date.parse(w.resets_at) - Date.now()) / 1000
-    if (isFinite(toReset) && e >= toReset) return null
-  } else if (e > 7 * 86400) {
-    return null
-  }
-  return e
 }
 
 /* ---------- alerts (native notification, deduped) ---------- */
@@ -230,33 +211,30 @@ export function checkAlerts(data) {
     for (const p of data.providers) {
       if (p.status !== 'ok') continue
       for (const w of p.windows || []) {
-        const u = usedPercentOf(w)
-        if (u < WARN_PCT) continue
-        const eta = actionableEta(w)
+        if (w.warn !== true) continue
+        const eta = Number(w.actionable_eta)
         const bits = []
-        if (eta) bits.push('At this rate, 100% in ' + fmtEta(eta))
+        if (isFinite(eta) && eta > 0) bits.push('At this rate, 100% in ' + fmtEta(eta))
         const r = etaText(w.resets_at)
         if (r) bits.push(r)
-        const prefix = p.id + ':' + w.label + ':'
+        const prefix = p.id + ':' + w.key + ':'
         const stamp = Date.parse(w.resets_at) || 0
         if (stamp && sameReset(seen, prefix, stamp)) continue
         fire(
           prefix + (w.resets_at || 'no-reset'),
-          p.name + ': ' + w.label + ' at ' + Math.round(u) + '% used',
+          p.name + ': ' + w.label + ' at ' + Math.round(Number(w.used_pct) || 0) + '% used',
           bits.join(' · ')
         )
       }
       for (const m of p.money || []) {
-        if (m.label !== 'Key cap') continue
-        const u = capUsedPercent(m)
-        if (u < WARN_PCT) continue
-        const d = Number(m.depletes_in_seconds)
+        if (m.warn !== true) continue
+        const eta = Number(m.actionable_eta)
         const bits = []
-        if (isFinite(d) && d > 0) bits.push('At this rate, exhausted in ' + fmtEta(d))
+        if (isFinite(eta) && eta > 0) bits.push('At this rate, exhausted in ' + fmtEta(eta))
         bits.push(money(m.left, m.cur) + ' of ' + money(m.total, m.cur) + ' left')
         fire(
-          p.id + ':' + m.label + ':' + day,
-          p.name + ': ' + m.label + ' at ' + Math.round(u) + '% used',
+          p.id + ':' + m.key + ':' + day,
+          p.name + ': ' + m.label + ' at ' + Math.round(Number(m.used_pct) || 0) + '% used',
           bits.join(' · ')
         )
       }
@@ -275,25 +253,68 @@ export function checkAlerts(data) {
   }
 }
 
-/* One-line summary for the bar, in the CURRENT value mode:
- * quota providers show their 5h (rolling) window, used or remaining;
- * OpenRouter shows its key-cap amount (used or left). */
+/* One row as the panel renders it: the label, the value text in the current
+ * mode, the bar width and the ETA the backend already judged actionable.
+ * Windows and money rows answer the same shape, so the bar, the popover and
+ * the detail list cannot drift apart. */
+export function rowView(row, mode) {
+  const used = mode !== 'remaining'
+  if (row && row.kind === 'money') {
+    const total = Number(row.total) || 0
+    const left = Number(row.left) || 0
+    const amount = total > 0 ? (used ? Math.max(0, total - left) : left) : left
+    const key = String(row.key || '')
+    let label = row.label
+    if (used && total > 0) {
+      // A used amount must not read as a balance: the row key says which
+      // heading is honest, whatever the provider calls the row.
+      if (key.indexOf('money:balance') === 0) label = 'Spent'
+      else if (key.indexOf('money:key_cap') === 0) label = 'Cap used'
+    }
+    const cap = row.used_pct === null || row.used_pct === undefined ? null : Number(row.used_pct)
+    const share = cap === null || !isFinite(cap) ? 0 : Math.max(0, Math.min(100, cap))
+    const shown = used ? share : 100 - share
+    return {
+      label: label,
+      value: money(amount, row.cur),
+      totalText: total > 0 ? money(total, row.cur) : '',
+      shown: cap === null ? 0 : shown,
+      width: cap === null ? 0 : shown,
+      eta: Number(row.actionable_eta) || null
+    }
+  }
+  const u = usedPercentOf(row)
+  const shown = used ? u : 100 - u
+  return {
+    label: row ? row.label : '',
+    value: pct(shown),
+    totalText: '',
+    shown: shown,
+    width: shown,
+    eta: Number(row && row.actionable_eta) || null
+  }
+}
+
+/* One-line summary for the bar, in the CURRENT value mode: the shortest
+ * account-scope window, or the key-cap money row. A model-scope row never
+ * summarises the provider. */
 export function summary(p, mode) {
   if (!p || p.status !== 'ok') return '-'
-  const used = mode !== 'remaining'
   const moneyRows = Array.isArray(p.money) ? p.money : []
   if (moneyRows.length) {
-    const cap = moneyRows.find(m => m.label === 'Key cap') || moneyRows[0]
-    const total = Number(cap.total) || 0
-    const left = Number(cap.left) || 0
-    if (total > 0) return money(used ? Math.max(0, total - left) : left, cap.cur)
-    return money(left, cap.cur)
+    const cap =
+      moneyRows.find(m => String(m.key || '').indexOf('money:key_cap') === 0) || moneyRows[0]
+    return rowView(cap, mode).value
   }
-  const wins = Array.isArray(p.windows) ? p.windows : []
-  const win = wins.find(w => w.label === '5h') || wins[0]
-  if (!win) return '-'
-  const u = usedPercentOf(win)
-  return Math.round(used ? u : 100 - u) + '%'
+  const wins = (Array.isArray(p.windows) ? p.windows : []).filter(w => w.scope !== 'model')
+  if (!wins.length) return '-'
+  let pick = null
+  for (const w of wins) {
+    const d = Number(w.duration_seconds)
+    if (!isFinite(d) || d <= 0) continue
+    if (pick === null || d < Number(pick.duration_seconds)) pick = w
+  }
+  return rowView(pick || wins[0], mode).value
 }
 
 /* ---------- bar item (live) ---------- */
@@ -329,26 +350,24 @@ function BarDetail() {
 
 export function tipLine(p, mode) {
   if (p.status !== 'ok') return 'unavailable'
-  const used = mode !== 'remaining'
   const moneyRows = Array.isArray(p.money) ? p.money : []
   if (moneyRows.length) {
-    return moneyRows.map(m => {
-      const total = Number(m.total) || 0
-      const left = Number(m.left) || 0
-      const amt = total > 0 ? (used ? Math.max(0, total - left) : left) : left
-      const label = used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label
-      const d = Number(m.depletes_in_seconds)
-      const tag = isFinite(d) && d > 0 ? ' (' + fmtEta(d) + ')' : ''
-      const amount = money(amt, m.cur) + (total > 0 ? '/' + money(total, m.cur) : '')
-      return label + ' ' + amount + tag
-    }).join(' · ')
+    return moneyRows
+      .map(m => {
+        const view = rowView(m, mode)
+        const tag = view.eta ? ' (' + fmtEta(view.eta) + ')' : ''
+        const amount = view.value + (view.totalText ? '/' + view.totalText : '')
+        return view.label + ' ' + amount + tag
+      })
+      .join(' · ')
   }
-  return (p.windows || []).map(w => {
-    const u = usedPercentOf(w)
-    const e = Number(w.eta_seconds)
-    const tag = isFinite(e) && e > 0 ? ' (' + fmtEta(e) + ')' : ''
-    return w.label + ' ' + pct(used ? u : 100 - u) + tag
-  }).join(' · ')
+  return (p.windows || [])
+    .map(w => {
+      const view = rowView(w, mode)
+      const tag = view.eta ? ' (' + fmtEta(view.eta) + ')' : ''
+      return view.label + ' ' + view.value + tag
+    })
+    .join(' · ')
 }
 
 function BarTip() {
@@ -412,9 +431,7 @@ function Row({ label, value, width, meta, warn, eta }) {
   })
 }
 
-/* Money-row headings flip with the value mode so the number can never lie:
- * "Balance $9.02" would read as a balance; "Spent $9.02" reads as used. */
-const MONEY_LABEL_USED = { Balance: 'Spent', 'Key cap': 'Cap used' }
+/* Money-row headings flip with the value mode so the number can never lie. */
 
 const EYE_PATH = 'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'
 
@@ -449,8 +466,7 @@ function BarToggle({ p, ids }) {
   })
 }
 
-function ProviderBlock({ p, first, mode, ids }) {
-  const used = mode === 'used'
+export function ProviderBlock({ p, first, mode, ids }) {
   const rows = []
   if (p.status !== 'ok') {
     rows.push(jsx('div', { key: 'err', style: { fontSize: 11, opacity: 0.8 }, children: 'unavailable: ' + (p.error || 'fetch failed') }))
@@ -463,33 +479,27 @@ function ProviderBlock({ p, first, mode, ids }) {
     rows.push(jsx('div', { key: 'stale', style: { fontSize: 11, opacity: 0.8 }, children: bits.join(' · ') }))
   }
   for (const w of p.windows || []) {
-    const usedPct = usedPercentOf(w)
-    const shown = used ? usedPct : 100 - usedPct
-    const aEta = actionableEta(w)
+    const view = rowView(w, mode)
     rows.push(jsx(Row, {
-      key: 'w' + w.label,
-      label: w.label,
-      value: pct(shown),
-      width: shown,
+      key: 'w' + w.key,
+      label: view.label,
+      value: view.value,
+      width: view.width,
       meta: etaText(w.resets_at),
-      warn: usedPct >= WARN_PCT,
-      eta: aEta ? fmtEta(aEta) : null
+      warn: w.warn === true,
+      eta: view.eta ? fmtEta(view.eta) : null
     }))
   }
   for (const m of p.money || []) {
-    const total = Number(m.total) || 0
-    const left = Number(m.left) || 0
-    const shown = total > 0 ? (used ? Math.max(0, total - left) : left) : left
-    const d = Number(m.depletes_in_seconds)
-    const aEta = isFinite(d) && d > 0 && d < 14 * 86400 ? d : null
+    const view = rowView(m, mode)
     rows.push(jsx(Row, {
-      key: 'm' + m.label + ':' + (m.cur || ''),
-      label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
-      value: money(shown, m.cur),
-      width: total > 0 ? (shown / total) * 100 : 0,
-      meta: total > 0 ? '/ ' + money(total, m.cur) : '',
-      warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
-      eta: aEta ? fmtEta(aEta) : null
+      key: 'm' + m.key,
+      label: view.label,
+      value: view.value,
+      width: view.width,
+      meta: view.totalText ? '/ ' + view.totalText : '',
+      warn: m.warn === true,
+      eta: view.eta ? fmtEta(view.eta) : null
     }))
   }
   return jsxs('div', {

@@ -156,7 +156,9 @@ tests/                   unittest suite: backend fetchers and package metadata
   `key`, `kind`, `used_pct`, `warn` and `actionable_eta`, plus `history` when
   recent samples exist: `[epoch seconds, value]` pairs, oldest first, at most 36
   points over 6 hours. History is kept in memory only, so it resets when Hermes
-  restarts. The full contract, including which fields are required, is in
+  restarts. Window rows carry `scope` and, when the provider gives a length,
+  `duration_seconds`; known lengths use the labels 5h, Weekly and Monthly. The
+  full contract, including which fields are required, is in
   `schema/usage.schema.json`.
 
 ## License

@@ -91,6 +91,16 @@
           "type": ["string", "null"],
           "description": "Defaults to \"ok\"; OpenCode Go passes its own value through."
         },
+        "scope": {
+          "type": "string",
+          "enum": ["account", "model"],
+          "description": "Account wide, or one model's own window."
+        },
+        "duration_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The window length the provider reports for itself. Absent when the provider gives none."
+        },
         "eta_seconds": {
           "type": "integer",
           "minimum": 0,
@@ -130,6 +140,7 @@
         "percent",
         "resets_at",
         "status",
+        "scope",
         "key",
         "kind",
         "used_pct",

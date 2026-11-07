@@ -127,7 +127,7 @@ class NumberTest(unittest.TestCase):
 
     def test_window_keys_and_order(self):
         row = API._window("5h", 1.0, "x")
-        self.assertEqual(list(row), ["label", "percent", "resets_at", "status"])
+        self.assertEqual(list(row), ["label", "percent", "resets_at", "status", "scope"])
         self.assertEqual(row["label"], "5h")
         self.assertEqual(row["resets_at"], "x")
 

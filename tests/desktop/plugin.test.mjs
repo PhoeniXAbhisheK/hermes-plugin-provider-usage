@@ -89,11 +89,18 @@ test('fmtEta handles zero, negatives, NaN and the boundaries', async () => {
 
 test('usedPercentOf clamps and treats missing fields as zero', async () => {
   const { usedPercentOf } = await loadPlugin()
-  assert.equal(usedPercentOf({ percent: 150 }), 100)
-  assert.equal(usedPercentOf({ percent: -5 }), 0)
+  assert.equal(usedPercentOf({ used_pct: 150 }), 100)
+  assert.equal(usedPercentOf({ used_pct: -5 }), 0)
   assert.equal(usedPercentOf({}), 0)
   assert.equal(usedPercentOf(null), 0)
-  assert.equal(usedPercentOf({ percent: '42.5' }), 42.5)
+  assert.equal(usedPercentOf({ used_pct: '42.5' }), 42.5)
+})
+
+test('usedPercentOf reads used_pct, not percent', async () => {
+  const { usedPercentOf, rowView } = await loadPlugin()
+  assert.equal(usedPercentOf({ percent: 90, used_pct: 10 }), 10)
+  assert.equal(usedPercentOf({ percent: 90 }), 0)
+  assert.equal(rowView({ label: 'x', percent: 90, used_pct: 10, kind: 'window' }, 'used').value, '10%')
 })
 
 test('capUsedPercent clamps and returns zero without a total', async () => {
@@ -105,19 +112,24 @@ test('capUsedPercent clamps and returns zero without a total', async () => {
   assert.equal(capUsedPercent({ total: 100, left: -20 }), 100)
 })
 
-test('providerWarn uses the window and Key cap thresholds', async () => {
+test('providerWarn follows the backend warn flag', async () => {
   const { providerWarn } = await loadPlugin()
-  assert.equal(providerWarn({ status: 'ok', windows: [{ percent: 79.9 }] }), false)
-  assert.equal(providerWarn({ status: 'ok', windows: [{ percent: 80 }] }), true)
   assert.equal(
-    providerWarn({ status: 'ok', money: [{ label: 'Key cap', total: 100, left: 20 }] }),
+    providerWarn({ status: 'ok', windows: [{ percent: 95, used_pct: 95, warn: false }] }),
+    false
+  )
+  assert.equal(
+    providerWarn({ status: 'ok', windows: [{ percent: 10, used_pct: 10, warn: true }] }),
     true
   )
   assert.equal(
-    providerWarn({ status: 'ok', money: [{ label: 'Balance', total: 100, left: 10 }] }),
+    providerWarn({
+      status: 'ok',
+      money: [{ key: 'money:balance:usd', total: 100, left: 5, used_pct: 95, warn: false }]
+    }),
     false
   )
-  assert.equal(providerWarn({ status: 'error', windows: [{ percent: 99 }] }), false)
+  assert.equal(providerWarn({ status: 'error', windows: [{ percent: 99, warn: true }] }), false)
 })
 
 test('barVisible follows the default and the explicit list', async () => {
@@ -130,21 +142,59 @@ test('barVisible follows the default and the explicit list', async () => {
   assert.equal(barVisible(null, 'a', undefined), false)
 })
 
-test('actionableEta applies the reset and seven day rules', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { actionableEta } = await loadPlugin()
-    const resetIn1000 = isoAt(NOW + 1000 * 1000)
-    assert.equal(actionableEta({ eta_seconds: 1000, resets_at: resetIn1000 }), null)
-    assert.equal(actionableEta({ eta_seconds: 999, resets_at: resetIn1000 }), 999)
-    assert.equal(actionableEta({ eta_seconds: 7 * 86400 }), 7 * 86400)
-    assert.equal(actionableEta({ eta_seconds: 7 * 86400 + 1 }), null)
-    assert.equal(actionableEta({ eta_seconds: 10 * 86400, resets_at: 'not a date' }), 10 * 86400)
-    assert.equal(actionableEta({ eta_seconds: 0 }), null)
-    assert.equal(actionableEta({}), null)
-  } finally {
-    restore()
+test('rowView renders windows in both modes', async () => {
+  const { rowView } = await loadPlugin()
+  const row = { key: '5h', label: '5h', kind: 'window', percent: 42, used_pct: 42, actionable_eta: 7200 }
+  assert.deepEqual(rowView(row, 'used'), {
+    label: '5h',
+    value: '42%',
+    totalText: '',
+    shown: 42,
+    width: 42,
+    eta: 7200
+  })
+  const rest = rowView(row, 'remaining')
+  assert.equal(rest.value, '58%')
+  assert.equal(rest.width, 58)
+  assert.equal(rowView({ label: 'x', percent: 10, used_pct: 10 }, 'used').eta, null)
+})
+
+test('rowView renders money in both modes and keys the heading on the row key', async () => {
+  const { rowView } = await loadPlugin()
+  const balance = {
+    key: 'money:balance:usd',
+    label: 'Balance',
+    kind: 'money',
+    total: 20,
+    left: 12.5,
+    cur: 'USD',
+    used_pct: 37.5
   }
+  const used = rowView(balance, 'used')
+  assert.equal(used.label, 'Spent')
+  assert.equal(used.value, '$7.50')
+  assert.equal(used.totalText, '$20.00')
+  assert.equal(used.width, 37.5)
+  const rest = rowView(balance, 'remaining')
+  assert.equal(rest.label, 'Balance')
+  assert.equal(rest.value, '$12.50')
+  assert.equal(rest.width, 62.5)
+  const cap = rowView(
+    { key: 'money:key_cap:usd', label: 'Allowance', kind: 'money', total: 10, left: 2, cur: 'USD', used_pct: 80 },
+    'used'
+  )
+  assert.equal(cap.label, 'Cap used')
+  const noTotal = rowView({ key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }, 'used')
+  assert.equal(noTotal.value, '$7.00')
+  assert.equal(noTotal.totalText, '')
+  assert.equal(noTotal.width, 0)
+  const noTotalRest = rowView(
+    { key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null },
+    'remaining'
+  )
+  assert.equal(noTotalRest.value, '$7.00')
+  assert.equal(noTotalRest.width, 0)
+  assert.equal(noTotalRest.shown, 0)
 })
 
 test('sameReset compares stamps inside the tolerance and skips junk keys', async () => {
@@ -160,58 +210,146 @@ test('sameReset compares stamps inside the tolerance and skips junk keys', async
   assert.equal(sameReset({ ['zai:7d:' + isoAt(stamp)]: 1 }, prefix, stamp), false)
 })
 
-test('summary covers caps, plain money, windows and empty providers', async () => {
+test('summary picks the shortest account window and the key cap', async () => {
   const { summary } = await loadPlugin()
-  const cap = { status: 'ok', money: [{ label: 'Key cap', total: 10, left: 4, cur: 'USD' }] }
+  const cap = {
+    status: 'ok',
+    money: [
+      {
+        key: 'money:key_cap:usd',
+        label: 'Key cap',
+        kind: 'money',
+        total: 10,
+        left: 4,
+        cur: 'USD',
+        used_pct: 60
+      }
+    ]
+  }
   assert.equal(summary(cap, 'used'), '$6.00')
   assert.equal(summary(cap, 'remaining'), '$4.00')
-  const noCap = { status: 'ok', money: [{ label: 'Balance', total: 10, left: 4, cur: 'USD' }] }
+  const noCap = {
+    status: 'ok',
+    money: [
+      {
+        key: 'money:balance:usd',
+        label: 'Balance',
+        kind: 'money',
+        total: 10,
+        left: 4,
+        cur: 'USD',
+        used_pct: 60
+      }
+    ]
+  }
   assert.equal(summary(noCap, 'used'), '$6.00')
-  const noTotal = { status: 'ok', money: [{ label: 'Balance', left: 7, cur: 'USD' }] }
+  const noTotal = {
+    status: 'ok',
+    money: [
+      { key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }
+    ]
+  }
   assert.equal(summary(noTotal, 'used'), '$7.00')
   assert.equal(summary(noTotal, 'remaining'), '$7.00')
   const windows = {
     status: 'ok',
     windows: [
-      { label: '7d', percent: 10 },
-      { label: '5h', percent: 20 }
+      { key: 'weekly', label: 'Weekly', percent: 10, used_pct: 10, scope: 'account', duration_seconds: 604800 },
+      { key: '5h', label: '5h', percent: 20, used_pct: 20, scope: 'account', duration_seconds: 18000 }
     ]
   }
   assert.equal(summary(windows, 'used'), '20%')
   assert.equal(summary(windows, 'remaining'), '80%')
-  assert.equal(summary({ status: 'ok', windows: [{ label: '7d', percent: 10 }] }, 'used'), '10%')
+  const modelShorter = {
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', percent: 10, used_pct: 10, scope: 'account', duration_seconds: 18000 },
+      { key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model', duration_seconds: 3600 }
+    ]
+  }
+  assert.equal(summary(modelShorter, 'used'), '10%')
+  const noDurations = {
+    status: 'ok',
+    windows: [
+      { key: 'first', label: 'First', percent: 30, used_pct: 30, scope: 'account' },
+      { key: 'second', label: 'Second', percent: 60, used_pct: 60, scope: 'account' }
+    ]
+  }
+  assert.equal(summary(noDurations, 'used'), '30%')
+  assert.equal(
+    summary({ status: 'ok', windows: [{ key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model' }] }, 'used'),
+    '-'
+  )
   assert.equal(summary({ status: 'ok' }, 'used'), '-')
   assert.equal(summary({ status: 'error' }, 'used'), '-')
   const capSecond = {
     status: 'ok',
     money: [
-      { label: 'Balance', total: 100, left: 90, cur: 'USD' },
-      { label: 'Key cap', total: 10, left: 4, cur: 'USD' }
+      {
+        key: 'money:balance:usd',
+        label: 'Balance',
+        kind: 'money',
+        total: 100,
+        left: 90,
+        cur: 'USD',
+        used_pct: 10
+      },
+      {
+        key: 'money:key_cap:usd',
+        label: 'Allowance',
+        kind: 'money',
+        total: 10,
+        left: 4,
+        cur: 'USD',
+        used_pct: 60
+      }
     ]
   }
   assert.equal(summary(capSecond, 'used'), '$6.00')
 })
 
-test('tipLine covers windows, money rows and an error provider', async () => {
+test('tipLine uses the actionable eta and the row keys', async () => {
   const { tipLine } = await loadPlugin()
-  const windows = { status: 'ok', windows: [{ label: '5h', percent: 20, eta_seconds: 5400 }] }
-  assert.equal(tipLine(windows, 'used'), '5h 20% (~1h)')
-  assert.equal(tipLine(windows, 'remaining'), '5h 80% (~1h)')
-  assert.equal(tipLine({ status: 'ok', windows: [{ label: '5h', percent: 20 }] }, 'used'), '5h 20%')
+  const windows = {
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', percent: 20, used_pct: 20, actionable_eta: 5400 },
+      { key: 'weekly', label: 'Weekly', percent: 20, used_pct: 20, eta_seconds: 5400, actionable_eta: null }
+    ]
+  }
+  assert.equal(tipLine(windows, 'used'), '5h 20% (~1h) · Weekly 20%')
+  assert.equal(tipLine(windows, 'remaining'), '5h 80% (~1h) · Weekly 80%')
   const moneyRows = {
     status: 'ok',
     money: [
-      { label: 'Balance', total: 10, left: 4, cur: 'USD', depletes_in_seconds: 5400 }
+      {
+        key: 'money:balance:usd',
+        label: 'Balance',
+        kind: 'money',
+        total: 10,
+        left: 4,
+        cur: 'USD',
+        used_pct: 60,
+        actionable_eta: 5400
+      },
+      {
+        key: 'money:key_cap:usd',
+        label: 'Key cap',
+        kind: 'money',
+        total: 10,
+        left: 4,
+        cur: 'USD',
+        used_pct: 60,
+        actionable_eta: null
+      }
     ]
   }
-  assert.equal(tipLine(moneyRows, 'used'), 'Spent $6.00/$10.00 (~1h)')
-  assert.equal(tipLine(moneyRows, 'remaining'), 'Balance $4.00/$10.00 (~1h)')
-  const cap = { status: 'ok', money: [{ label: 'Key cap', total: 10, left: 4, cur: 'USD' }] }
-  assert.equal(tipLine(cap, 'used'), 'Cap used $6.00/$10.00')
+  assert.equal(tipLine(moneyRows, 'used'), 'Spent $6.00/$10.00 (~1h) · Cap used $6.00/$10.00')
+  assert.equal(tipLine(moneyRows, 'remaining'), 'Balance $4.00/$10.00 (~1h) · Key cap $4.00/$10.00')
   assert.equal(tipLine({ status: 'error' }, 'used'), 'unavailable')
 })
 
-test('checkAlerts fires a window at 80 percent once and stores it', async () => {
+test('checkAlerts fires a warned window once and stores it under the row key', async () => {
   const restore = frozen(NOW)
   try {
     const { checkAlerts, default: plugin } = await loadPlugin()
@@ -224,7 +362,9 @@ test('checkAlerts fires a window at 80 percent once and stores it', async () => 
           id: 'zai',
           name: 'Zai',
           status: 'ok',
-          windows: [{ label: '5h', percent: 80, resets_at: resetsAt }]
+          windows: [
+            { key: '5h', label: '5h', percent: 80, used_pct: 80, warn: true, resets_at: resetsAt }
+          ]
         }
       ]
     }
@@ -248,13 +388,23 @@ test('a moved reset inside the tolerance does not fire again', async () => {
     const first = isoAt(NOW + 30 * 60000)
     checkAlerts({
       providers: [
-        { id: 'zai', name: 'Zai', status: 'ok', windows: [{ label: '5h', percent: 80, resets_at: first }] }
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: first }]
+        }
       ]
     })
     const moved = isoAt(NOW + 30 * 60000 + 60000)
     checkAlerts({
       providers: [
-        { id: 'zai', name: 'Zai', status: 'ok', windows: [{ label: '5h', percent: 80, resets_at: moved }] }
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: moved }]
+        }
       ]
     })
     assert.equal(notices.length, 1)
@@ -271,7 +421,12 @@ test('a window with no reset time is stored under no-reset', async () => {
     plugin.register(ctx)
     checkAlerts({
       providers: [
-        { id: 'zai', name: 'Zai', status: 'ok', windows: [{ label: '5h', percent: 80 }] }
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true }]
+        }
       ]
     })
     assert.deepEqual(notices, [{ title: 'Zai: 5h at 80% used', body: '' }])
@@ -281,7 +436,7 @@ test('a window with no reset time is stored under no-reset', async () => {
   }
 })
 
-test('a Key cap at 80 percent fires once per day', async () => {
+test('a warned key cap fires once per day under its row key', async () => {
   const restore = frozen(NOW)
   try {
     const { checkAlerts, default: plugin } = await loadPlugin()
@@ -294,7 +449,16 @@ test('a Key cap at 80 percent fires once per day', async () => {
           name: 'Zai',
           status: 'ok',
           money: [
-            { label: 'Key cap', total: 10, left: 2, cur: 'USD', depletes_in_seconds: 5400 }
+            {
+              key: 'money:key_cap:usd',
+              label: 'Key cap',
+              total: 10,
+              left: 2,
+              cur: 'USD',
+              used_pct: 80,
+              warn: true,
+              actionable_eta: 5400
+            }
           ]
         }
       ]
@@ -306,7 +470,9 @@ test('a Key cap at 80 percent fires once per day', async () => {
         body: 'At this rate, exhausted in ~1h \u00b7 $2.00 of $10.00 left'
       }
     ])
-    assert.deepEqual(Object.keys(data.alerts), ['zai:Key cap:' + Math.floor(NOW / 86400000)])
+    assert.deepEqual(Object.keys(data.alerts), [
+      'zai:money:key_cap:usd:' + Math.floor(NOW / 86400000)
+    ])
     checkAlerts(payload)
     assert.equal(notices.length, 1)
   } finally {
@@ -314,11 +480,11 @@ test('a Key cap at 80 percent fires once per day', async () => {
   }
 })
 
-test('a non-cap money row and an error provider never fire', async () => {
+test('a warned money row fires even when it is not the key cap, and an error provider never does', async () => {
   const restore = frozen(NOW)
   try {
     const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
+    const { ctx, data, notices } = fakeContext()
     plugin.register(ctx)
     checkAlerts({
       providers: [
@@ -326,45 +492,42 @@ test('a non-cap money row and an error provider never fire', async () => {
           id: 'zai',
           name: 'Zai',
           status: 'ok',
-          money: [{ label: 'Balance', total: 100, left: 10, cur: 'USD' }]
+          money: [
+            {
+              key: 'money:balance:usd',
+              label: 'Balance',
+              total: 100,
+              left: 10,
+              cur: 'USD',
+              used_pct: 90,
+              warn: true,
+              actionable_eta: null
+            }
+          ]
         }
       ]
     })
-    checkAlerts({
-      providers: [
-        { id: 'zai', name: 'Zai', status: 'error', windows: [{ label: '5h', percent: 99 }] }
-      ]
-    })
-    assert.equal(notices.length, 0)
-  } finally {
-    restore()
-  }
-})
-
-test('a fractional warn percentage rounds in the title', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
+    assert.deepEqual(notices, [{ title: 'Zai: Balance at 90% used', body: '$10.00 of $100.00 left' }])
+    assert.deepEqual(Object.keys(data.alerts), [
+      'zai:money:balance:usd:' + Math.floor(NOW / 86400000)
+    ])
     checkAlerts({
       providers: [
         {
           id: 'zai',
           name: 'Zai',
-          status: 'ok',
-          windows: [{ label: '5h', percent: 80.6, resets_at: isoAt(NOW + 30 * 60000) }]
+          status: 'error',
+          windows: [{ key: '5h', label: '5h', used_pct: 99, warn: true }]
         }
       ]
     })
     assert.equal(notices.length, 1)
-    assert.equal(notices[0].title, 'Zai: 5h at 81% used')
   } finally {
     restore()
   }
 })
 
-test('an actionable window eta adds the projection to the body', async () => {
+test('a fractional used_pct rounds in the title', async () => {
   const restore = frozen(NOW)
   try {
     const { checkAlerts, default: plugin } = await loadPlugin()
@@ -378,14 +541,57 @@ test('an actionable window eta adds the projection to the body', async () => {
           status: 'ok',
           windows: [
             {
+              key: '5h',
               label: '5h',
-              percent: 80,
-              eta_seconds: 999,
+              used_pct: 80.6,
+              warn: true,
+              resets_at: isoAt(NOW + 30 * 60000)
+            }
+          ]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].title, 'Zai: 5h at 81% used')
+  } finally {
+    restore()
+  }
+})
+
+test('an actionable eta adds the projection to the body', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [
+            {
+              key: '5h',
+              label: '5h',
+              used_pct: 80,
+              warn: true,
+              eta_seconds: 86400,
+              actionable_eta: 999,
               resets_at: isoAt(NOW + 1000 * 1000)
             }
           ],
           money: [
-            { label: 'Key cap', total: 10, left: 2, cur: 'USD', depletes_in_seconds: 5400 }
+            {
+              key: 'money:key_cap:usd',
+              label: 'Key cap',
+              total: 10,
+              left: 2,
+              cur: 'USD',
+              used_pct: 80,
+              warn: true,
+              actionable_eta: 5400
+            }
           ]
         }
       ]
@@ -395,6 +601,181 @@ test('an actionable window eta adds the projection to the body', async () => {
   } finally {
     restore()
   }
+})
+
+test('a row without actionable_eta shows no eta', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [
+            {
+              key: '5h',
+              label: '5h',
+              used_pct: 80,
+              warn: true,
+              eta_seconds: 5400,
+              actionable_eta: null,
+              resets_at: isoAt(NOW + 30 * 60000)
+            }
+          ]
+        }
+      ]
+    })
+    assert.equal(notices[0].body, 'resets in 30m')
+  } finally {
+    restore()
+  }
+})
+
+test('a label change under the same key does not fire again', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    const resetsAt = isoAt(NOW + 30 * 60000)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: resetsAt }]
+        }
+      ]
+    })
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [{ key: '5h', label: 'Session', used_pct: 80, warn: true, resets_at: resetsAt }]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+test('checkAlerts fires on row.warn, not on the percentage', async () => {
+  const restore = frozen(NOW)
+  try {
+    const { checkAlerts, default: plugin } = await loadPlugin()
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    checkAlerts({
+      providers: [
+        {
+          id: 'zai',
+          name: 'Zai',
+          status: 'ok',
+          windows: [
+            {
+              key: 'quiet',
+              label: 'Quiet',
+              used_pct: 95,
+              warn: false,
+              resets_at: isoAt(NOW + 30 * 60000)
+            },
+            {
+              key: 'loud',
+              label: 'Loud',
+              used_pct: 10,
+              warn: true,
+              resets_at: isoAt(NOW + 30 * 60000)
+            }
+          ]
+        }
+      ]
+    })
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].title, 'Zai: Loud at 10% used')
+  } finally {
+    restore()
+  }
+})
+
+test('ProviderBlock takes warn and eta from each row', async () => {
+  const { ProviderBlock } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    status: 'ok',
+    windows: [
+      { key: '5h', label: '5h', used_pct: 95, warn: false, actionable_eta: 900 },
+      { key: 'weekly', label: 'Weekly', used_pct: 10, warn: true, actionable_eta: null }
+    ],
+    money: [
+      {
+        key: 'money:balance:usd',
+        label: 'Balance',
+        kind: 'money',
+        total: 10,
+        left: 8,
+        cur: 'USD',
+        used_pct: 20,
+        warn: false,
+        actionable_eta: 600
+      },
+      {
+        key: 'money:key_cap:usd',
+        label: 'Key cap',
+        kind: 'money',
+        total: 10,
+        left: 2,
+        cur: 'USD',
+        used_pct: 80,
+        warn: true,
+        actionable_eta: null
+      }
+    ]
+  }
+  const block = ProviderBlock({ p, first: true, mode: 'used', ids: ['zai'] })
+  const rows = block.props.children.filter(
+    child => child && typeof child.type === 'function' && child.type.name === 'Row'
+  )
+  assert.equal(rows.length, 4)
+  assert.equal(rows[0].props.key, 'w5h')
+  assert.equal(rows[0].props.warn, false)
+  assert.equal(rows[0].props.eta, '~15m')
+  assert.equal(rows[1].props.key, 'wweekly')
+  assert.equal(rows[1].props.warn, true)
+  assert.equal(rows[1].props.eta, null)
+  assert.equal(rows[2].props.key, 'mmoney:balance:usd')
+  assert.equal(rows[2].props.warn, false)
+  assert.equal(rows[2].props.eta, '~10m')
+  assert.equal(rows[3].props.key, 'mmoney:key_cap:usd')
+  assert.equal(rows[3].props.warn, true)
+  assert.equal(rows[3].props.eta, null)
+})
+
+test('a real payload shape drives the bar, the tip and the warn flag', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const payload = JSON.parse(await readFile(new URL('./payload.json', import.meta.url), 'utf8'))
+  const { summary, tipLine, providerWarn } = await loadPlugin()
+  const [anthropic, openrouter] = payload.providers
+  assert.equal(summary(anthropic, 'used'), '42%')
+  assert.equal(summary(anthropic, 'remaining'), '58%')
+  assert.equal(summary(openrouter, 'used'), '$8.00')
+  assert.equal(summary(openrouter, 'remaining'), '$2.00')
+  assert.equal(tipLine(anthropic, 'used'), '5h 42% (~2h) · Weekly 88% · Opus 95%')
+  assert.equal(
+    tipLine(openrouter, 'used'),
+    'Spent $7.50/$20.00 · Cap used $8.00/$10.00 (~1h)'
+  )
+  assert.equal(providerWarn(anthropic), true)
+  assert.equal(providerWarn(openrouter), true)
 })
 
 test('the default export registers one status item', async () => {
