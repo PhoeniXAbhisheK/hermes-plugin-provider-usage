@@ -147,7 +147,7 @@ tests/                   unittest suite: backend fetchers and package metadata
   and `fastapi`, so run it with the interpreter that serves the dashboard, or
   with a throwaway venv that has those two packages.
 - The backend served payload is a single JSON object:
-  `{ fetched_at, providers: [{ id, name, tag, status, windows | money }] }`. A
+  `{ fetched_at, providers: [{ id, name, tag, code, status, windows | money }] }`. A
   provider row can also carry `plan`, `error`, or `stale` with `hold_until` and
   a snapshot `fetched_at`; rows carry `eta_seconds` and `depletes_in_seconds`
   when a projection is available.
