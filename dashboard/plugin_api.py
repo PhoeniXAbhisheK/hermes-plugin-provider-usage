@@ -59,7 +59,12 @@ import re
 import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+    wait,
+)
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -75,7 +80,74 @@ RATE_LIMIT_MAX = 21600.0  # clamp: never hold a provider longer than six hours
 CACHE_FRESH_S = 240.0  # a core snapshot younger than this answers without a helper call
 CACHE_STALE_MAX_S = 21600.0  # serve the last reading at most six hours after it was taken
 HELPER_COOLDOWN_S = 300.0  # wait after an empty helper read before trying the helper again
+HELPER_TIMEOUT_S = 10.0  # one account-usage helper read, wall clock
+DEADLINE_S = 30.0  # one collection, wall clock
+PROVIDER_BUDGET_S = 12.0  # one provider inside that collection, wall clock
 HOME = Path.home()
+
+# Wall-clock budget for the provider currently running. Workers copy the caller's
+# context, so a value set per worker stays inside that worker.
+_deadline = contextvars.ContextVar("provider_deadline", default=None)
+# The collection a worker belongs to; late workers must not write shared state.
+_collection = contextvars.ContextVar("provider_collection", default=None)
+# Manual refresh: skip the fresh-snapshot shortcut on the helper path.
+_refresh_flag = contextvars.ContextVar("provider_refresh", default=False)
+
+
+class _Timeout(Exception):
+    """The provider ran out of its wall-clock budget."""
+
+
+def _time_left():
+    """Seconds left in this worker's budget, or None when unset."""
+    deadline = _deadline.get(None)
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+class _Run:
+    """One collection: its result, its error, and whether it is still open."""
+
+    def __init__(self):
+        self.closed = False
+        self.done = threading.Event()
+        self.payload = None
+        self.error = None
+
+
+def _run_closed():
+    """True when the collection this worker belongs to has already returned."""
+    run = _collection.get(None)
+    return run is not None and run.closed
+
+
+_HELPER_INFLIGHT = {}  # helper key -> Event set when its last call returned
+
+
+def _helper_call(fn, timeout=HELPER_TIMEOUT_S, key="helper"):
+    """Run a blocking helper call with a real timeout.
+
+    ``future.result(timeout=...)`` only bounds the wait when the executor is not
+    left through ``with``: exiting the block joins the worker, which is why the
+    old 10s cap waited for the whole call. The worker is abandoned instead, and a
+    second call is refused while the first one is still alive.
+    """
+    event = _HELPER_INFLIGHT.get(key)
+    if event is not None and not event.is_set():
+        raise _Timeout("timeout")
+    event = threading.Event()
+    _HELPER_INFLIGHT[key] = event
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(contextvars.copy_context().run, fn)
+    future.add_done_callback(lambda _f, ev=event: ev.set())
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        raise _Timeout("timeout") from None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
 
 # Every host this module can reach, tagged with the role of the caller: "plugin"
 # for a request made here with a provider credential, "helper" for a Hermes core
@@ -113,6 +185,38 @@ _cache = {"at": 0.0, "payload": None}
 _holds = {}  # provider id -> epoch when a 429 hold expires
 _last_good = {}  # provider id -> last ok payload (served while held)
 _helper_cooldown = {}  # provider id -> epoch when the account-usage helper may be tried again
+_running = {"run": None}  # the collection in flight, if any (guarded by _lock)
+_inflight = {}  # provider id -> Event set when its last worker returned
+_HOST_WINNERS = {}  # family -> last host that answered, tried first next time
+
+
+def _prefer(family, urls):
+    """Chain order for urls, with the family's last winning host first."""
+    urls = tuple(urls)
+    winner = _HOST_WINNERS.get(family)
+    if winner in urls:
+        return (winner,) + tuple(url for url in urls if url != winner)
+    return urls
+
+
+def _won(family, url):
+    _HOST_WINNERS[family] = url
+
+
+def _run_fetcher(pid, provider_deadline):
+    """Run one fetcher inside its own budget. Runs in a copied context."""
+    _deadline.set(provider_deadline)
+    return FETCHERS[pid]()
+
+
+def _timeout_result(pid):
+    """A provider that ran out of time: last reading marked stale, or timeout."""
+    last = _last_good.get(pid)
+    if last is not None:
+        stale = copy.deepcopy(last)
+        stale["stale"] = True
+        return stale
+    return {"id": pid, "status": "error", "error": "timeout"}
 
 
 class _Skip(Exception):
@@ -223,6 +327,15 @@ def _iso_epoch(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
+def _iso_from_epoch(epoch):
+    """Epoch seconds -> ISO UTC rounded to the minute.
+
+    Computed reset times drift by a few seconds between polls; rounding keeps the
+    identity used for alert de-duplication stable across those polls.
+    """
+    return _iso_epoch(float(epoch) - float(epoch) % 60.0)
+
+
 def _retry_after_seconds(value):
     """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
     text = str(value or "").strip()
@@ -292,6 +405,8 @@ def _error_message(exc):
     """
     if isinstance(exc, _ProviderError):
         return _clean_error_text(exc.detail, exc.secret)
+    if isinstance(exc, _Timeout):
+        return "timeout"
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.HTTPStatusError):
@@ -344,6 +459,13 @@ def _decode_json_body(resp):
 
 
 def _http_json(url, headers, *, timeout=12.0):
+    # A provider's chain shares one wall-clock budget: each request may use only
+    # the time left, never a fresh timeout of its own.
+    left = _time_left()
+    if left is not None:
+        if left <= 0.05:
+            raise _Timeout("timeout")
+        timeout = min(timeout, left)
     with httpx.Client(timeout=timeout) as client:
         resp = client.get(url, headers=headers)
         if resp.status_code in (401, 403):
@@ -409,18 +531,29 @@ def fetch_opencode_go():
     return {"id": "opencode-go", "status": "ok", "windows": windows}
 
 
-def fetch_openai_codex():
-    # Hermes sign-in first (auth store + credential pool), then the Codex CLI store.
-    payload = _hermes_usage("openai-codex")
-    if payload is not None:
-        # Hermes labels the Codex windows Session / Weekly; keep our usual 5h / 7d.
-        for w in payload.get("windows") or []:
-            label = str(w.get("label") or "").strip().lower()
-            if label == "session":
-                w["label"] = "5h"
-            elif label == "weekly":
-                w["label"] = "7d"
-        return payload
+def _codex_label(window, fallback):
+    """Label a Codex window by its own length; the slot only decides the fallback."""
+    secs = window.get("limit_window_seconds")
+    if isinstance(secs, (int, float)) and secs > 0:
+        for target, label in ((5 * 3600, "5h"), (7 * 86400, "7d"), (30 * 86400, "Monthly")):
+            if abs(float(secs) - target) <= target * 0.1:
+                return label
+    return fallback
+
+
+def _codex_normalize(payload):
+    """Hermes labels Codex windows Session / Weekly; keep our usual 5h / 7d."""
+    for w in payload.get("windows") or []:
+        label = str(w.get("label") or "").strip().lower()
+        if label == "session":
+            w["label"] = "5h"
+        elif label == "weekly":
+            w["label"] = "7d"
+    return payload
+
+
+def _codex_direct():
+    """One direct Codex read with the CLI store's OAuth token."""
     tok = None
     try:
         d = json.loads(_read_text(HOME / ".codex/auth.json"))
@@ -438,23 +571,30 @@ def fetch_openai_codex():
     rl = d.get("rate_limit") or {}
     now = time.time()
     windows = []
-    for w, label in ((rl.get("primary_window"), "5h"), (rl.get("secondary_window"), "7d")):
+    for w, fallback in ((rl.get("primary_window"), "5h"), (rl.get("secondary_window"), "7d")):
         if not isinstance(w, dict):
             continue
         ra = w.get("reset_after_seconds")
         resets_at = None
         if isinstance(ra, (int, float)):
-            resets_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + ra))
+            resets_at = _iso_from_epoch(now + ra)
         windows.append(
             {
-                "label": label,
+                "label": _codex_label(w, fallback),
                 "percent": w.get("used_percent"),
                 "resets_at": resets_at,
                 "status": "ok",
             }
         )
     plan = (d.get("plan_type") or "").strip()
+    if not windows:
+        # Nothing to render: an ok card with no rows would show a fabricated 0%.
+        raise _Skip("openai-codex")
     return {"id": "openai-codex", "status": "ok", "plan": plan or None, "windows": windows}
+
+
+def fetch_openai_codex():
+    return _helper_or_direct("openai-codex", _codex_direct, _codex_normalize)
 
 
 def fetch_openrouter():
@@ -485,6 +625,10 @@ def fetch_openrouter():
                 "cur": "USD",
             }
         )
+    if not money:
+        # No balance and no cap: an ok card with no rows would show a
+        # fabricated 0%.
+        raise _Skip("openrouter")
     return {"id": "openrouter", "status": "ok", "money": money}
 
 
@@ -584,18 +728,123 @@ def _hermes_usage(provider):
     now = time.time()
     cached = _cached_snapshot(provider)
     age = _snapshot_age(cached) if cached is not None else None
-    if age is not None and age <= CACHE_FRESH_S:
+    # A scheduled poll may answer from a snapshot up to CACHE_FRESH_S old; a
+    # manual refresh (refresh flag) goes to the helper instead.
+    if age is not None and age <= CACHE_FRESH_S and not _refresh_flag.get(False):
         payload = _snap_payload(provider, cached)
         if payload is not None:
             return payload
     if _helper_cooldown.get(provider, 0.0) <= now:
         payload = _snap_payload(provider, _fetch_usage(provider))
         if payload is not None:
-            _helper_cooldown.pop(provider, None)
+            if not _run_closed():
+                _helper_cooldown.pop(provider, None)
             return payload
-        _helper_cooldown[provider] = now + HELPER_COOLDOWN_S
+        if not _run_closed():
+            # A worker abandoned by its collection must not leave a cooldown
+            # behind for the next collection to inherit.
+            _helper_cooldown[provider] = now + HELPER_COOLDOWN_S
         cached = _cached_snapshot(provider)
     return _last_reading(provider, cached)
+
+
+STALE_DIRECT_AFTER_S = 600.0  # a reading this young needs no direct token attempt
+_direct_cooldown = {}  # provider id -> epoch before which no direct attempt is made
+_direct_readings = {}  # provider id -> (epoch, payload) of the last direct success
+
+
+def _payload_age(payload):
+    """Seconds since the payload's fetched_at, or None when it has no stamp."""
+    text = payload.get("fetched_at") if isinstance(payload, dict) else None
+    if not isinstance(text, str):
+        return None
+    try:
+        when = datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
+
+
+def _has_rows(payload):
+    """A payload with nothing to render is not a card."""
+    return bool(isinstance(payload, dict) and (payload.get("windows") or payload.get("money")))
+
+
+def _as_stale(payload):
+    """A copy of an earlier reading, marked stale."""
+    out = copy.deepcopy(payload)
+    out["stale"] = True
+    return out
+
+
+def _newest_reading(provider, helper_payload):
+    """The newest usable reading, from the helper or an earlier direct read.
+
+    Returns ``(age_seconds, payload)``; the age is None when the helper payload
+    carries no stamp. A remembered direct reading past CACHE_STALE_MAX_S is
+    dropped instead of returned.
+    """
+    best = None
+    if _has_rows(helper_payload):
+        best = (_payload_age(helper_payload), helper_payload)
+    hit = _direct_readings.get(provider)
+    if hit is not None:
+        age = max(0.0, time.time() - hit[0])
+        if age > CACHE_STALE_MAX_S:
+            _direct_readings.pop(provider, None)
+        elif best is None or best[0] is None or age < best[0]:
+            best = (age, hit[1])
+    return best
+
+
+def _helper_or_direct(provider, direct, normalize=None):
+    """Hermes helper first, then one direct token attempt once the reading is old.
+
+    The decision uses the newest reading available: the helper's stale payload or
+    the last successful direct read. A newest reading up to STALE_DIRECT_AFTER_S
+    old is returned marked stale; past that, one direct attempt is made at most
+    once per HELPER_COOLDOWN_S, and a failure returns the newest reading rather
+    than an error. With no reading at all the direct token is the ordinary
+    fallback. A helper payload with nothing to render is a skip, not a card.
+    """
+
+    def finish(payload):
+        return normalize(payload) if normalize is not None else payload
+
+    helper = _hermes_usage(provider)
+    if helper is not None and not helper.get("stale"):
+        if not _has_rows(helper):
+            raise _Skip(provider)
+        return finish(helper)
+    now = time.time()
+    best = _newest_reading(provider, helper)
+    if best is None:
+        return direct()
+    age, reading = best
+    if age is not None and age <= STALE_DIRECT_AFTER_S:
+        return finish(_as_stale(reading))
+    if _direct_cooldown.get(provider, 0.0) > now:
+        return finish(_as_stale(reading))
+    if not _run_closed():
+        # Reserve the attempt before making it: a failure must not open the door
+        # to a retry on the next poll.
+        _direct_cooldown[provider] = now + HELPER_COOLDOWN_S
+    try:
+        result = direct()
+    except _RateLimited as exc:
+        if not _run_closed():
+            _direct_cooldown[provider] = max(_direct_cooldown.get(provider, 0.0), exc.reset_at)
+        return finish(_as_stale(reading))
+    except _Skip:
+        return finish(_as_stale(reading))
+    except Exception as exc:
+        _log_provider_error(provider, exc)
+        return finish(_as_stale(reading))
+    if not _run_closed():
+        stored = copy.deepcopy(result)
+        stored["fetched_at"] = _iso_epoch(time.time())
+        _direct_readings[provider] = (time.time(), stored)
+    return finish(result)
 
 
 def _claude_code_oauth_token():
@@ -620,18 +869,11 @@ def _claude_code_oauth_token():
 
 
 def fetch_anthropic():
-    """Anthropic quota windows: Hermes sign-in first, Claude Code fallback.
+    return _helper_or_direct("anthropic", _anthropic_direct)
 
-    Hermes' account-usage helper can return nothing inside the desktop plugin
-    host, which used to hide the card entirely. Claude Code keeps its own
-    OAuth token on disk, so GET /api/oauth/usage (anthropic-beta:
-    oauth-2025-04-20) answers with ratio windows even then. No Hermes data
-    and no Claude Code credentials means the provider is unconfigured and
-    stays hidden.
-    """
-    payload = _hermes_usage("anthropic")
-    if payload is not None:
-        return payload
+
+def _anthropic_direct():
+    """One direct Anthropic read with the Claude Code OAuth token."""
     token = _claude_code_oauth_token()
     if not token:
         raise _Skip("anthropic")
@@ -699,12 +941,13 @@ def fetch_nous():
         from hermes_cli.nous_account import get_nous_portal_account_info
     except ImportError:
         raise _Skip("nous")
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        # Same context copy as _collect(): this nested pool must not drop the
-        # caller's profile scope either.
-        info = pool.submit(
-            contextvars.copy_context().run, get_nous_portal_account_info, force_fresh=True
-        ).result(timeout=10.0)
+    # Same context copy as _collect(): this nested call must not drop the
+    # caller's profile scope either.
+    info = _helper_call(
+        lambda: get_nous_portal_account_info(force_fresh=True),
+        timeout=HELPER_TIMEOUT_S,
+        key="nous",
+    )
     snap = build_nous_credits_snapshot(info)
     if snap is None or not snap.available:
         raise _Skip("nous")
@@ -842,10 +1085,12 @@ _MOONSHOT_BALANCE_URLS = (
 
 def _fetch_moonshot_balance(headers):
     last_error = None
-    for url in _MOONSHOT_BALANCE_URLS:
+    for url in _prefer("moonshot", _MOONSHOT_BALANCE_URLS):
         try:
             payload = _http_json(url, headers)
         except _RateLimited:
+            raise
+        except _Timeout:
             raise
         except Exception as exc:
             # 401/403: the key belongs to the other region; 404: the endpoint
@@ -861,6 +1106,7 @@ def _fetch_moonshot_balance(headers):
                 "Moonshot balance response carried no available_balance",
                 secret=str(headers.get("Authorization") or "").removeprefix("Bearer "),
             )
+        _won("moonshot", url)
         return available
     raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
 
@@ -877,6 +1123,8 @@ def fetch_kimi():
     try:
         payload = _http_json("https://api.kimi.com/coding/v1/usages", headers)
     except _RateLimited:
+        raise
+    except _Timeout:
         raise
     except Exception:
         payload = None
@@ -988,7 +1236,7 @@ MINIMAX_GLOBAL_URLS = ("https://api.minimax.io/v1/token_plan/remains",)
 
 
 def _minimax_credentials():
-    """MiniMax credentials in probe order, each paired with its host families.
+    """MiniMax credentials in probe order, each with its family and hosts.
 
     A mainland key is useless on the intl hosts and the other way round, so
     every configured credential probes the family matching its region first and
@@ -996,13 +1244,13 @@ def _minimax_credentials():
     are probed when both are configured.
     """
     credentials = []
-    for name, urls in (
-        ("MINIMAX_CN_API_KEY", MINIMAX_CN_URLS + MINIMAX_GLOBAL_URLS),
-        ("MINIMAX_API_KEY", MINIMAX_GLOBAL_URLS + MINIMAX_CN_URLS),
+    for name, family, urls in (
+        ("MINIMAX_CN_API_KEY", "minimax-cn", MINIMAX_CN_URLS + MINIMAX_GLOBAL_URLS),
+        ("MINIMAX_API_KEY", "minimax-global", MINIMAX_GLOBAL_URLS + MINIMAX_CN_URLS),
     ):
         key = _secret(name)
-        if key and key not in [known for known, _urls in credentials]:
-            credentials.append((key, urls))
+        if key and key not in [known for _family, known, _urls in credentials]:
+            credentials.append((family, key, urls))
     return credentials
 
 
@@ -1023,18 +1271,21 @@ def fetch_minimax():
         raise _Skip("minimax")
     payload = None
     last_error = None
-    for key, urls in credentials:
+    for family, key, urls in credentials:
         headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-        for url in urls:
+        for url in _prefer(family, urls):
             try:
                 candidate = _http_json(url, headers)
             except _RateLimited:
+                raise
+            except _Timeout:
                 raise
             except Exception as exc:
                 last_error = exc
                 continue
             if isinstance(candidate, dict) and candidate.get("model_remains"):
                 payload = candidate
+                _won(family, url)
                 break
             # A reachable host serving the other region answers 200 with a
             # base_resp error and no rows: remember it, keep probing.
@@ -1048,7 +1299,7 @@ def fetch_minimax():
         detail = _error_message(last_error) if last_error is not None else "no endpoint"
         raise _ProviderError(
             "MiniMax quota probe failed: %s" % detail,
-            secret=tuple(key for key, _urls in credentials),
+            secret=tuple(key for _family, key, _urls in credentials),
         )
     windows = []
     for row in payload.get("model_remains") or []:
@@ -1102,7 +1353,7 @@ def fetch_minimax():
     if not windows:
         raise _ProviderError(
             "MiniMax returned no parseable plan rows",
-            secret=tuple(key for key, _urls in credentials),
+            secret=tuple(key for _family, key, _urls in credentials),
         )
     return {"id": "minimax", "status": "ok", "windows": windows}
 
@@ -1185,44 +1436,96 @@ def _decorate(pid, p, now):
         if not isinstance(total, (int, float)) or not isinstance(left, (int, float)) or total <= 0:
             continue
         used = float(total) - float(left)
-        key = (pid, "money:" + str(m.get("label") or "?"))
+        # One row per currency: two balances with the same label must not share
+        # a history.
+        key = (pid, "money:%s:%s" % (m.get("label") or "?", m.get("cur") or "?"))
         _record(key, used, now)
         eta = _project(key, used, float(total), now)
         if eta is not None:
             m["depletes_in_seconds"] = eta
 
 
-def _collect():
-    """Collect every provider. Callers hold ``_lock`` (``payload()`` does)."""
+def _collect(deadline=None):
+    """Collect every provider inside one wall-clock deadline.
+
+    Workers past the deadline are abandoned: their result is never read, their
+    late writes to shared state are refused, and their provider is reported as a
+    timeout. Callers must not hold ``_lock`` here.
+    """
     results = {}
     now = time.time()
+    deadline = time.monotonic() + DEADLINE_S if deadline is None else deadline
+    run = _collection.get(None)
     held = {pid: until for pid, until in _holds.items() if pid in FETCH_ORDER and until > now}
-    to_fetch = [pid for pid in FETCH_ORDER if pid not in held]
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        # Pool workers do not inherit contextvars; under a multiplexed host the
-        # profile secret scope and profile home live in the caller's context,
-        # so run every task in a copy of it (the core's tools/daemon_pool.py
-        # uses the same pattern).
-        futures = {
-            pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in to_fetch
-        }
-        for future in as_completed(futures):
-            pid = futures[future]
-            try:
-                results[pid] = future.result()
-            except _Skip:
-                _holds.pop(pid, None)
-                _last_good.pop(pid, None)
-                continue
-            except _RateLimited as exc:
-                _holds[pid] = exc.reset_at
-                held[pid] = exc.reset_at
-            except Exception as exc:  # one provider must never blank the others
-                _log_provider_error(pid, exc)
-                results[pid] = {"id": pid, "status": "error", "error": _error_message(exc)}
-            else:
-                _holds.pop(pid, None)
-                _last_good[pid] = copy.deepcopy(results[pid])
+    to_fetch = []
+    blocked = []
+    for pid in FETCH_ORDER:
+        if pid in held:
+            continue
+        event = _inflight.get(pid)
+        if event is not None and not event.is_set():
+            # The previous worker for this provider never came back. Do not
+            # stack a second one on top of it.
+            blocked.append(pid)
+            continue
+        to_fetch.append(pid)
+
+    pool = ThreadPoolExecutor(max_workers=max(1, len(to_fetch)))
+    futures = {}
+    try:
+        # All workers start together, so one cutoff covers every chain: no
+        # provider may run past its own budget.
+        cutoff = min(deadline, time.monotonic() + PROVIDER_BUDGET_S)
+        for pid in to_fetch:
+            event = threading.Event()
+            _inflight[pid] = event
+            # Pool workers do not inherit contextvars; under a multiplexed host
+            # the profile secret scope and profile home live in the caller's
+            # context, so run every task in a copy of it (the core's
+            # tools/daemon_pool.py uses the same pattern).
+            future = pool.submit(contextvars.copy_context().run, _run_fetcher, pid, cutoff)
+            future.add_done_callback(lambda _f, ev=event: ev.set())
+            futures[future] = pid
+
+        pending = set(futures)
+        while pending:
+            left = cutoff - time.monotonic()
+            if left <= 0:
+                break
+            done, pending = wait(pending, timeout=left, return_when=FIRST_COMPLETED)
+            for future in done:
+                pid = futures[future]
+                try:
+                    result = future.result()
+                except _Skip:
+                    _holds.pop(pid, None)
+                    _last_good.pop(pid, None)
+                    continue
+                except _RateLimited as exc:
+                    _holds[pid] = exc.reset_at
+                    held[pid] = exc.reset_at
+                except _Timeout:
+                    results[pid] = _timeout_result(pid)
+                except Exception as exc:  # one provider must never blank the others
+                    _log_provider_error(pid, exc)
+                    results[pid] = {"id": pid, "status": "error", "error": _error_message(exc)}
+                else:
+                    _holds.pop(pid, None)
+                    _last_good[pid] = copy.deepcopy(result)
+                    results[pid] = result
+        for future in pending:
+            future.cancel()
+            results[futures[future]] = _timeout_result(futures[future])
+    finally:
+        if run is not None:
+            # Anything still running is now late and must stay inert.
+            run.closed = True
+        # Leaving the executor waits for its workers; a hung worker must not
+        # hold the collection open.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    for pid in blocked:
+        results[pid] = _timeout_result(pid)
 
     for pid, until in held.items():
         last = _last_good.get(pid)
@@ -1249,25 +1552,77 @@ def _collect():
         if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
         providers.append(p)
-    return {"fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "providers": providers}
+    return {
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "providers": providers,
+    }
 
 
-def payload(fresh=False):
-    """Cached aggregate payload; ``fresh=True`` forces a provider round-trip."""
+def _collect_and_store(run, refresh):
+    """One collection in its own thread; state is stored only when it returns."""
+    token = _refresh_flag.set(bool(refresh))
+    collection = _collection.set(run)
+    try:
+        run.payload = _collect()
+    except BaseException as exc:  # the waiting caller must see it, not hang
+        run.error = exc
+    finally:
+        _refresh_flag.reset(token)
+        _collection.reset(collection)
+        run.closed = True
+        with _lock:
+            if run.payload is not None:
+                _cache["at"] = time.time()
+                _cache["payload"] = run.payload
+            if _running["run"] is run:
+                _running["run"] = None
+        run.done.set()
+
+
+def payload(fresh=False, refresh=False):
+    """Cached aggregate payload.
+
+    ``fresh`` forces a provider round-trip; ``refresh`` marks a manual refresh,
+    which also skips the helper snapshot shortcut. A caller with a warm cache
+    never waits for a running collection; with no cache it waits for one.
+    """
     with _lock:
         now = time.time()
-        if not fresh and _cache["payload"] is not None and now - _cache["at"] < TTL:
-            return _cache["payload"]
-        result = _collect()
-        _cache["at"] = now
-        _cache["payload"] = result
-        return result
+        cached = _cache["payload"]
+        if not fresh and not refresh and cached is not None and now - _cache["at"] < TTL:
+            return cached
+        run = _running["run"]
+        if run is None:
+            run = _Run()
+            _running["run"] = run
+            # The collector runs in a new thread, which inherits no contextvars.
+            # Copy the caller's context so a worker still sees the profile scope.
+            ctx = contextvars.copy_context()
+            threading.Thread(
+                target=ctx.run,
+                args=(_collect_and_store, run, refresh),
+                name="provider-usage-collect",
+                daemon=True,
+            ).start()
+        elif cached is not None:
+            return cached
+    run.done.wait(DEADLINE_S + 5.0)
+    with _lock:
+        if run.error is not None:
+            raise run.error
+        if _cache["payload"] is None:
+            raise RuntimeError("collection finished without a payload")
+        return _cache["payload"]
 
 
 @router.get("/usage")
-def get_usage(fresh: bool = False):
-    """Aggregate usage payload; per-provider failures are isolated in-band."""
-    return payload(fresh=fresh)
+def get_usage(fresh: bool = False, refresh: bool = False):
+    """Aggregate usage payload; per-provider failures are isolated in-band.
+
+    ``refresh`` is the manual refresh: it skips the helper snapshot shortcut.
+    An older client that only sends ``fresh`` keeps the previous behaviour.
+    """
+    return payload(fresh=fresh, refresh=refresh)
 
 
 @router.get("/health")

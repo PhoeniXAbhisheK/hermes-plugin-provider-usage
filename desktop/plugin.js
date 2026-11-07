@@ -81,8 +81,9 @@ function bindStorage(s) {
   $barProviders.listen(v => persist(STORE_BAR, v))
 }
 
-async function fetchUsage(fresh) {
+async function fetchUsage(fresh, manual) {
   if (!rest) throw new Error('plugin backend not bound')
+  if (manual) return rest('/usage?fresh=1&refresh=1')
   return rest(fresh ? '/usage?fresh=1' : '/usage')
 }
 
@@ -189,6 +190,22 @@ function actionableEta(w) {
 
 /* ---------- alerts (native notification, deduped) ---------- */
 
+/* Two polls seconds apart compute a reset time that differs by a few seconds.
+ * Compare reset times within a tolerance instead of bucketing them: bucketing
+ * still flips when the value crosses a bucket edge. */
+const RESET_TOLERANCE_MS = 120000
+
+function sameReset(seen, prefix, stamp) {
+  const keys = Object.keys(seen)
+  for (const key of keys) {
+    if (key.indexOf(prefix) !== 0) continue
+    const was = Date.parse(key.slice(prefix.length))
+    if (!isFinite(was) || was <= 0) continue
+    if (Math.abs(was - stamp) <= RESET_TOLERANCE_MS) return true
+  }
+  return false
+}
+
 function checkAlerts(data) {
   if (!storage || !data || !Array.isArray(data.providers)) return
   try {
@@ -220,8 +237,11 @@ function checkAlerts(data) {
         if (eta) bits.push('At this rate, 100% in ' + fmtEta(eta))
         const r = etaText(w.resets_at)
         if (r) bits.push(r)
+        const prefix = p.id + ':' + w.label + ':'
+        const stamp = Date.parse(w.resets_at) || 0
+        if (stamp && sameReset(seen, prefix, stamp)) continue
         fire(
-          p.id + ':' + w.label + ':' + (w.resets_at || 'no-reset'),
+          prefix + (w.resets_at || 'no-reset'),
           p.name + ': ' + w.label + ' at ' + Math.round(u) + '% used',
           bits.join(' · ')
         )
@@ -271,6 +291,7 @@ function summary(p, mode) {
   }
   const wins = Array.isArray(p.windows) ? p.windows : []
   const win = wins.find(w => w.label === '5h') || wins[0]
+  if (!win) return '-'
   const u = usedPercentOf(win)
   return Math.round(used ? u : 100 - u) + '%'
 }
@@ -462,7 +483,7 @@ function ProviderBlock({ p, first, mode, ids }) {
     const d = Number(m.depletes_in_seconds)
     const aEta = isFinite(d) && d > 0 && d < 14 * 86400 ? d : null
     rows.push(jsx(Row, {
-      key: 'm' + m.label,
+      key: 'm' + m.label + ':' + (m.cur || ''),
       label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
       value: money(shown, m.cur),
       width: total > 0 ? (shown / total) * 100 : 0,
@@ -600,7 +621,7 @@ function UsagePanel() {
   const refresh = () => {
     if (spinning) return
     setSpinning(true)
-    fetchUsage(true)
+    fetchUsage(true, true)
       .then(d => qc.setQueryData(USAGE_KEY, d))
       .catch(() => {})
       .then(() => setTimeout(() => setSpinning(false), 600))

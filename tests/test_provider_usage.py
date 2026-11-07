@@ -184,6 +184,7 @@ class KimiFetcherTest(unittest.TestCase):
         self._orig_http = API._http_json
         self.calls = []
         self.headers_seen = []
+        API._HOST_WINNERS.clear()  # in-process host memory must not cross tests
 
     def tearDown(self):
         API._secret = self._orig_secret
@@ -352,7 +353,11 @@ class AnthropicFetcherTest(unittest.TestCase):
         API._http_json = fake
 
     def test_hermes_result_takes_precedence(self):
-        API._hermes_usage = lambda provider: {"id": provider, "status": "ok", "windows": []}
+        API._hermes_usage = lambda provider: {
+            "id": provider,
+            "status": "ok",
+            "windows": [{"label": "5h", "percent": 12}],
+        }
         API.fetch_anthropic()
         self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
 
