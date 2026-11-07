@@ -263,6 +263,31 @@ def _read_text(path):
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _env_line_value(line, name):
+    """The value for ``name`` on one .env line, or None when it is not that line."""
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export") and len(text) > 6 and text[6] in " \t":
+        text = text[6:].lstrip()
+    if "=" not in text:
+        return None
+    key, raw = text.split("=", 1)
+    if key.strip() != name:
+        return None
+    value = raw.strip()
+    if value[:1] in ('"', "'"):
+        quote = value[0]
+        close = value.find(quote, 1)
+        if close != -1:
+            return value[1:close]
+    for index, char in enumerate(raw):
+        if char == "#" and index > 0 and raw[index - 1] in " \t":
+            raw = raw[:index]
+            break
+    return raw.strip().strip('"').strip("'")
+
+
 def _hermes_env_value(name):
     """Read-only fallback: the profile's own .env (never os.environ)."""
     try:
@@ -273,8 +298,9 @@ def _hermes_env_value(name):
         env_path = Path.home() / ".hermes" / ".env"
     try:
         for line in _read_text(env_path).splitlines():
-            if line.startswith(name + "="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+            value = _env_line_value(line, name)
+            if value is not None:
+                return value
     except (OSError, ValueError):
         pass
     return None
@@ -1488,6 +1514,18 @@ def _record(key, value, now):
         del samples[:-400]
 
 
+def _prune_history(now):
+    """Drop keys that have no samples or whose newest sample is past the max age."""
+    with _history_lock:
+        stale = [
+            key
+            for key, samples in _history.items()
+            if not samples or now - samples[-1][0] > _HISTORY_MAX_AGE
+        ]
+        for key in stale:
+            del _history[key]
+
+
 def _project(key, current, target, now):
     """Seconds until ``target`` at the observed rate, or None when unknown."""
     with _history_lock:
@@ -1644,6 +1682,7 @@ def _collect(deadline=None):
         if p.get("status") == "ok" and not p.get("stale"):
             _decorate(pid, p, now)
         providers.append(p)
+    _prune_history(now)
     return {
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "providers": providers,
