@@ -949,6 +949,9 @@ class DirectFallbackTest(Base):
     def test_ten_minute_constant(self):
         self.assertEqual(API.STALE_DIRECT_AFTER_S, 600.0)
 
+    def test_helper_timeout_constant(self):
+        self.assertEqual(API.HELPER_TIMEOUT_S, 10.0)
+
 
 class _no_logs:
     """Context manager for paths that must not log (a missing token is normal)."""
@@ -995,6 +998,87 @@ class RefreshSignalTest(Base):
         params = inspect.signature(API.get_usage).parameters
         self.assertIn("refresh", params)
         self.assertFalse(params["refresh"].default)
+
+
+class PayloadCacheTest(Base):
+    """Gaps only: TTL miss, helper freshness window, cooldown, held rows.
+
+    A TTL hit is already covered by test_warm_cache_answers_during_a_refresh and
+    fresh=True by most of this file.
+    """
+
+    def test_ttl_hit_returns_the_cache_without_a_collection(self):
+        calls = []
+
+        def fetcher():
+            calls.append(1)
+            return {"id": "zai", "status": "ok", "windows": [{"label": "5h", "percent": 7}]}
+
+        self.use({"zai": fetcher})
+        API._cache["payload"] = {"fetched_at": "2026-01-01T00:00:00Z", "providers": []}
+        API._cache["at"] = time.time()
+        out = API.payload()
+        self.assertEqual(calls, [], "a warm cache inside the TTL started a collection")
+        self.assertEqual(out["providers"], [])
+
+    def test_ttl_miss_starts_a_new_collection(self):
+        calls = []
+
+        def fetcher():
+            calls.append(1)
+            return {"id": "zai", "status": "ok", "windows": [{"label": "5h", "percent": 7}]}
+
+        self.use({"zai": fetcher})
+        API._cache["payload"] = {"fetched_at": "2026-01-01T00:00:00Z", "providers": []}
+        API._cache["at"] = time.time() - API.TTL - 1
+        out = API.payload()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out["providers"][0]["windows"][0]["percent"], 7)
+
+    def test_helper_snapshot_inside_the_fresh_window_makes_no_call(self):
+        called = []
+        API._cached_snapshot = lambda provider: _snap(age_s=60)
+        API._fetch_usage = lambda provider: (called.append(1), None)[1]
+        payload = API._hermes_usage("anthropic")
+        self.assertEqual(called, [])
+        self.assertEqual(payload["windows"][0]["percent"], 42.0)
+
+    def test_helper_snapshot_past_the_fresh_window_calls_once(self):
+        called = []
+        API._cached_snapshot = lambda provider: _snap(age_s=API.CACHE_FRESH_S + 60)
+        API._fetch_usage = lambda provider: (called.append(1), _snap(age_s=0))[1]
+        payload = API._hermes_usage("anthropic")
+        self.assertEqual(len(called), 1)
+        self.assertEqual(payload["windows"][0]["percent"], 42.0)
+
+    def test_helper_cooldown_skips_the_call(self):
+        called = []
+        API._fetch_usage = lambda provider: (called.append(1), _snap(age_s=0))[1]
+        API._helper_cooldown["anthropic"] = time.time() + 120
+        API._hermes_usage("anthropic")
+        self.assertEqual(called, [])
+
+    def test_payload_keeps_a_held_provider_with_its_last_reading(self):
+        self.use({})
+        API._last_good["zai"] = {
+            "id": "zai",
+            "status": "ok",
+            "windows": [{"label": "5h", "percent": 55}],
+        }
+        API._holds["zai"] = time.time() + 120
+        out = API.payload(fresh=True)
+        row = {p["id"]: p for p in out["providers"]}["zai"]
+        self.assertTrue(row.get("stale"))
+        self.assertIn("hold_until", row)
+        self.assertEqual(row["windows"][0]["percent"], 55)
+
+    def test_payload_keeps_a_held_provider_without_a_reading(self):
+        self.use({})
+        API._holds["zai"] = time.time() + 120
+        out = API.payload(fresh=True)
+        row = {p["id"]: p for p in out["providers"]}["zai"]
+        self.assertEqual(row["status"], "error")
+        self.assertIn("rate limited until", row["error"])
 
 
 def _snap(age_s):

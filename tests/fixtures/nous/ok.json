@@ -1,0 +1,10 @@
+{
+  "available": true,
+  "windows": [
+    {
+      "label": "Credits",
+      "used_percent": 40.0,
+      "reset_at": "2026-12-01T00:00:00Z"
+    }
+  ]
+}

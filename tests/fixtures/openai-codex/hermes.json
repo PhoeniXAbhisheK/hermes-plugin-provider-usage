@@ -1,0 +1,10 @@
+{
+  "available": true,
+  "windows": [
+    {
+      "label": "Session",
+      "used_percent": 5.0,
+      "reset_at": "2026-11-07T06:00:00Z"
+    }
+  ]
+}
