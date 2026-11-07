@@ -8,17 +8,13 @@
  */
 import {
   ScrollArea,
-  SegmentedControl,
-  Tabs,
-  TabsList,
-  TabsTrigger,
   Tip,
   host
 } from './stubs/plugin-sdk.mjs'
 import { __setHooks } from './stubs/react.mjs'
 import { loadPlugin } from './load-plugin.mjs'
 
-const LEAVES = new Set([ScrollArea, SegmentedControl, Tabs, TabsList, TabsTrigger, Tip])
+const LEAVES = new Set([ScrollArea, Tip])
 
 function strings(value, out) {
   if (value == null || typeof value === 'boolean' || typeof value === 'function') return
@@ -90,6 +86,7 @@ function walk(node, ctx) {
     } finally {
       __setHooks(previous)
     }
+    if (!ctx.root) ctx.root = child
     walk(child, ctx)
     return
   }
@@ -134,9 +131,9 @@ export async function renderComponent(name, options = {}) {
           : null
   if (!element) throw new Error('unknown component ' + name)
 
-  const ctx = { calls: [], options, tags: [], text: [] }
+  const ctx = { calls: [], options, tags: [], text: [], root: null }
   walk(element, ctx)
-  return { calls: ctx.calls, tags: ctx.tags, text: ctx.text, joined: ctx.text.join(' | ') }
+  return { calls: ctx.calls, tags: ctx.tags, text: ctx.text, joined: ctx.text.join(' | '), tree: element, rendered: ctx.root }
 }
 
 export { host }

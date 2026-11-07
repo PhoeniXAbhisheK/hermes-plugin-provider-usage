@@ -1065,9 +1065,10 @@ test('providerRowElement shows +N more and the open row renders its panel', asyn
   const collapsed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: false })
   const more = findNodes(collapsed, n => n.type === 'button' && nodeText(n) === '+1 more')
   assert.equal(more.length, 1)
-  assert.equal(findNodes(collapsed, n => typeof n.type === 'function' && n.type.name === 'Tabs').length, 0)
+  assert.equal(findNodes(collapsed, n => n.type === 'div' && n.props && n.props.role === 'tablist').length, 0)
   const open = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: true })
-  assert.equal(findNodes(open, n => typeof n.type === 'function' && n.type.name === 'Tabs').length, 1)
+  assert.equal(findNodes(open, n => n.type === 'div' && n.props && n.props.role === 'tablist').length, 1)
+  assert.equal(findNodes(open, n => typeof n.type === 'function' && ['Tabs', 'SegmentedControl'].includes(n.type.name)).length, 0)
   assert.equal(findNodes(open, n => n.type === 'button' && nodeText(n) === 'Show less').length, 0)
   assert.equal(nodeText(open).includes('D'), true)
 })
@@ -1429,12 +1430,13 @@ test('expandedPanel opens on the bar quota and lists every quota tab', async () 
     ]
   }
   const panel = expandedPanel(p, { mode: 'used', choice: { zai: 'weekly' }, barIds: ['zai'], now: now })
-  const tabs = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'Tabs')
+  const tabs = findNodes(panel, n => n.type === 'div' && n.props && n.props.role === 'tablist')
   assert.equal(tabs.length, 1)
-  assert.equal(tabs[0].props.value, 'weekly')
-  const triggers = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'TabsTrigger')
+  const triggers = findNodes(panel, n => n.type === 'button' && n.props && n.props.role === 'tab')
   assert.equal(triggers.length, 3)
-  assert.deepEqual(triggers.map(t => t.props.value), ['5h', 'weekly', 'monthly'])
+  assert.deepEqual(triggers.map(t => nodeText(t)), ['5h', 'Weekly', 'Monthly'])
+  assert.equal(triggers[1].props['aria-selected'], true)
+  assert.equal(triggers[0].props['aria-selected'], false)
   assert.equal(nodeText(panel).includes('Shown in status bar'), true)
   const plus = findNodes(
     panel,
@@ -1988,7 +1990,7 @@ test('the chart follows the saved threshold and drops the line when off', async 
   assert.equal(loud.colour, 'accent')
 })
 
-test('the expanded row shows the alert line label and the notification note', async () => {
+test('the expanded row collapses the alert choice and note until the alert button opens it', async () => {
   const { expandedPanel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
   const p = {
@@ -2000,7 +2002,14 @@ test('the expanded row shows the alert line label and the notification note', as
   const panel = expandedPanel(p, { mode: 'used', choice: {}, barIds: [], tab: '5h', alertAt: { 'zai:5h': 90 } })
   assert.ok(nodeText(panel).includes('alert 90%'))
   assert.ok(nodeText(panel).includes('Alert at 90%'))
-  assert.ok(nodeText(panel).includes('Notifications appear while Hermes is in the background.'))
+  assert.equal(nodeText(panel).includes('Notifications appear while Hermes is in the background.'), false)
+  const open = expandedPanel(p, {
+    mode: 'used', choice: {}, barIds: [], tab: '5h', alertAt: { 'zai:5h': 90 }, alertOpen: true
+  })
+  assert.ok(nodeText(open).includes('Notifications appear while Hermes is in the background.'))
+  const openButton = findNodes(open, n => n.type === 'button' && nodeText(n) === 'Alert at 90%')
+  assert.equal(openButton.length, 1)
+  assert.equal(openButton[0].props['aria-expanded'], true)
   const line = findNodes(panel, n => n.type === 'line' && n.props.key === 'alert')
   assert.equal(line.length, 1)
   assert.equal(line[0].props.y1, 8.4)
@@ -2010,7 +2019,7 @@ test('the expanded row shows the alert line label and the notification note', as
   assert.equal(nodeText(offPanel).includes('alert 80%'), false)
 })
 
-test('the alert control offers the six steps and reports a pick', async () => {
+test('the open alert control offers the six steps, reports a pick and closes', async () => {
   const { expandedPanel } = await loadPlugin()
   const p = {
     id: 'zai',
@@ -2019,30 +2028,36 @@ test('the alert control offers the six steps and reports a pick', async () => {
     windows: [{ key: '5h', label: '5h', kind: 'window', used_pct: 40 }]
   }
   const picks = []
+  let closed = 0
   const panel = expandedPanel(p, {
     mode: 'used',
     choice: {},
     barIds: [],
     tab: '5h',
     alertAt: { 'zai:5h': 90 },
-    onAlert: (rowKey, value) => picks.push([rowKey, value])
+    alertOpen: true,
+    onAlert: (rowKey, value) => picks.push([rowKey, value]),
+    onAlertClose: () => { closed += 1 }
   })
-  const control = findNodes(panel, n => typeof n.type === 'function' && n.type.name === 'SegmentedControl')
-  assert.equal(control.length, 1)
-  assert.deepEqual(control[0].props.options.map(o => o.id), ['50', '70', '80', '90', '95', 'off'])
-  assert.equal(control[0].props.value, '90')
-  control[0].props.onChange('70')
-  control[0].props.onChange('off')
+  const group = findNodes(panel, n => n.type === 'div' && n.props && n.props['aria-label'] === 'Alert threshold')
+  assert.equal(group.length, 1)
+  const control = findNodes(group[0], n => n.type === 'button')
+  assert.deepEqual(control.map(b => nodeText(b)), ['50', '70', '80', '90', '95', 'Off'])
+  assert.equal(control[3].props['aria-pressed'], true)
+  assert.equal(control[2].props['aria-pressed'], false)
+  control[1].props.onClick()
+  control[5].props.onClick()
   assert.deepEqual(picks, [
     ['5h', 70],
     ['5h', 'off']
   ])
+  assert.equal(closed, 2)
   const moneyPanel = expandedPanel(
     { id: 'or', name: 'OpenRouter', status: 'ok', money: [{ key: 'money:key_cap:usd', label: 'Key cap', kind: 'money', total: 10, left: 2, cur: 'USD', used_pct: 80 }] },
-    { mode: 'used', choice: {}, barIds: [], tab: 'money:key_cap:usd' }
+    { mode: 'used', choice: {}, barIds: [], tab: 'money:key_cap:usd', alertOpen: true }
   )
-  assert.equal(findNodes(moneyPanel, n => typeof n.type === 'function' && n.type.name === 'SegmentedControl').length, 0)
-  assert.ok(nodeText(moneyPanel).includes('Notifications appear while Hermes is in the background.'))
+  assert.equal(findNodes(moneyPanel, n => n.type === 'div' && n.props && n.props['aria-label'] === 'Alert threshold').length, 0)
+  assert.equal(nodeText(moneyPanel).includes('Notifications appear while Hermes is in the background.'), false)
 })
 
 test('a real payload shape drives the bar, the tip and the warn flag', async () => {
@@ -2699,4 +2714,257 @@ test('checkAlerts survives a notification that throws', async () => {
   plugin.default.register(ctx)
   assert.doesNotThrow(() => plugin.checkAlerts(alertData()))
   assert.equal(Object.keys(seen).length, 1)
+})
+
+/* ---------- compact controls and mock layout ---------- */
+
+test('miniSegments exposes group semantics, selection and onChange', async () => {
+  const { miniSegments } = await loadPlugin()
+  const picks = []
+  const node = miniSegments({
+    options: [{ id: 'all', label: 'All' }, { id: 'pinned', label: 'Pinned' }],
+    value: 'pinned',
+    onChange: id => picks.push(id),
+    label: 'Provider view'
+  })
+  assert.equal(node.props.role, 'group')
+  assert.equal(node.props['aria-label'], 'Provider view')
+  const buttons = findNodes(node, n => n.type === 'button')
+  assert.equal(buttons.length, 2)
+  assert.equal(buttons[0].props['aria-pressed'], false)
+  assert.equal(buttons[1].props['aria-pressed'], true)
+  assert.equal(buttons[0].props.style.padding, '3px 8px')
+  buttons[0].props.onClick()
+  assert.deepEqual(picks, ['all'])
+
+  const tabs = miniSegments({
+    options: [{ id: '5h', label: '5h', dot: true }, { id: 'weekly', label: 'Weekly' }],
+    value: '5h',
+    onChange: () => {},
+    label: 'Quotas',
+    tabs: true
+  })
+  assert.equal(tabs.props.role, 'tablist')
+  const tabButtons = findNodes(tabs, n => n.type === 'button')
+  assert.equal(tabButtons[0].props.role, 'tab')
+  assert.equal(tabButtons[0].props['aria-selected'], true)
+  assert.equal(tabButtons[0].props['aria-pressed'], undefined)
+  assert.equal(findNodes(tabs, n => n.props && n.props.className === 'bg-(--ui-accent)').length, 1)
+
+  const interval = miniSegments({
+    options: [{ id: '30000', label: '30s' }],
+    value: '30000',
+    onChange: () => {},
+    label: 'Refresh interval',
+    interval: true
+  })
+  const intervalButton = findNodes(interval, n => n.type === 'button')[0]
+  assert.equal(intervalButton.props.style.padding, '3px 7px')
+  assert.equal(intervalButton.props.style.fontSize, 10.5)
+})
+
+test('the popover uses no SDK segmented or tab components', async () => {
+  const { renderComponent } = await import('./render.mjs')
+  const data = { providers: [okProvider('anthropic', 'Anthropic', 'anthropic', 42, false)] }
+  const view = await renderComponent('UsagePanel', { data })
+  assert.equal(view.calls.includes('SegmentedControl'), false)
+  assert.equal(view.calls.includes('Tabs'), false)
+  assert.equal(view.calls.includes('TabsList'), false)
+  assert.equal(view.calls.includes('TabsTrigger'), false)
+})
+
+test('UsagePanel keeps the alert choice collapsed until the alert button opens it', async () => {
+  const { renderComponent } = await import('./render.mjs')
+  const data = { providers: [okProvider('anthropic', 'Anthropic', 'anthropic', 42, false)] }
+  const closed = await renderComponent('UsagePanel', {
+    data,
+    state: { 1: 'anthropic' }
+  })
+  assert.equal(closed.joined.includes('Notifications appear while Hermes is in the background.'), false)
+  const closedButton = findNodes(
+    closed.rendered,
+    n => n.type === 'button' && nodeText(n) === 'Alert at 80%'
+  )
+  assert.equal(closedButton.length, 1)
+  assert.equal(closedButton[0].props['aria-expanded'], false)
+
+  const open = await renderComponent('UsagePanel', {
+    data,
+    state: { 1: 'anthropic', 3: 'anthropic' }
+  })
+  assert.ok(open.joined.includes('Notifications appear while Hermes is in the background.'))
+  const steps = findNodes(open.rendered, n => n.type === 'button')
+    .map(nodeText)
+    .filter(text => ['50', '70', '80', '90', '95', 'Off'].includes(text))
+  assert.deepEqual(steps, ['50', '70', '80', '90', '95', 'Off'])
+})
+
+test('statsFor derives burn, at reset and pace from a monthly window', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 35,
+    duration_seconds: 30 * 86400,
+    resets_at: new Date(now + 28 * 86400 * 1000).toISOString()
+  }
+  assert.deepEqual(statsFor(row, now), [
+    { label: 'Burn', value: '17.5%/d' },
+    { label: 'At reset', value: 'runs out', warn: true },
+    { label: 'Pace', value: '5.3×' }
+  ])
+  const missingDuration = statsFor({ kind: 'window', used_pct: 35, resets_at: row.resets_at }, now)
+  assert.deepEqual(missingDuration.map(s => s.value), ['-', '-', '-'])
+  const noElapsed = statsFor(
+    { kind: 'window', used_pct: 35, duration_seconds: 30 * 86400, resets_at: new Date(now + 30 * 86400 * 1000).toISOString() },
+    now
+  )
+  assert.deepEqual(noElapsed.map(s => s.value), ['-', '-', '-'])
+})
+
+test('statsFor uses per hour at seven days and per day only above seven days', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const weekly = statsFor(
+    {
+      kind: 'window',
+      used_pct: 10,
+      duration_seconds: 604800,
+      resets_at: new Date(now + 6 * 86400 * 1000).toISOString()
+    },
+    now
+  )
+  assert.equal(weekly[0].value, '0.4%/h')
+  const monthly = statsFor(
+    {
+      kind: 'window',
+      used_pct: 35,
+      duration_seconds: 30 * 86400,
+      resets_at: new Date(now + 28 * 86400 * 1000).toISOString()
+    },
+    now
+  )
+  assert.equal(monthly[0].value, '17.5%/d')
+})
+
+test('statsFor keeps the measured rate ahead of the derived pace', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 50,
+    duration_seconds: 10 * 3600,
+    resets_at: new Date(now + 8 * 3600 * 1000).toISOString(),
+    eta_seconds: 10 * 3600
+  }
+  assert.equal(statsFor(row, now)[0].value, '5.0%/h')
+})
+
+test('derivedRate rejects money rows and a window with no elapsed time', async () => {
+  const { derivedRate, statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const money = {
+    kind: 'money',
+    used_pct: 80,
+    duration_seconds: 30 * 86400,
+    resets_at: new Date(now + 28 * 86400 * 1000).toISOString()
+  }
+  assert.equal(derivedRate(money, now), null)
+  const noElapsed = {
+    kind: 'window',
+    used_pct: 10,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 5 * 3600 * 1000 + 1000).toISOString()
+  }
+  assert.equal(derivedRate(noElapsed, now), null)
+  assert.deepEqual(statsFor(noElapsed, now).map(s => s.value), ['-', '-', '-'])
+})
+
+test('chartModel clamps the average-pace line at zero', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 10,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 4 * 3600 * 1000).toISOString()
+  }
+  const model = chartModel(row, now)
+  const zero = chartModel(
+    { kind: 'window', used_pct: 0, duration_seconds: 5 * 3600, resets_at: row.resets_at },
+    now
+  )
+  assert.equal(model.series[0][0], 0)
+  assert.equal(model.averageStart, 0)
+  assert.equal(model.series[0][1], zero.current[1])
+})
+
+test('chartModel draws an average-pace history line for a window with fewer than two samples', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 35,
+    duration_seconds: 30 * 86400,
+    resets_at: new Date(now + 28 * 86400 * 1000).toISOString()
+  }
+  const model = chartModel(row, now)
+  assert.equal(model.average, true)
+  assert.equal(model.series.length, 2)
+  assert.equal(model.series[0][0], 0)
+  assert.equal(model.series[1][0], 220)
+  assert.ok(model.series[0][1] > model.series[1][1])
+  assert.ok(model.projection !== null)
+  assert.equal(model.rate, 35 / (2 * 86400))
+  const { expandedPanel } = await loadPlugin()
+  const windowPanel = expandedPanel(
+    { id: 'z', name: 'Z', status: 'ok', windows: [{ ...row, key: 'monthly', label: 'Monthly' }] },
+    { mode: 'used', choice: {}, barIds: [], tab: 'monthly', now }
+  )
+  assert.equal(findNodes(windowPanel, n => n.type === 'polyline' && n.props.key === 'history').length, 1)
+  const money = chartModel(
+    { kind: 'money', used_pct: 80, left: 2, total: 10, cur: 'USD' },
+    now
+  )
+  assert.equal(money.average, false)
+  assert.equal(money.series.length, 1)
+  const moneyPanel = expandedPanel(
+    { id: 'or', name: 'OpenRouter', status: 'ok', money: [{ key: 'money:balance:usd', label: 'Balance', kind: 'money', used_pct: 80, left: 2, total: 10, cur: 'USD' }] },
+    { mode: 'used', choice: {}, barIds: [], tab: 'money:balance:usd', now }
+  )
+  assert.equal(findNodes(moneyPanel, n => n.type === 'polyline' && n.props.key === 'history').length, 0)
+})
+
+test('tipBody carries the quota label, a 4x10 swatch and the updated footer', async () => {
+  const { tipBody } = await loadPlugin()
+  const body = tipBody(
+    [{ name: 'Anthropic', label: '5h', value: '42%', attention: false }],
+    '04:14 AM'
+  )
+  const text = nodeText(body)
+  assert.ok(text.includes('Anthropic'))
+  assert.ok(text.includes('5h'))
+  assert.ok(text.includes('42%'))
+  assert.ok(text.includes('Click to open · updated 04:14 AM'))
+  const swatches = findNodes(
+    body,
+    n => n.type === 'span' && n.props && n.props.style && n.props.style.width === 4 && n.props.style.height === 10
+  )
+  assert.equal(swatches.length, 1)
+})
+
+test('the footer keeps auto refresh and the value control on one row', async () => {
+  const { renderComponent } = await import('./render.mjs')
+  const data = { providers: [okProvider('anthropic', 'Anthropic', 'anthropic', 42, false)] }
+  const view = await renderComponent('UsagePanel', { data })
+  const foot = findNodes(
+    view.rendered,
+    n => n.type === 'div' && n.props && n.props.style && n.props.style.padding === '9px 14px'
+  )
+  assert.equal(foot.length, 1)
+  assert.equal(foot[0].props.style.display, 'flex')
+  assert.equal(foot[0].props.style.gap, 8)
+  assert.ok(nodeText(foot[0]).includes('auto refresh'))
+  const mode = findNodes(foot[0], n => n.type === 'span' && n.props && n.props.style && n.props.style.marginLeft === 'auto')
+  assert.equal(mode.length, 1)
 })

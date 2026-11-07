@@ -27,10 +27,6 @@
 import {
   STATUSBAR_AREAS,
   ScrollArea,
-  SegmentedControl,
-  Tabs,
-  TabsList,
-  TabsTrigger,
   Tip,
   atom,
   host,
@@ -651,6 +647,22 @@ function windowRate(row) {
   return (100 - used) / eta
 }
 
+/* Average pace from the window itself, for rows without a measured rate:
+ * elapsed = duration_seconds - seconds to resets_at. Null unless the row has
+ * a duration, a reset time, an elapsed share above zero and a numeric used
+ * percent. */
+export function derivedRate(row, nowMs) {
+  if (!row || row.kind === 'money') return null
+  const duration = Number(row.duration_seconds)
+  const reset = Date.parse(row.resets_at)
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const used = Number(row.used_pct)
+  if (!isFinite(duration) || duration <= 0 || !isFinite(reset) || !isFinite(used)) return null
+  const elapsed = duration - (reset - now) / 1000
+  if (!(elapsed > 0)) return null
+  return { duration: duration, elapsed: elapsed, rate: used / elapsed }
+}
+
 /* History is [epoch seconds, value]; windows store the used percent, money
  * rows store the used amount in the row's currency (see _row_history in
  * dashboard/plugin_api.py). Money values are divided by the row total so the
@@ -677,8 +689,17 @@ export function chartModel(row, nowMs, alertAt) {
     points.push([CHART_HISTORY_W - (age / CHART_HISTORY_S) * CHART_HISTORY_W, chartY(pct)])
   }
   points.sort((a, b) => a[0] - b[0])
-  const series = points.length >= 2 ? points : [[CHART_HISTORY_W, chartY(used)]]
-  const rate = isMoney ? null : windowRate(row)
+  const derived = isMoney ? null : derivedRate(row, now)
+  const averageStart = !isMoney && derived ? Math.max(0, used - derived.rate * CHART_HISTORY_S) : null
+  const series =
+    points.length >= 2
+      ? points
+      : averageStart !== null
+        ? [[0, chartY(averageStart)], [CHART_HISTORY_W, chartY(used)]]
+        : [[CHART_HISTORY_W, chartY(used)]]
+  const average = points.length < 2 && averageStart !== null
+  const measured = isMoney ? null : windowRate(row)
+  const rate = isMoney ? null : average ? derived.rate : measured !== null ? measured : derived ? derived.rate : null
   let projection = null
   let valueAtReset = null
   let overflow = false
@@ -713,6 +734,8 @@ export function chartModel(row, nowMs, alertAt) {
     projection: projection,
     valueAtReset: valueAtReset === null ? null : Math.round(valueAtReset),
     rate: rate,
+    average: average,
+    averageStart: averageStart,
     overflow: overflow,
     alert: threshold === null ? null : { value: threshold, y: chartY(threshold) },
     colour: amber ? 'amber' : 'accent'
@@ -737,14 +760,22 @@ export function statsFor(row, nowMs) {
       { label: 'Used', value: used === null ? '-' : pct(used) }
     ]
   }
-  const rate = windowRate(row)
+  const measured = windowRate(row)
+  const derived = derivedRate(row, now)
+  const rate = measured !== null ? measured : derived ? derived.rate : null
   const reset = Date.parse(row.resets_at)
-  const atReset =
-    used !== null && rate !== null && isFinite(reset) && reset > now
-      ? used + rate * ((reset - now) / 1000)
-      : null
+  let atReset = null
+  if (used !== null && rate !== null) {
+    if (measured !== null) {
+      if (isFinite(reset) && reset > now) atReset = used + rate * ((reset - now) / 1000)
+    } else {
+      atReset = (used * derived.duration) / derived.elapsed
+    }
+  }
+  const perDay = Number(row.duration_seconds) > 7 * 86400
+  const burn = rate === null ? '-' : (rate * (perDay ? 86400 : 3600)).toFixed(1) + (perDay ? '%/d' : '%/h')
   return [
-    { label: 'Burn', value: rate === null ? '-' : (rate * 3600).toFixed(1) + '%/h' },
+    { label: 'Burn', value: burn },
     {
       label: 'At reset',
       value: atReset === null ? '-' : atReset >= 100 ? 'runs out' : '~' + Math.round(atReset) + '%',
@@ -975,11 +1006,11 @@ export function tipBody(lines, stamp) {
               className: line.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
               style: { width: 4, height: 10, borderRadius: 2, display: 'inline-block', flex: 'none' }
             }),
-            jsx('span', { style: { fontWeight: 600, whiteSpace: 'nowrap' }, children: line.name }),
+            jsx('span', { style: { fontWeight: 500, color: 'var(--ui-text-primary)', whiteSpace: 'nowrap' }, children: line.name }),
             jsx('span', { style: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: line.label }),
             jsx('span', {
               className: line.attention ? 'text-amber-600' : undefined,
-              style: { marginLeft: 'auto', fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap' },
               children: line.value
             })
           ]
@@ -987,15 +1018,16 @@ export function tipBody(lines, stamp) {
       )
     : [jsx('div', { key: 'empty', children: 'Pin a provider, or open a chat that uses one' })]
   return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 250, fontSize: 11, textAlign: 'left' },
+    style: { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 250, fontSize: 11, textAlign: 'left' },
     children: [
       ...body,
       jsx('div', {
         key: 'foot',
         style: {
           borderTop: '1px solid var(--ui-stroke-tertiary)',
-          paddingTop: 4,
+          paddingTop: 6,
           marginTop: 2,
+          fontSize: 10.5,
           color: 'var(--ui-text-tertiary)'
         },
         children: 'Click to open · updated ' + (stamp || '')
@@ -1018,7 +1050,64 @@ function BarTip() {
 
 /* ---------- popover panel ---------- */
 
-const MONO = 'tabular-nums'
+const MONO_FONT = 'var(--font-mono, ui-monospace, monospace)'
+const MONO = { fontFamily: MONO_FONT, fontVariantNumeric: 'tabular-nums' }
+
+export function miniSegments({ options, value, onChange, label, tabs = false, interval = false }) {
+  const items = Array.isArray(options) ? options : []
+  const selected = String(value)
+  return jsx('div', {
+    role: tabs ? 'tablist' : 'group',
+    'aria-label': label,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 1,
+      padding: 2,
+      border: '1px solid var(--ui-stroke-tertiary)',
+      borderRadius: 6,
+      background: 'var(--ui-bg-secondary)'
+    },
+    children: items.map(option => {
+      const isSelected = String(option.id) === selected
+      return jsxs('button', {
+        key: option.id,
+        type: 'button',
+        role: tabs ? 'tab' : undefined,
+        'aria-selected': tabs ? isSelected : undefined,
+        'aria-pressed': tabs ? undefined : isSelected,
+        onClick: () => onChange(option.id),
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          border: 0,
+          borderRadius: 4,
+          padding: interval ? '3px 7px' : '3px 8px',
+          fontSize: interval ? 10.5 : 11,
+          fontWeight: 500,
+          fontFamily: interval ? MONO_FONT : undefined,
+          fontVariantNumeric: interval ? 'tabular-nums' : undefined,
+          lineHeight: 1.3,
+          cursor: 'pointer',
+          background: isSelected ? 'var(--ui-bg-elevated)' : 'transparent',
+          color: isSelected ? 'var(--ui-text-primary)' : 'var(--ui-text-secondary)',
+          whiteSpace: 'nowrap'
+        },
+        children: [
+          option.dot
+            ? jsx('span', {
+                key: 'dot',
+                className: 'bg-(--ui-accent)',
+                style: { width: 5, height: 5, borderRadius: '50%', flex: 'none' }
+              })
+            : null,
+          option.label
+        ]
+      })
+    })
+  })
+}
 
 function clockOf(iso) {
   const t = Date.parse(iso)
@@ -1046,7 +1135,7 @@ function pinButton(p, pinned, onPin) {
     onClick: onPin,
     style: {
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: 24, height: 24, flex: 'none', padding: 0, borderRadius: 6, cursor: 'pointer',
+      width: 24, height: 24, flex: 'none', padding: 0, borderRadius: 5, cursor: 'pointer',
       border: '1px solid ' + (pinned ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
       background: pinned ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
       color: pinned ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
@@ -1094,12 +1183,12 @@ function quotaCell(row, ctx) {
             }
           }),
           jsx('span', {
-            style: { fontSize: 10.5, color: 'var(--ui-text-tertiary)', flex: '0 1 auto', ...ellipsis },
+            style: { fontSize: 10.5, color: 'var(--ui-text-secondary)', flex: '0 1 auto', ...ellipsis },
             children: row.label
           }),
           jsx('span', {
             className: row.warn === true ? 'text-amber-600' : undefined,
-            style: { fontSize: 11, fontVariantNumeric: MONO, marginLeft: 'auto', flex: 'none' },
+            style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none' },
             children: view.value
           }),
           extra
@@ -1182,7 +1271,8 @@ function chartElement(p, row, model) {
             stroke: 'currentColor',
             strokeWidth: 2,
             strokeLinejoin: 'round',
-            strokeLinecap: 'round'
+            strokeLinecap: 'round',
+            opacity: model.average ? 0.55 : undefined
           })
         : jsx('circle', { key: 'current', cx: 220, cy: model.current[1], r: 3, fill: 'currentColor' }),
       proj
@@ -1233,7 +1323,7 @@ function statsElement(row) {
           jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)' }, children: s.label }),
           jsx('span', {
             className: s.warn ? 'text-amber-600' : undefined,
-            style: { fontSize: 12, fontVariantNumeric: MONO },
+            style: { fontSize: 12, ...MONO },
             children: s.value
           })
         ]
@@ -1265,7 +1355,7 @@ export function expandedPanel(p, ctx) {
   const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
     style: {
-      marginLeft: 16,
+      margin: '10px 0 2px 16px',
       padding: 10,
       border: '1px solid var(--ui-stroke-tertiary)',
       borderRadius: 8,
@@ -1278,38 +1368,22 @@ export function expandedPanel(p, ctx) {
         key: 'top',
         style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
         children: [
-          jsx(Tabs, {
+          miniSegments({
+            options: quotas.map(q => ({
+              id: q.key,
+              label: q.label,
+              dot: barHere && q.key === barKey
+            })),
             value: picked,
-            onValueChange: ctx.onTab,
-            children: jsx(TabsList, {
-              className: 'h-auto gap-1 bg-transparent p-0',
-              children: quotas.map(q =>
-                jsxs(TabsTrigger, {
-                  key: q.key,
-                  value: q.key,
-                  className: 'h-auto gap-1 px-1.5 py-0.5 text-[10.5px]',
-                  children: [
-                    jsx('span', {
-                      className: barHere && q.key === barKey ? 'bg-(--ui-accent)' : undefined,
-                      style: {
-                        width: 5,
-                        height: 5,
-                        borderRadius: '50%',
-                        flex: 'none',
-                        background: barHere && q.key === barKey ? undefined : 'transparent'
-                      }
-                    }),
-                    q.label
-                  ]
-                })
-              )
-            })
+            onChange: ctx.onTab,
+            label: p.name + ' quotas',
+            tabs: true
           }),
           jsx('span', {
             style: {
               marginLeft: 'auto',
               fontSize: 10.5,
-              color: 'var(--ui-text-tertiary)',
+              color: 'var(--ui-text-secondary)',
               whiteSpace: 'nowrap'
             },
             children: extra
@@ -1320,46 +1394,69 @@ export function expandedPanel(p, ctx) {
       statsElement(tabRow),
       jsxs('div', {
         key: 'controls',
-        style: { display: 'flex', alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' },
+        style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
         children: [
           jsx('button', {
             type: 'button',
             onClick: () => ctx.onShowInBar && ctx.onShowInBar(tabRow.key),
             style: {
-              fontSize: 10.5,
-              padding: '3px 8px',
+              height: 26,
+              padding: '0 10px',
               borderRadius: 6,
+              fontSize: 11,
+              fontWeight: 500,
               cursor: 'pointer',
               border: '1px solid ' + (shownInBar ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
               background: shownInBar ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
-              color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+              color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-secondary)'
             },
             children: shownInBar ? 'Shown in status bar' : 'Show ' + tabRow.label + ' in status bar'
           }),
           tabRow.kind === 'money'
             ? null
-            : jsxs('div', {
-                style: { display: 'flex', flexDirection: 'column', gap: 3, marginLeft: 'auto', alignItems: 'flex-end' },
-                children: [
-                  jsx('span', {
-                    style: { fontSize: 10, color: 'var(--ui-text-tertiary)' },
-                    children: alertLabel
-                  }),
-                  jsx(SegmentedControl, {
-                    value: threshold === null ? '80' : String(threshold),
-                    onChange: id =>
-                      ctx.onAlert && ctx.onAlert(tabRow.key, id === 'off' ? 'off' : Number(id)),
-                    options: ALERT_OPTIONS
-                  })
-                ]
+            : jsx('button', {
+                type: 'button',
+                onClick: ctx.onAlertToggle,
+                'aria-expanded': ctx.alertOpen === true,
+                style: {
+                  height: 26,
+                  padding: '0 10px',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  border: '1px solid var(--ui-stroke-tertiary)',
+                  background: 'transparent',
+                  color: 'var(--ui-text-secondary)'
+                },
+                children: alertLabel
               })
         ]
       }),
-      jsx('div', {
-        key: 'notify',
-        style: { fontSize: 10, color: 'var(--ui-text-tertiary)' },
-        children: 'Notifications appear while Hermes is in the background.'
-      })
+      tabRow.kind === 'money'
+        ? null
+        : ctx.alertOpen
+          ? jsxs('div', {
+              key: 'alert',
+              style: { display: 'flex', flexDirection: 'column', gap: 5 },
+              children: [
+                miniSegments({
+                  options: ALERT_OPTIONS,
+                  value: threshold === null ? '80' : String(threshold),
+                  onChange: id => {
+                    if (ctx.onAlert) ctx.onAlert(tabRow.key, id === 'off' ? 'off' : Number(id))
+                    if (ctx.onAlertClose) ctx.onAlertClose()
+                  },
+                  label: 'Alert threshold',
+                  interval: true
+                }),
+                jsx('div', {
+                  style: { fontSize: 10, color: 'var(--ui-text-tertiary)' },
+                  children: 'Notifications appear while Hermes is in the background.'
+                })
+              ]
+            })
+          : null
     ]
   })
 }
@@ -1427,17 +1524,6 @@ export function providerRowElement(p, ctx) {
         ]
       }),
       jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: p.tag || '' }),
-      jsx('span', {
-        className: note ? 'text-amber-600' : undefined,
-        style: {
-          marginLeft: 'auto',
-          fontSize: 10,
-          fontVariantNumeric: MONO,
-          whiteSpace: 'nowrap',
-          color: note ? undefined : 'var(--ui-text-tertiary)'
-        },
-        children: note || stale
-      }),
       quotas.more > 0
         ? jsx('button', {
             type: 'button',
@@ -1453,6 +1539,18 @@ export function providerRowElement(p, ctx) {
             children: '+' + quotas.more + ' more'
           })
         : null,
+      jsx('span', {
+        className: note ? 'text-amber-600' : undefined,
+        style: {
+          marginLeft: 'auto',
+          fontSize: 10,
+          fontWeight: 500,
+          ...MONO,
+          whiteSpace: 'nowrap',
+          color: note ? undefined : 'var(--ui-text-tertiary)'
+        },
+        children: note || stale
+      }),
       toggle
     ]
   })
@@ -1486,10 +1584,10 @@ export function providerRowElement(p, ctx) {
     children: [
       header,
       jsx('div', {
-        style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 8 },
+        style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 12, paddingLeft: 16, paddingRight: 30 },
         children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols }))
       }),
-      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar, alertAt: ctx.alertAt, onAlert: ctx.onAlert, now: ctx.now }) : null
+      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar, alertAt: ctx.alertAt, alertOpen: ctx.alertOpen, onAlertToggle: ctx.onAlertToggle, onAlertClose: ctx.onAlertClose, onAlert: ctx.onAlert, now: ctx.now }) : null
     ]
   })
 }
@@ -1536,6 +1634,7 @@ function UsagePanel() {
   const [view, setView] = useState('all')
   const [openId, setOpenId] = useState(null)
   const [tabs, setTabs] = useState({})
+  const [alertFor, setAlertFor] = useState(null)
   const [spinning, setSpinning] = useState(false)
 
   const refresh = () => {
@@ -1591,6 +1690,9 @@ function UsagePanel() {
             onTab: key => setTabs(cur => ({ ...cur, [p.id]: key })),
             onShowInBar: key => setBarQuota(p.id, key),
             alertAt: alertAt,
+            alertOpen: alertFor === p.id,
+            onAlertToggle: () => setAlertFor(cur => (cur === p.id ? null : p.id)),
+            onAlertClose: () => setAlertFor(null),
             onAlert: (rowKey, value) => setAlert(p.id, rowKey, value),
             onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id))
           }))
@@ -1609,9 +1711,9 @@ function UsagePanel() {
         children: [
           jsx('span', { style: { fontSize: 13, fontWeight: 600 }, children: 'Provider Usage' }),
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--ui-text-tertiary)' },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ui-text-secondary)' },
             children: [
-              jsx('span', { style: { fontVariantNumeric: MONO }, children: stamp }),
+              jsx('span', { style: { fontSize: 11, color: 'var(--ui-text-secondary)', ...MONO }, children: stamp }),
               jsx('button', {
                 type: 'button',
                 onClick: refresh,
@@ -1645,17 +1747,18 @@ function UsagePanel() {
           borderBottom: '1px solid var(--ui-stroke-tertiary)'
         },
         children: [
-          jsx(SegmentedControl, {
+          miniSegments({
             options: [{ id: 'all', label: 'All ' + provs.length }, { id: 'pinned', label: 'Pinned ' + pinnedCount }],
             value: view,
-            onChange: setView
+            onChange: setView,
+            label: 'Provider view'
           }),
           jsx('button', {
             type: 'button',
             onClick: () => $barProviders.set(pinAllSet(pins, ids)),
             style: {
               padding: 0, border: 'none', background: 'transparent',
-              color: 'var(--ui-text-tertiary)', fontSize: 11, cursor: 'pointer'
+              color: 'var(--ui-accent)', fontSize: 11, fontWeight: 500, cursor: 'pointer'
             },
             children: everyPinned ? 'Unpin all' : 'Pin all'
           }),
@@ -1676,25 +1779,31 @@ function UsagePanel() {
       jsxs('div', {
         key: 'foot',
         style: {
-          display: 'flex', alignItems: 'center', gap: 6,
-          borderTop: '1px solid var(--ui-stroke-tertiary)', padding: '8px 12px'
+          display: 'flex', alignItems: 'center', gap: 8,
+          borderTop: '1px solid var(--ui-stroke-tertiary)', padding: '9px 14px'
         },
         children: [
-          jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)' }, children: 'auto refresh' }),
-          jsx(SegmentedControl, {
+          jsx('span', {
+            style: { fontSize: 11, color: 'var(--ui-text-secondary)', whiteSpace: 'nowrap' },
+            children: 'auto refresh'
+          }),
+          miniSegments({
             options: INTERVALS.map(o => ({ id: String(o.ms), label: o.label })),
             value: String(interval),
             onChange: id => {
               $interval.set(Number(id))
               qc.refetchQueries({ queryKey: USAGE_KEY })
-            }
+            },
+            label: 'Refresh interval',
+            interval: true
           }),
           jsx('span', {
             style: { marginLeft: 'auto' },
-            children: jsx(SegmentedControl, {
+            children: miniSegments({
               options: [{ id: 'used', label: 'Used' }, { id: 'remaining', label: 'Remaining' }],
               value: mode,
-              onChange: id => $mode.set(id)
+              onChange: id => $mode.set(id),
+              label: 'Value shown'
             })
           })
         ]
