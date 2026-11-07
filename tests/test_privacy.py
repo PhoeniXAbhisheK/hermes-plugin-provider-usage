@@ -60,8 +60,18 @@ CREDENTIAL_HOSTS = {
     "kimi": {"api.kimi.com", "api.moonshot.ai", "api.moonshot.cn"},
     "zai": {"api.z.ai"},
     # Each MiniMax key probes its own region first and the other one second.
-    "minimax_cn": {"api.minimaxi.com", "api.minimax.io"},
-    "minimax_global": {"api.minimaxi.com", "api.minimax.io"},
+    "minimax_cn": {
+        "api.minimaxi.com",
+        "www.minimax.cn",
+        "api.minimax.io",
+        "www.minimax.io",
+    },
+    "minimax_global": {
+        "api.minimaxi.com",
+        "www.minimax.cn",
+        "api.minimax.io",
+        "www.minimax.io",
+    },
 }
 
 SECRET_BY_NAME = {
@@ -329,6 +339,8 @@ class HostAllowlistTest(PrivacyHarness):
     def test_fetchers_only_reach_declared_hosts(self):
         self._all_secrets()
         declared = set(getattr(API, "ALLOWED_HOSTS", {})) or readme_hosts()
+        self.routes["https://www.minimax.cn/v1/token_plan/remains"] = (404, "{}")
+        self.routes["https://www.minimax.io/v1/token_plan/remains"] = (404, "{}")
 
         # A subscription key is region bound: make its first host refuse, so the
         # probe has to fall through to the next host in the chain.
@@ -419,7 +431,7 @@ class CredentialRoutingTest(PrivacyHarness):
         )
         self.run_fetchers()
         hosts = {host for host, _header in self.requests_with(SENTINEL["minimax_global"])}
-        self.assertEqual(hosts, {"api.minimaxi.com", "api.minimax.io"})
+        self.assertEqual(hosts, {"api.minimaxi.com", "api.minimax.io", "www.minimax.io"})
 
     def test_platform_key_is_never_sent(self):
         # ~/.codex/auth.json also carries an OPENAI_API_KEY entry. The plugin
@@ -461,15 +473,16 @@ class ErrorPayloadTest(PrivacyHarness):
             },
         )
         # MiniMax status_msg carries the key on every host.
-        self.routes["https://api.minimaxi.com/v1/token_plan/remains"] = (
-            200,
-            {
-                "base_resp": {
-                    "status_code": 2049,
-                    "status_msg": "invalid api key " + SENTINEL["minimax_cn"],
-                }
-            },
-        )
+        for host in ("api.minimaxi.com", "www.minimax.cn", "api.minimax.io", "www.minimax.io"):
+            self.routes["https://%s/v1/token_plan/remains" % host] = (
+                200,
+                {
+                    "base_resp": {
+                        "status_code": 2049,
+                        "status_msg": "invalid api key " + SENTINEL["minimax_cn"],
+                    }
+                },
+            )
         self.routes["https://api.minimax.io/v1/token_plan/remains"] = (
             200,
             {

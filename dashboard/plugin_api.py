@@ -39,8 +39,9 @@ Endpoints hit (GET, machine credentials attached):
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
-- https://api.minimaxi.com/v1/token_plan/remains (CN) or https://api.minimax.io
-  /v1/token_plan/remains (global): M Plan subscription keys are region-bound
+- https://api.minimaxi.com and https://www.minimax.cn /v1/token_plan/remains
+  (CN), or https://api.minimax.io and https://www.minimax.io (global): M Plan
+  subscription keys are region-bound
 - https://api.github.com/copilot_internal/user
 
 All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
@@ -165,6 +166,8 @@ ALLOWED_HOSTS = {
     "api.z.ai": {"plugin"},
     "api.minimaxi.com": {"plugin"},
     "api.minimax.io": {"plugin"},
+    "www.minimax.cn": {"plugin"},
+    "www.minimax.io": {"plugin"},
     "api.github.com": {"plugin"},
     "portal.nousresearch.com": {"helper"},
 }
@@ -603,7 +606,14 @@ def fetch_openrouter():
         raise _Skip("openrouter")
     hdr = {"Authorization": "Bearer " + key, "Accept": "application/json"}
     k = _http_json("https://openrouter.ai/api/v1/key", hdr).get("data") or {}
-    c = _http_json("https://openrouter.ai/api/v1/credits", hdr).get("data") or {}
+    denied = False
+    try:
+        c = _http_json("https://openrouter.ai/api/v1/credits", hdr).get("data") or {}
+    except PermissionError:
+        # /credits needs a management key; a normal key gets 403. Keep the key
+        # cap from /key and drop only the balance row.
+        denied = True
+        c = {}
     money = []
     total, used = c.get("total_credits"), c.get("total_usage")
     if isinstance(total, (int, float)) and isinstance(used, (int, float)):
@@ -626,6 +636,8 @@ def fetch_openrouter():
             }
         )
     if not money:
+        if denied:
+            raise _ProviderError("OpenRouter: balance needs a management key", secret=key)
         # No balance and no cap: an ok card with no rows would show a
         # fabricated 0%.
         raise _Skip("openrouter")
@@ -1060,7 +1072,7 @@ def fetch_deepseek():
 
 
 def _kimi_balance(payload):
-    """Available CNY from a Moonshot balance body.
+    """Available balance from a Moonshot balance body.
 
     Live shape: the number sits under data.available_balance; the legacy
     flat "available" key is kept as a fallback. Returns None when the body
@@ -1084,6 +1096,7 @@ _MOONSHOT_BALANCE_URLS = (
 
 
 def _fetch_moonshot_balance(headers):
+    """The available balance and the host that answered, as ``(amount, url)``."""
     last_error = None
     for url in _prefer("moonshot", _MOONSHOT_BALANCE_URLS):
         try:
@@ -1107,8 +1120,40 @@ def _fetch_moonshot_balance(headers):
                 secret=str(headers.get("Authorization") or "").removeprefix("Bearer "),
             )
         _won("moonshot", url)
-        return available
+        return available, url
     raise last_error if last_error is not None else RuntimeError("Moonshot balance unreachable")
+
+
+def _reset_text(*values):
+    """The first string reset stamp, else None (a non-string is not a stamp)."""
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+_KIMI_UNIT_SECONDS = {
+    "TIME_UNIT_MINUTE": 60,
+    "MINUTE": 60,
+    "TIME_UNIT_HOUR": 3600,
+    "HOUR": 3600,
+    "TIME_UNIT_DAY": 86400,
+    "DAY": 86400,
+}
+
+
+def _kimi_label(entry, detail):
+    """A label from a dict window's duration, else the detail or entry name."""
+    window = entry.get("window")
+    if isinstance(window, dict):
+        duration = _num(window.get("duration"))
+        factor = _KIMI_UNIT_SECONDS.get(str(window.get("timeUnit") or "").strip().upper())
+        if duration is not None and factor is not None:
+            label = _codex_label({"limit_window_seconds": duration * factor}, None)
+            if label:
+                return label
+        return str(detail.get("name") or entry.get("name") or "Limit")
+    return str(window or entry.get("name") or "Limit")
 
 
 def fetch_kimi():
@@ -1130,40 +1175,66 @@ def fetch_kimi():
         payload = None
     if isinstance(payload, dict):
         windows = []
-        usage = payload.get("usage") or {}
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
         used, limit = _num(usage.get("used")), _num(usage.get("limit"))
+        if used is None and limit is not None:
+            remaining = _num(usage.get("remaining"))
+            if remaining is not None:
+                used = limit - remaining
         if used is not None and limit:
             windows.append(
                 {
                     "label": "Weekly",
                     "percent": round(max(0.0, min(100.0, used / limit * 100.0)), 1),
-                    "resets_at": usage.get("resetTime")
-                    if isinstance(usage.get("resetTime"), str)
-                    else None,
+                    "resets_at": _reset_text(usage.get("resetTime"), usage.get("reset_at")),
                     "status": "ok",
                 }
             )
         for entry in payload.get("limits") or []:
             if not isinstance(entry, dict):
                 continue
+            detail = entry.get("detail")
+            if not isinstance(detail, dict):
+                detail = {}
             percent = _num(entry.get("percentage"))
             if percent is None:
-                continue
+                used, limit = _num(detail.get("used")), _num(detail.get("limit"))
+                if used is None and limit is not None:
+                    remaining = _num(detail.get("remaining"))
+                    if remaining is not None:
+                        used = limit - remaining
+                if used is None or not limit:
+                    continue
+                percent = used / limit * 100.0
             windows.append(
                 {
-                    "label": str(entry.get("window") or entry.get("name") or "Limit"),
+                    "label": _kimi_label(entry, detail),
                     "percent": round(max(0.0, min(100.0, percent)), 1),
-                    "resets_at": entry.get("resetTime") or entry.get("reset_time"),
+                    "resets_at": _reset_text(
+                        entry.get("resetTime"),
+                        entry.get("reset_time"),
+                        detail.get("resetTime"),
+                        detail.get("reset_at"),
+                    ),
                     "status": "ok",
                 }
             )
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
-    available = _fetch_moonshot_balance(headers)
+    available, balance_url = _fetch_moonshot_balance(headers)
+    host = balance_url.split("/")[2]
     return {
         "id": "kimi-coding",
         "status": "ok",
-        "money": [{"label": "Balance", "left": round(available, 2), "cur": "CNY"}],
+        "money": [
+            {
+                "label": "Balance",
+                "left": round(available, 2),
+                "cur": "USD" if host.endswith("moonshot.ai") else "CNY",
+            }
+        ],
     }
 
 
@@ -1231,8 +1302,14 @@ def fetch_zai():
     return {"id": "zai", "status": "ok", "windows": windows}
 
 
-MINIMAX_CN_URLS = ("https://api.minimaxi.com/v1/token_plan/remains",)
-MINIMAX_GLOBAL_URLS = ("https://api.minimax.io/v1/token_plan/remains",)
+MINIMAX_CN_URLS = (
+    "https://api.minimaxi.com/v1/token_plan/remains",
+    "https://www.minimax.cn/v1/token_plan/remains",
+)
+MINIMAX_GLOBAL_URLS = (
+    "https://api.minimax.io/v1/token_plan/remains",
+    "https://www.minimax.io/v1/token_plan/remains",
+)
 
 
 def _minimax_credentials():

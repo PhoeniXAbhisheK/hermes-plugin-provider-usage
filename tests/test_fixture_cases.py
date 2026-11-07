@@ -66,6 +66,7 @@ CASES = {
     ],
     "kimi-coding": [
         ("ok.json", "http", "ok"),
+        ("ok_after_reset.json", "http", "ok"),
         ("skip_no_key.json", "no_key", "skip"),
     ],
     "minimax": [
@@ -248,6 +249,18 @@ class FixtureCaseTest(unittest.TestCase):
                         if pid == "deepseek" and names[0] == "ok_multi_currency.json":
                             curs = sorted(row["cur"] for row in payload["money"])
                             self.assertEqual(curs, ["CNY", "USD"])
+                        if pid == "kimi-coding":
+                            rows = [
+                                (row["label"], row["percent"], row["resets_at"])
+                                for row in payload["windows"]
+                            ]
+                            self.assertEqual(
+                                rows,
+                                [
+                                    ("Weekly", 26.0, "2026-02-11T17:32:50.757941Z"),
+                                    ("5h", 15.0, "2026-02-07T12:32:50.757941Z"),
+                                ],
+                            )
 
     def test_manifest_covers_disk(self):
         for pid, cases in CASES.items():

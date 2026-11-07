@@ -206,7 +206,7 @@ class BudgetTest(Base):
 
         def fake_http(url, headers, **kwargs):
             calls.append(url)
-            if url.startswith("https://api.minimaxi.com"):
+            if url.startswith(("https://api.minimaxi.com", "https://www.minimax.cn")):
                 raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
             return {"model_remains": [{"current_interval_remaining_percent": 50}]}
 
