@@ -103,6 +103,16 @@
           "type": "string",
           "enum": ["window"]
         },
+        "history": {
+          "type": "array",
+          "description": "[epoch seconds, value] pairs, oldest first: percent used per 10 minute bucket, at most 36 points over 6 hours. In memory only, so it resets when Hermes restarts.",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
         "used_pct": {
           "type": "number",
           "minimum": 0,
@@ -154,6 +164,16 @@
         "kind": {
           "type": "string",
           "enum": ["money"]
+        },
+        "history": {
+          "type": "array",
+          "description": "[epoch seconds, value] pairs, oldest first: amount used per 10 minute bucket, at most 36 points over 6 hours. In memory only, so it resets when Hermes restarts.",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
         },
         "used_pct": {
           "type": ["number", "null"],
