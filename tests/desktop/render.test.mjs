@@ -95,14 +95,14 @@ test('UsagePanel shows Unpin all when every provider is pinned', async () => {
   assert.equal(view.joined.includes('Pin all'), false)
 })
 
-test('UsagePanel renders an open window row with its tabs and alert note', async () => {
+test('UsagePanel renders an open window row with its compact tabs and alert button', async () => {
   const view = await renderComponent('UsagePanel', {
     data: payload,
     state: { 1: 'anthropic' }
   })
   for (const label of ['5h', 'Weekly', 'Opus']) assert.match(view.joined, new RegExp(label))
   assert.match(view.joined, /Alert at/)
-  assert.match(view.joined, /Notifications appear while Hermes is in the background/)
+  assert.equal(view.joined.includes('Notifications appear while Hermes is in the background'), false)
   assert.match(view.joined, /in status bar/)
 })
 

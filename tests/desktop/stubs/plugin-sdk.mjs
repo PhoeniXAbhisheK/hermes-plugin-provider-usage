@@ -33,26 +33,10 @@ export const host = {
   request: () => Promise.reject(new Error('host.request is not available in the desktop test stubs'))
 }
 
-export function SegmentedControl(props) {
-  return { type: 'SegmentedControl', props }
-}
-
 export function ScrollArea(props) {
   return { type: 'ScrollArea', props }
 }
 
 export function Tip(props) {
   return { type: 'Tip', props }
-}
-
-export function Tabs(props) {
-  return { type: 'Tabs', props }
-}
-
-export function TabsList(props) {
-  return { type: 'TabsList', props }
-}
-
-export function TabsTrigger(props) {
-  return { type: 'TabsTrigger', props }
 }
