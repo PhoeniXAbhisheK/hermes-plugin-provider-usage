@@ -1036,8 +1036,8 @@ export function tipBody(lines, stamp) {
               className: line.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
               style: { width: 4, height: 10, borderRadius: 2, display: 'inline-block', flex: 'none' }
             }),
-            jsx('span', { style: { fontWeight: 500, color: 'var(--ui-text-primary)', whiteSpace: 'nowrap' }, children: line.name }),
-            jsx('span', { style: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: line.label }),
+            jsx('span', { style: { fontWeight: 500, whiteSpace: 'nowrap' }, children: line.name }),
+            jsx('span', { style: { opacity: 0.6, whiteSpace: 'nowrap' }, children: line.label }),
             jsx('span', {
               className: line.attention ? 'text-amber-600' : undefined,
               style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap' },
@@ -1054,11 +1054,11 @@ export function tipBody(lines, stamp) {
       jsx('div', {
         key: 'foot',
         style: {
-          borderTop: '1px solid var(--ui-stroke-tertiary)',
+          borderTop: '1px solid color-mix(in srgb, currentColor 25%, transparent)',
           paddingTop: 6,
           marginTop: 2,
           fontSize: 10.5,
-          color: 'var(--ui-text-tertiary)'
+          opacity: 0.6
         },
         children: 'Click to open · updated ' + (stamp || '')
       })
