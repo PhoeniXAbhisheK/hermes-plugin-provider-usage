@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { loadPlugin } from './load-plugin.mjs'
 
 const NOW = 1_700_000_000_000
+const WARN_COLOR = 'var(--color-amber-600, oklch(0.666 0.179 58.318))'
+const ACCENT_COLOR = 'var(--ui-accent)'
 
 const isoAt = ms => new Date(ms).toISOString()
 
@@ -786,7 +788,7 @@ test('barModel follows the session provider when nothing is pinned', async () =>
   assert.deepEqual(followed.entries.map(e => e.id), ['anthropic'])
   assert.equal(barContent(followed).props.children.length, 1)
   assert.equal(nodeText(barContent(followed)), 'claude 95%')
-  const amber = findNodes(barContent(followed), n => n.props && n.props.className === 'text-amber-600')
+  const amber = findNodes(barContent(followed), n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
   assert.equal(amber.length, 1)
   assert.equal(nodeText(amber[0]), 'claude 95%')
 })
@@ -809,7 +811,7 @@ test('barContent renders two pins in full text with the attention entry amber', 
   assert.equal(model.following, false)
   assert.equal(model.layout.mode, 'full')
   assert.equal(nodeText(barContent(model)), 'claude 95% · zai 20%')
-  const amber = findNodes(barContent(model), n => n.props && n.props.className === 'text-amber-600')
+  const amber = findNodes(barContent(model), n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
   assert.equal(amber.length, 1)
   assert.equal(nodeText(amber[0]), 'claude 95%')
 })
@@ -824,8 +826,8 @@ test('barContent renders meters and the pin count for seven pins', async () => {
   assert.equal(model.layout.mode, 'meters')
   const content = barContent(model)
   assert.equal(nodeText(content), 'p6 60%7 pinned')
-  assert.equal(findNodes(content, n => n.props && n.props.className === 'bg-amber-600').length, 1)
-  assert.equal(findNodes(content, n => n.props && n.props.className === 'bg-(--ui-accent)').length, 6)
+  assert.equal(findNodes(content, n => n.props && n.props.style && n.props.style.background === WARN_COLOR).length, 1)
+  assert.equal(findNodes(content, n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR).length, 6)
   assert.equal(model.layout.pinned, '7 pinned')
 })
 
@@ -1009,7 +1011,7 @@ test('tipBody lists one line per entry and the footer', async () => {
   assert.ok(nodeText(node).includes('Zai'))
   assert.ok(nodeText(node).includes('Weekly'))
   assert.ok(nodeText(node).includes('Click to open · updated 09:41'))
-  const amber = findNodes(node, n => n.props && n.props.className === 'text-amber-600')
+  const amber = findNodes(node, n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
   assert.equal(amber.length, 1)
   assert.equal(nodeText(amber[0]), '95%')
 })
@@ -1065,9 +1067,9 @@ test('providerRowElement keys the pin toggle and the bar quota dot', async () =>
   const pinned = findNodes(on, n => n.type === 'button' && n.props['aria-label'])
   assert.equal(pinned[0].props['aria-pressed'], true)
   assert.equal(pinned[0].props['aria-label'], 'Unpin Zai from status bar')
-  assert.equal(findNodes(off, n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%').length, 1)
+  assert.equal(findNodes(off, n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR && n.props.style.borderRadius === '50%').length, 1)
   const noDot = providerRowElement(p, { mode: 'used', pins: [], barIds: [], expanded: false })
-  assert.equal(findNodes(noDot, n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%').length, 0)
+  assert.equal(findNodes(noDot, n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR && n.props.style.borderRadius === '50%').length, 0)
 })
 
 test('providerRowElement shows +N more and the open row renders its panel', async () => {
@@ -1217,7 +1219,7 @@ test('a warned quota value is amber and a quiet one is not', async () => {
   )
   const loudValue = findNodes(loud, n => n.props && nodeText(n) === '20%' && n.props.style && n.props.style.fontSize === 11)
   assert.equal(loudValue.length, 1)
-  assert.equal(loudValue[0].props.className, 'text-amber-600')
+  assert.equal(loudValue[0].props.style.color, WARN_COLOR)
   const quiet = providerRowElement(
     {
       id: 'zai',
@@ -1230,7 +1232,7 @@ test('a warned quota value is amber and a quiet one is not', async () => {
   )
   const quietValue = findNodes(quiet, n => n.props && nodeText(n) === '20%' && n.props.style && n.props.style.fontSize === 11)
   assert.equal(quietValue.length, 1)
-  assert.equal(quietValue[0].props.className, undefined)
+  assert.equal(quietValue[0].props.style.color, undefined)
 })
 
 test('a money row with no used_pct draws no track and no fill', async () => {
@@ -1290,7 +1292,7 @@ test('group headings carry their own padding', async () => {
   const { groupHeadingElement } = await loadPlugin()
   const attention = groupHeadingElement('Needs attention')
   assert.equal(attention.props.style.padding, '8px 14px 2px')
-  assert.equal(attention.props.className, 'text-amber-600')
+  assert.equal(attention.props.style.color, WARN_COLOR)
   const plain = groupHeadingElement('Providers')
   assert.equal(plain.props.style.padding, '8px 14px 2px')
   assert.equal(plain.props.style.color, 'var(--ui-text-tertiary)')
@@ -1301,6 +1303,12 @@ test('desktop/plugin.js has no hex or rgb colours', async () => {
   const source = await readFile(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(source), false)
   assert.equal(/rgba?\(/.test(source), false)
+})
+
+test('desktop/plugin.js contains no className', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  assert.equal(source.includes('className'), false)
 })
 
 test('desktop/plugin.js no longer ships an eye icon', async () => {
@@ -1462,9 +1470,27 @@ test('expandedPanel opens on the bar quota and lists every quota tab', async () 
   assert.equal(nodeText(panel).includes('Shown in status bar'), true)
   const plus = findNodes(
     panel,
-    n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%'
+    n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR && n.props.style.borderRadius === '50%'
   )
   assert.equal(plus.length, 1)
+})
+
+test('statsFor prints pace below one tenth with two decimals', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const paceAt = seconds =>
+    statsFor(
+      {
+        kind: 'window',
+        used_pct: 0,
+        eta_seconds: 3600,
+        resets_at: new Date(now + seconds * 1000).toISOString()
+      },
+      now
+    )[2].value
+  assert.equal(paceAt(180), '0.05×')
+  assert.equal(paceAt(1512), '0.4×')
+  assert.equal(paceAt(7.2), '0×')
 })
 
 test('statsElement draws three bordered cards in a three-column grid', async () => {
@@ -1614,7 +1640,7 @@ test('the tooltip and the dot follow the chosen bar quota', async () => {
   const grid = row.props.children[1]
   const cells = grid.props.children
   const dotOn = cells.filter(cell =>
-    findNodes(cell, n => n.props && n.props.className === 'bg-(--ui-accent)' && n.props.style && n.props.style.borderRadius === '50%').length
+    findNodes(cell, n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR && n.props.style.borderRadius === '50%').length
   )
   assert.equal(dotOn.length, 1)
   assert.ok(nodeText(dotOn[0]).includes('5h'))
@@ -2341,12 +2367,37 @@ test('a projected quota and the bar use the warn colour', async () => {
   const node = providerRowElement(p, { mode: 'used', pins: [], barIds: [], now: now })
   const value = findNodes(node, n => n.type === 'span' && nodeText(n) === '78%')
   assert.equal(value.length, 1)
-  assert.equal(value[0].props.className, 'text-amber-600')
-  assert.equal(findNodes(node, n => n.type === 'span' && n.props.className === 'bg-amber-600').length, 1)
+  assert.equal(value[0].props.style.color, WARN_COLOR)
+  assert.equal(findNodes(node, n => n.type === 'span' && n.props.style && n.props.style.background === WARN_COLOR).length, 1)
   const model = barModel([p], ['x'], null, 'used', null, {})
   assert.equal(model.entries[0].attention, true)
   const content = barContent(model)
-  assert.ok(findNodes(content, n => n.props && n.props.className === 'text-amber-600').length >= 1)
+  assert.ok(findNodes(content, n => n.props && n.props.style && n.props.style.color === WARN_COLOR).length >= 1)
+})
+
+test('warn and accent bars and tip swatches use inline colours', async () => {
+  const { providerRowElement, tipBody } = await loadPlugin()
+  const loud = providerRowElement(
+    { id: 'zai', name: 'Zai', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20, warn: true }] },
+    { mode: 'used', pins: [], barIds: [], expanded: false }
+  )
+  const quiet = providerRowElement(
+    { id: 'zai', name: 'Zai', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20, warn: false }] },
+    { mode: 'used', pins: [], barIds: [], expanded: false }
+  )
+  const bars = node =>
+    findNodes(node, n => n.props && n.props.style && n.props.style.height === '100%' && n.props.style.background)
+  assert.equal(bars(loud)[0].props.style.background, WARN_COLOR)
+  assert.equal(bars(quiet)[0].props.style.background, ACCENT_COLOR)
+  const tip = tipBody(
+    [
+      { name: 'Zai', label: '5h', value: '20%', attention: false },
+      { name: 'Claude', label: 'Weekly', value: '95%', attention: true }
+    ],
+    '09:41'
+  )
+  const swatches = findNodes(tip, n => n.props && n.props.style && n.props.style.width === 4 && n.props.style.height === 10)
+  assert.deepEqual(swatches.map(node => node.props.style.background), [ACCENT_COLOR, WARN_COLOR])
 })
 
 test('groupProviders puts attention first and keeps backend order', async () => {
@@ -2901,7 +2952,7 @@ test('miniSegments exposes group semantics, selection and onChange', async () =>
   assert.equal(tabButtons[0].props.role, 'tab')
   assert.equal(tabButtons[0].props['aria-selected'], true)
   assert.equal(tabButtons[0].props['aria-pressed'], undefined)
-  assert.equal(findNodes(tabs, n => n.props && n.props.className === 'bg-(--ui-accent)').length, 1)
+  assert.equal(findNodes(tabs, n => n.props && n.props.style && n.props.style.background === ACCENT_COLOR).length, 1)
 
   const interval = miniSegments({
     options: [{ id: '30000', label: '30s' }],
