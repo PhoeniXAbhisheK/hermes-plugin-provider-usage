@@ -774,11 +774,12 @@ export function chartModel(row, nowMs, alertAt) {
   }
 }
 
-export function statsFor(row, nowMs) {
+export function statsFor(row, nowMs, mode) {
   if (!row) return []
   const raw = row.used_pct
   const used = raw === null || raw === undefined ? null : Math.max(0, Math.min(100, Number(raw) || 0))
   const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const remaining = mode === 'remaining'
   if (row.kind === 'money') {
     const left = Number(row.left)
     const depletes = Number(row.depletes_in_seconds)
@@ -789,7 +790,9 @@ export function statsFor(row, nowMs) {
     return [
       { label: 'Spend', value: spend },
       { label: 'Lasts', value: isFinite(depletes) && depletes > 0 ? fmtEta(depletes) : '-' },
-      { label: 'Used', value: used === null ? '-' : pct(used) }
+      remaining
+        ? { label: 'Left', value: used === null ? '-' : pct(100 - used) }
+        : { label: 'Used', value: used === null ? '-' : pct(used) }
     ]
   }
   const measured = windowRate(row)
@@ -815,11 +818,21 @@ export function statsFor(row, nowMs) {
         : pace < 0.1
           ? pace.toFixed(2) + '×'
           : pace.toFixed(1) + '×'
+  let atResetText = '-'
+  if (atReset !== null) {
+    if (atReset >= 100) {
+      atResetText = 'runs out'
+    } else if (remaining) {
+      atResetText = '~' + Math.round(Math.max(0, 100 - atReset)) + '% left'
+    } else {
+      atResetText = '~' + Math.round(atReset) + '%'
+    }
+  }
   return [
     { label: 'Burn', value: burn },
     {
       label: 'At reset',
-      value: atReset === null ? '-' : atReset >= 100 ? 'runs out' : '~' + Math.round(atReset) + '%',
+      value: atResetText,
       warn: atReset !== null && atReset >= 100
     },
     { label: 'Pace', value: paceText }
@@ -1357,8 +1370,8 @@ function chartElement(p, row, model) {
   })
 }
 
-function statsElement(row, nowMs) {
-  const stats = statsFor(row, nowMs)
+function statsElement(row, nowMs, mode) {
+  const stats = statsFor(row, nowMs, mode)
   return jsx('div', {
     style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6 },
     children: stats.map(s =>
@@ -1444,7 +1457,7 @@ export function expandedPanel(p, ctx) {
         ]
       }),
       chartElement(p, tabRow, model),
-      statsElement(tabRow, ctx.now),
+      statsElement(tabRow, ctx.now, ctx.mode),
       jsxs('div', {
         key: 'controls',
         style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
