@@ -1401,6 +1401,58 @@ test('chartModel charts money through its total and refuses a null used_pct', as
   assert.equal(chartModel({ ...money, used_pct: null }, now), null)
 })
 
+test('statsFor in remaining mode reads At reset as the share left', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 0,
+    eta_seconds: 360000,
+    resets_at: new Date(now + 18000 * 1000).toISOString()
+  }
+  const stats = statsFor(row, now, 'remaining')
+  assert.equal(stats[1].value, '~95% left')
+  assert.equal(stats[1].warn, false)
+  assert.deepEqual(statsFor({ ...row, resets_at: new Date(now + 360000 * 1000).toISOString() }, now, 'remaining'), [
+    { label: 'Burn', value: '1.0%/h' },
+    { label: 'At reset', value: 'runs out', warn: true },
+    { label: 'Pace', value: '1.0×' }
+  ])
+  assert.deepEqual(statsFor({ kind: 'window', used_pct: 55 }, now, 'remaining'), [
+    { label: 'Burn', value: '-' },
+    { label: 'At reset', value: '-', warn: false },
+    { label: 'Pace', value: '-' }
+  ])
+})
+
+test('statsFor keeps Burn and Pace in both modes', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 40,
+    eta_seconds: 3600,
+    resets_at: new Date(now + 1800 * 1000).toISOString()
+  }
+  const usedStats = statsFor(row, now, 'used')
+  const remainingStats = statsFor(row, now, 'remaining')
+  assert.deepEqual(remainingStats[0], usedStats[0])
+  assert.deepEqual(remainingStats[2], usedStats[2])
+  assert.equal(usedStats[1].value, '~70%')
+  assert.equal(remainingStats[1].value, '~30% left')
+})
+
+test('statsFor in remaining mode relabels money Used as Left', async () => {
+  const { statsFor } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const money = statsFor({ kind: 'money', used_pct: 40 }, now, 'remaining')
+  assert.deepEqual(money[2], { label: 'Left', value: '60%' })
+  assert.deepEqual(statsFor({ kind: 'money', used_pct: null }, now, 'remaining')[2], {
+    label: 'Left',
+    value: '-'
+  })
+})
+
 test('statsFor reads a window and a money row', async () => {
   const { statsFor } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')

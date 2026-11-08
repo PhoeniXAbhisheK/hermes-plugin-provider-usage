@@ -150,6 +150,26 @@ test('UsagePanel follows the Remaining mode in its values', async () => {
   assert.match(view.joined, /Remaining/)
 })
 
+test('UsagePanel shows the At reset card as left in Remaining mode', async () => {
+  const now = Date.now()
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 0,
+    eta_seconds: 360000,
+    resets_at: new Date(now + 18000 * 1000).toISOString(),
+    warn: false
+  }
+  const view = await renderComponent('UsagePanel', {
+    data: { providers: [{ id: 'zai', name: 'Zai', status: 'ok', windows: [row] }] },
+    storage: { valueMode: 'remaining' },
+    state: { 1: 'zai' }
+  })
+  assert.match(view.joined, /At reset/)
+  assert.match(view.joined, /~95% left/)
+})
+
 test('BarDetail renders nothing to show, backend down and no pins', async () => {
   const empty = await renderComponent('BarDetail')
   assert.match(empty.joined, /…/)
