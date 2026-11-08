@@ -1021,6 +1021,28 @@ test('tipBody explains the empty bar', async () => {
   assert.ok(nodeText(node).includes('Click to open · updated 09:41'))
 })
 
+test('tipBody inherits the tooltip colours instead of panel tokens', async () => {
+  const { tipBody } = await loadPlugin()
+  const lines = [
+    { name: 'Zai', label: '5h', value: '20%', attention: false },
+    { name: 'Claude', label: 'Weekly', value: '95%', attention: true }
+  ]
+  const withLines = tipBody(lines, '09:41')
+  const empty = tipBody([], '09:41')
+  for (const node of [withLines, empty]) {
+    const styles = findNodes(node, n => n.props && n.props.style).map(n => JSON.stringify(n.props.style))
+    assert.ok(!styles.join(' ').includes('--ui-text-'))
+    assert.ok(!styles.join(' ').includes('--ui-stroke-'))
+  }
+  const label = findNodes(withLines, n => n.type === 'span' && nodeText(n) === '5h')
+  assert.equal(label.length, 1)
+  assert.equal(label[0].props.style.opacity, 0.6)
+  const foot = findNodes(withLines, n => n.type === 'div' && nodeText(n) === 'Click to open · updated 09:41')
+  assert.equal(foot.length, 1)
+  assert.equal(foot[0].props.style.opacity, 0.6)
+  assert.equal(foot[0].props.style.borderTop, '1px solid color-mix(in srgb, currentColor 25%, transparent)')
+})
+
 test('pinAllSet pins every provider, then unpins all', async () => {
   const { pinAllSet } = await loadPlugin()
   const ids = ['zai', 'anthropic']
