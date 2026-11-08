@@ -11,6 +11,18 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const payload = JSON.parse(await readFile(join(HERE, 'payload.json'), 'utf8'))
 const IDS = payload.providers.map(p => p.id)
 
+function findNodes(node, pred, out = []) {
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) {
+    node.forEach(child => findNodes(child, pred, out))
+    return out
+  }
+  if (typeof node !== 'object') return out
+  if (pred(node)) out.push(node)
+  if (node.props && node.props.children !== undefined) findNodes(node.props.children, pred, out)
+  return out
+}
+
 function invented(count) {
   return Array.from({ length: count }, (_, i) => ({
     id: 'p' + (i + 1),
@@ -73,6 +85,18 @@ test('UsagePanel renders the attention group with both providers', async () => {
   assert.match(view.joined, /OpenRouter/)
   assert.match(view.joined, /Sorted by risk/)
   assert.match(view.joined, /All 2/)
+})
+
+test('UsagePanel header stamp uses the UI font, not mono', async () => {
+  const view = await renderComponent('UsagePanel', { data: payload })
+  const stamp = findNodes(
+    view.rendered,
+    n => n.type === 'span' && typeof n.props.children === 'string' && n.props.children.startsWith('updated ')
+  )
+  assert.equal(stamp.length, 1)
+  assert.equal(stamp[0].props.style.fontFamily, undefined)
+  assert.equal(stamp[0].props.style.fontSize, 11)
+  assert.equal(stamp[0].props.style.color, 'var(--ui-text-secondary)')
 })
 
 test('UsagePanel shows Pin all with no pins and with some pins', async () => {

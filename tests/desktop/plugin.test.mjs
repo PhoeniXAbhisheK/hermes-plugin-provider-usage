@@ -1445,6 +1445,33 @@ test('expandedPanel opens on the bar quota and lists every quota tab', async () 
   assert.equal(plus.length, 1)
 })
 
+test('statsElement draws three bordered cards in a three-column grid', async () => {
+  const { expandedPanel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 40,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+  }
+  const panel = expandedPanel(
+    { id: 'zai', name: 'Zai', status: 'ok', windows: [row] },
+    { mode: 'used', choice: {}, barIds: [], tab: '5h', now: now }
+  )
+  const grids = findNodes(panel, n => n.type === 'div' && n.props.style && n.props.style.gridTemplateColumns === 'repeat(3, minmax(0, 1fr))')
+  assert.equal(grids.length, 1)
+  const cards = grids[0].props.children
+  assert.equal(cards.length, 3)
+  for (const card of cards) {
+    assert.equal(card.props.style.border, '1px solid var(--ui-stroke-tertiary)')
+    assert.equal(card.props.style.borderRadius, 6)
+    assert.equal(card.props.style.background, 'var(--ui-bg-secondary)')
+    assert.equal(card.props.style.padding, '6px 8px')
+  }
+})
+
 test('the show-in-bar button sets the tab quota and then reads Shown', async () => {
   const { expandedPanel } = await loadPlugin()
   const p = {
@@ -1487,20 +1514,47 @@ test('expandedPanel shows a money tab as left of total', async () => {
   assert.ok(nodeText(panel).includes('$7.00 of $10.00 left'))
 })
 
-test('the provider name button carries aria-expanded and the chevron', async () => {
+test('the provider name button carries aria-expanded and the chevron first', async () => {
   const { providerRowElement } = await loadPlugin()
   const p = { id: 'zai', name: 'Zai', tag: 'Pro', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20 }] }
   const closed = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: false })
   const closedButton = findNodes(closed, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)
   assert.equal(closedButton.length, 1)
   assert.equal(closedButton[0].props['aria-expanded'], false)
+  assert.equal(closedButton[0].props.children[0].type, 'svg')
+  assert.equal(closedButton[0].props.children[1], 'Zai')
   const closedChevron = findNodes(closedButton[0], n => n.type === 'svg' && n.props.style)
   assert.equal(closedChevron[0].props.style.transform, 'none')
+  assert.equal(closedChevron[0].props.style.color, 'var(--ui-text-tertiary)')
+  assert.equal(closedChevron[0].props.width, 11)
+  assert.equal(closedChevron[0].props.height, 11)
+  assert.equal(closedChevron[0].props.strokeWidth, 2.4)
   const open = providerRowElement(p, { mode: 'used', pins: [], barIds: [], open: true })
   const openButton = findNodes(open, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)
   assert.equal(openButton[0].props['aria-expanded'], true)
   const openChevron = findNodes(openButton[0], n => n.type === 'svg' && n.props.style)
   assert.equal(openChevron[0].props.style.transform, 'rotate(90deg)')
+})
+
+test('the pin control uses the two-path outline and fills only when pinned', async () => {
+  const { providerRowElement } = await loadPlugin()
+  const p = { id: 'zai', name: 'Zai', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20 }] }
+  const off = providerRowElement(p, { mode: 'used', pins: [], barIds: [] })
+  const offPin = findNodes(off, n => n.type === 'button' && n.props['aria-label'] === 'Pin Zai to status bar')
+  assert.equal(offPin.length, 1)
+  const offSvg = findNodes(offPin[0], n => n.type === 'svg')[0]
+  assert.equal(offSvg.props.fill, 'none')
+  const offPaths = findNodes(offSvg, n => n.type === 'path')
+  assert.equal(offPaths.length, 2)
+  assert.deepEqual(offPaths.map(path => path.props.d), [
+    'M12 17v5',
+    'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'
+  ])
+  const on = providerRowElement(p, { mode: 'used', pins: ['zai'], barIds: [] })
+  const onPin = findNodes(on, n => n.type === 'button' && n.props['aria-label'] === 'Unpin Zai from status bar')
+  const onSvg = findNodes(onPin[0], n => n.type === 'svg')[0]
+  assert.equal(onSvg.props.fill, 'currentColor')
+  assert.equal(findNodes(onSvg, n => n.type === 'path').length, 2)
 })
 
 test('nextOpenId keeps one provider open at a time', async () => {
@@ -2197,6 +2251,82 @@ test('attentionNote names the earliest eta by kind', async () => {
   assert.equal(attentionNote({ status: 'error', windows: [{ actionable_eta: 60 }] }), '')
 })
 
+test('projectedFull flags a fast window only after the ten percent guard', async () => {
+  const { projectedFull } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const base = {
+    kind: 'window',
+    used_pct: 78,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+  }
+  const seconds = projectedFull(base, now)
+  assert.ok(seconds > 0 && seconds < 3 * 3600)
+  assert.equal(
+    projectedFull({ ...base, resets_at: new Date(now + (5 * 3600 - 600) * 1000).toISOString() }, now),
+    null
+  )
+  assert.equal(
+    projectedFull({ ...base, used_pct: 10, resets_at: new Date(now + 3600 * 1000).toISOString() }, now),
+    null
+  )
+  assert.equal(projectedFull({ ...base, used_pct: null }, now), null)
+  assert.equal(projectedFull({ ...base, used_pct: 100 }, now), null)
+  assert.equal(projectedFull({ ...base, kind: 'money' }, now), null)
+  assert.equal(projectedFull({ ...base, eta_seconds: 3600 }, now), null)
+})
+
+test('providerAttention and attentionNote see a projected run-out', async () => {
+  const { providerAttention, attentionNote, groupProviders, chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const projected = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 78,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+  }
+  const p = { id: 'x', name: 'X', status: 'ok', windows: [projected] }
+  assert.equal(providerAttention(p, now), true)
+  assert.equal(attentionNote(p, now), 'full ~34m')
+  assert.equal(groupProviders([p], 'all', [], now)[0].title, 'Needs attention')
+  assert.equal(chartModel(projected, now).colour, 'amber')
+  const withActionable = {
+    status: 'ok',
+    windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 600 }]
+  }
+  assert.equal(attentionNote(withActionable, now), 'full ~10m')
+  const laterActionable = {
+    status: 'ok',
+    windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 3600 }]
+  }
+  assert.equal(attentionNote(laterActionable, now), 'full ~34m')
+})
+
+test('a projected quota and the bar use the warn colour', async () => {
+  const { providerRowElement, barModel, barContent } = await loadPlugin()
+  const now = Date.now()
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 78,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+  }
+  const p = { id: 'x', name: 'X', status: 'ok', windows: [row] }
+  const node = providerRowElement(p, { mode: 'used', pins: [], barIds: [], now: now })
+  const value = findNodes(node, n => n.type === 'span' && nodeText(n) === '78%')
+  assert.equal(value.length, 1)
+  assert.equal(value[0].props.className, 'text-amber-600')
+  assert.equal(findNodes(node, n => n.type === 'span' && n.props.className === 'bg-amber-600').length, 1)
+  const model = barModel([p], ['x'], null, 'used', null, {})
+  assert.equal(model.entries[0].attention, true)
+  const content = barContent(model)
+  assert.ok(findNodes(content, n => n.props && n.props.className === 'text-amber-600').length >= 1)
+})
+
 test('groupProviders puts attention first and keeps backend order', async () => {
   const { groupProviders } = await loadPlugin()
   const quiet = { id: 'a', status: 'ok', windows: [{ warn: false, actionable_eta: null }] }
@@ -2880,7 +3010,7 @@ test('derivedRate rejects money rows and a window with no elapsed time', async (
   assert.deepEqual(statsFor(noElapsed, now).map(s => s.value), ['-', '-', '-'])
 })
 
-test('chartModel clamps the average-pace line at zero', async () => {
+test('chartModel starts a no-history window at zero and ends at now', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
   const row = {
@@ -2895,11 +3025,12 @@ test('chartModel clamps the average-pace line at zero', async () => {
     now
   )
   assert.equal(model.series[0][0], 0)
-  assert.equal(model.averageStart, 0)
   assert.equal(model.series[0][1], zero.current[1])
+  assert.equal(model.series[1][0], 220)
+  assert.equal(model.series[1][1], model.current[1])
 })
 
-test('chartModel draws an average-pace history line for a window with fewer than two samples', async () => {
+test('chartModel draws a no-history window line and leaves money without one', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
   const row = {

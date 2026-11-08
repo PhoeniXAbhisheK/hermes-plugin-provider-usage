@@ -512,43 +512,54 @@ export function staleBackend(data) {
 
 const STALE_BACKEND_TEXT = 'Restart the Hermes dashboard to finish updating.'
 
-/* A provider needs attention when it is ok and one of its rows is warned or
- * already carries an actionable ETA. */
-export function providerAttention(p) {
+/* A provider needs attention when it is ok and one of its rows is warned,
+ * already carries an actionable ETA, or projects to full before its reset. */
+export function providerAttention(p, nowMs) {
   if (!p || p.status !== 'ok') return false
-  const rows = (p.windows || []).concat(p.money || [])
-  for (const row of rows) {
-    if (!row) continue
-    if (row.warn === true) return true
-    if (row.actionable_eta !== null && row.actionable_eta !== undefined) return true
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  for (const w of p.windows || []) {
+    if (!w) continue
+    if (w.warn === true) return true
+    if (w.actionable_eta !== null && w.actionable_eta !== undefined) return true
+    if (projectedFull(w, now) !== null) return true
+  }
+  for (const m of p.money || []) {
+    if (!m) continue
+    if (m.warn === true) return true
+    if (m.actionable_eta !== null && m.actionable_eta !== undefined) return true
   }
   return false
 }
 
-/* The earliest actionable ETA in the provider, worded for its kind. */
-export function attentionNote(p) {
+/* The earliest actionable ETA in the provider, worded for its kind. A window
+ * also considers its derived run-out projection when measured history is absent. */
+export function attentionNote(p, nowMs) {
   if (!p || p.status !== 'ok') return ''
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
   let best = null
-  const consider = (row, money) => {
-    const raw = row && row.actionable_eta
-    if (raw === null || raw === undefined) return
-    const eta = Number(raw)
-    if (!isFinite(eta) || eta <= 0) return
-    if (best === null || eta < best.eta) best = { eta: eta, money: money }
+  const consider = (eta, money) => {
+    const value = Number(eta)
+    if (!isFinite(value) || value <= 0) return
+    if (best === null || value < best.value) best = { value: value, money: money }
   }
-  for (const w of p.windows || []) consider(w, false)
-  for (const m of p.money || []) consider(m, true)
+  for (const w of p.windows || []) {
+    if (!w) continue
+    consider(w.actionable_eta, false)
+    consider(projectedFull(w, now), false)
+  }
+  for (const m of p.money || []) consider(m && m.actionable_eta, true)
   if (best === null) return ''
-  return (best.money ? 'runs out ' : 'full ') + fmtEta(best.eta)
+  return (best.money ? 'runs out ' : 'full ') + fmtEta(best.value)
 }
 
 /* Attention first, backend order kept inside each group. */
-export function groupProviders(providers, view, set) {
+export function groupProviders(providers, view, set, nowMs) {
   const rows = Array.isArray(providers) ? providers : []
   const pins = pinnedIds(set, rows.map(p => p.id))
   const kept = view === 'pinned' ? rows.filter(p => pins.indexOf(p.id) !== -1) : rows.slice()
-  const attention = kept.filter(providerAttention)
-  const rest = kept.filter(p => !providerAttention(p))
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const attention = kept.filter(p => providerAttention(p, now))
+  const rest = kept.filter(p => !providerAttention(p, now))
   const groups = []
   if (attention.length) groups.push({ title: 'Needs attention', rows: attention })
   if (rest.length) groups.push({ title: attention.length ? 'Everything else' : 'Providers', rows: rest })
@@ -663,6 +674,26 @@ export function derivedRate(row, nowMs) {
   return { duration: duration, elapsed: elapsed, rate: used / elapsed }
 }
 
+/* Seconds until a window reaches 100% at its derived pace, when that happens
+ * before the reset. Measured rows defer to the backend's actionable_eta; the
+ * first tenth of a window is too noisy to project. */
+export function projectedFull(row, nowMs) {
+  if (!row || row.kind === 'money') return null
+  const raw = row.used_pct
+  if (raw === null || raw === undefined) return null
+  const used = Number(raw)
+  if (!isFinite(used) || used >= 100) return null
+  if (windowRate(row) !== null) return null
+  const derived = derivedRate(row, nowMs)
+  if (!derived || derived.elapsed < derived.duration * 0.1) return null
+  if (!(derived.rate > 0)) return null
+  const seconds = (100 - used) / derived.rate
+  if (!(seconds > 0)) return null
+  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const untilReset = (Date.parse(row.resets_at) - now) / 1000
+  return seconds < untilReset ? seconds : null
+}
+
 /* History is [epoch seconds, value]; windows store the used percent, money
  * rows store the used amount in the row's currency (see _row_history in
  * dashboard/plugin_api.py). Money values are divided by the row total so the
@@ -690,14 +721,13 @@ export function chartModel(row, nowMs, alertAt) {
   }
   points.sort((a, b) => a[0] - b[0])
   const derived = isMoney ? null : derivedRate(row, now)
-  const averageStart = !isMoney && derived ? Math.max(0, used - derived.rate * CHART_HISTORY_S) : null
+  const average = points.length < 2 && derived !== null
   const series =
     points.length >= 2
       ? points
-      : averageStart !== null
-        ? [[0, chartY(averageStart)], [CHART_HISTORY_W, chartY(used)]]
+      : average
+        ? [[0, chartY(0)], [CHART_HISTORY_W, chartY(used)]]
         : [[CHART_HISTORY_W, chartY(used)]]
-  const average = points.length < 2 && averageStart !== null
   const measured = isMoney ? null : windowRate(row)
   const rate = isMoney ? null : average ? derived.rate : measured !== null ? measured : derived ? derived.rate : null
   let projection = null
@@ -727,7 +757,8 @@ export function chartModel(row, nowMs, alertAt) {
   }
   const amber =
     row.warn === true ||
-    (row.actionable_eta !== null && row.actionable_eta !== undefined)
+    (row.actionable_eta !== null && row.actionable_eta !== undefined) ||
+    projectedFull(row, now) !== null
   return {
     series: series,
     current: [CHART_HISTORY_W, chartY(used)],
@@ -735,7 +766,6 @@ export function chartModel(row, nowMs, alertAt) {
     valueAtReset: valueAtReset === null ? null : Math.round(valueAtReset),
     rate: rate,
     average: average,
-    averageStart: averageStart,
     overflow: overflow,
     alert: threshold === null ? null : { value: threshold, y: chartY(threshold) },
     colour: amber ? 'amber' : 'accent'
@@ -1115,7 +1145,10 @@ function clockOf(iso) {
   return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-const PIN_PATH = 'M9 4h6M12 4v6m0 0 3 3v1H9v-1l3-3m-3 4h6l-1 6H10l-1-6'
+const PIN_PATHS = [
+  'M12 17v5',
+  'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'
+]
 
 /* Stale providers say why their numbers are old, in the row header. */
 export function staleText(p) {
@@ -1143,7 +1176,7 @@ function pinButton(p, pinned, onPin) {
     children: jsx('svg', {
       viewBox: '0 0 24 24', width: 12, height: 12, fill: pinned ? 'currentColor' : 'none',
       stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-      children: jsx('path', { key: 'pin', d: PIN_PATH })
+      children: PIN_PATHS.map((d, i) => jsx('path', { key: 'pin' + i, d: d }))
     })
   })
 }
@@ -1151,6 +1184,8 @@ function pinButton(p, pinned, onPin) {
 function quotaCell(row, ctx) {
   const view = rowView(row, ctx.mode)
   const isMoney = row.kind === 'money'
+  const projected = projectedFull(row, ctx.now)
+  const warn = row.warn === true || projected !== null
   /* Reset text only when the provider shows one quota: at 2 or 3 columns the
    * row has no room for it, so the window keeps label and value only. */
   const extra = isMoney
@@ -1187,7 +1222,7 @@ function quotaCell(row, ctx) {
             children: row.label
           }),
           jsx('span', {
-            className: row.warn === true ? 'text-amber-600' : undefined,
+            className: warn ? 'text-amber-600' : undefined,
             style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none' },
             children: view.value
           }),
@@ -1208,7 +1243,7 @@ function quotaCell(row, ctx) {
         },
         children: hasWidth
           ? jsx('span', {
-              className: row.warn === true ? 'bg-amber-600' : 'bg-(--ui-accent)',
+              className: warn ? 'bg-amber-600' : 'bg-(--ui-accent)',
               style: {
                 display: 'block',
                 height: '100%',
@@ -1311,19 +1346,27 @@ function chartElement(p, row, model) {
   })
 }
 
-function statsElement(row) {
-  const stats = statsFor(row)
+function statsElement(row, nowMs) {
+  const stats = statsFor(row, nowMs)
   return jsx('div', {
-    style: { display: 'flex', gap: 8 },
+    style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6 },
     children: stats.map(s =>
       jsxs('div', {
         key: s.label,
-        style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 1 },
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+          padding: '6px 8px',
+          border: '1px solid var(--ui-stroke-tertiary)',
+          borderRadius: 6,
+          background: 'var(--ui-bg-secondary)'
+        },
         children: [
-          jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)' }, children: s.label }),
+          jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-secondary)' }, children: s.label }),
           jsx('span', {
             className: s.warn ? 'text-amber-600' : undefined,
-            style: { fontSize: 12, ...MONO },
+            style: { fontSize: 12, fontWeight: 500, ...MONO },
             children: s.value
           })
         ]
@@ -1391,7 +1434,7 @@ export function expandedPanel(p, ctx) {
         ]
       }),
       chartElement(p, tabRow, model),
-      statsElement(tabRow),
+      statsElement(tabRow, ctx.now),
       jsxs('div', {
         key: 'controls',
         style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
@@ -1471,7 +1514,7 @@ export function providerRowElement(p, ctx) {
   const moneyRows = Array.isArray(p.money) ? p.money : []
   const all = windows.concat(moneyRows)
   const toggle = pinButton(p, pinned, ctx.onPin)
-  const note = attentionNote(p)
+  const note = attentionNote(p, ctx.now)
   const stale = staleText(p)
   const open = ctx.open === true
   const quotas = visibleQuotas(p, barKey)
@@ -1497,7 +1540,7 @@ export function providerRowElement(p, ctx) {
         style: {
           display: 'inline-flex',
           alignItems: 'center',
-          gap: 4,
+          gap: 5,
           padding: 0,
           border: 'none',
           background: 'transparent',
@@ -1508,19 +1551,19 @@ export function providerRowElement(p, ctx) {
           whiteSpace: 'nowrap'
         },
         children: [
-          p.name,
           jsx('svg', {
             viewBox: '0 0 24 24',
-            width: 9,
-            height: 9,
+            width: 11,
+            height: 11,
             fill: 'none',
             stroke: 'currentColor',
-            strokeWidth: 2,
+            strokeWidth: 2.4,
             strokeLinecap: 'round',
             strokeLinejoin: 'round',
-            style: { transform: open ? 'rotate(90deg)' : 'none' },
+            style: { color: 'var(--ui-text-tertiary)', transform: open ? 'rotate(90deg)' : 'none' },
             children: jsx('path', { d: 'm9 6 6 6-6 6' })
-          })
+          }),
+          p.name
         ]
       }),
       jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap' }, children: p.tag || '' }),
@@ -1585,7 +1628,7 @@ export function providerRowElement(p, ctx) {
       header,
       jsx('div', {
         style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 12, paddingLeft: 16, paddingRight: 30 },
-        children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols }))
+        children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols, now: ctx.now }))
       }),
       open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar, alertAt: ctx.alertAt, alertOpen: ctx.alertOpen, onAlertToggle: ctx.onAlertToggle, onAlertClose: ctx.onAlertClose, onAlert: ctx.onAlert, now: ctx.now }) : null
     ]
@@ -1656,8 +1699,9 @@ function UsagePanel() {
   const ids = provs.map(x => x.id)
   const pinnedCount = pinnedIds(pins, ids).length
   const everyPinned = allPinned(pins, ids)
+  const now = Date.now()
   const barIds = barModel(provs, pins, sessionProvider, mode, null, choice).entries.map(e => e.id)
-  const groups = groupProviders(provs, view, pins)
+  const groups = groupProviders(provs, view, pins, now)
   const stale = staleBackend(data)
 
   const body = []
@@ -1694,7 +1738,8 @@ function UsagePanel() {
             onAlertToggle: () => setAlertFor(cur => (cur === p.id ? null : p.id)),
             onAlertClose: () => setAlertFor(null),
             onAlert: (rowKey, value) => setAlert(p.id, rowKey, value),
-            onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id))
+            onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id)),
+            now: now
           }))
         ]
       }))
@@ -1713,7 +1758,7 @@ function UsagePanel() {
           jsxs('span', {
             style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ui-text-secondary)' },
             children: [
-              jsx('span', { style: { fontSize: 11, color: 'var(--ui-text-secondary)', ...MONO }, children: stamp }),
+              jsx('span', { style: { fontSize: 11, color: 'var(--ui-text-secondary)' }, children: stamp }),
               jsx('button', {
                 type: 'button',
                 onClick: refresh,
