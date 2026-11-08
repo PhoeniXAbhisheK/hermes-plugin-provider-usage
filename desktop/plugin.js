@@ -511,6 +511,8 @@ export function staleBackend(data) {
 }
 
 const STALE_BACKEND_TEXT = 'Restart the Hermes dashboard to finish updating.'
+const WARN_COLOR = 'var(--color-amber-600, oklch(0.666 0.179 58.318))'
+const ACCENT_COLOR = 'var(--ui-accent)'
 
 /* A provider needs attention when it is ok and one of its rows is warned,
  * already carries an actionable ETA, or projects to full before its reset. */
@@ -804,6 +806,15 @@ export function statsFor(row, nowMs) {
   }
   const perDay = Number(row.duration_seconds) > 7 * 86400
   const burn = rate === null ? '-' : (rate * (perDay ? 86400 : 3600)).toFixed(1) + (perDay ? '%/d' : '%/h')
+  const pace = atReset === null ? null : atReset / 100
+  const paceText =
+    pace === null
+      ? '-'
+      : Number(pace.toFixed(2)) === 0
+        ? '0×'
+        : pace < 0.1
+          ? pace.toFixed(2) + '×'
+          : pace.toFixed(1) + '×'
   return [
     { label: 'Burn', value: burn },
     {
@@ -811,7 +822,7 @@ export function statsFor(row, nowMs) {
       value: atReset === null ? '-' : atReset >= 100 ? 'runs out' : '~' + Math.round(atReset) + '%',
       warn: atReset !== null && atReset >= 100
     },
-    { label: 'Pace', value: atReset === null ? '-' : (atReset / 100).toFixed(1) + '×' }
+    { label: 'Pace', value: paceText }
   ]
 }
 
@@ -970,19 +981,18 @@ export function barContent(model) {
       children: [
         ...ordered.map((e, i) => jsx('span', {
           key: e.id,
-          className: e.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
           style: {
             width: 4,
             height: Math.max(2, Math.round((layout.meters[i] ? layout.meters[i].height : 30) * 0.12)),
             borderRadius: 2,
             display: 'inline-block',
-            flex: 'none'
+            flex: 'none',
+            background: e.attention ? WARN_COLOR : ACCENT_COLOR
           }
         })),
         jsx('span', {
           key: 'summary',
-          className: urgent ? 'text-amber-600' : undefined,
-          style: { marginLeft: 2 },
+          style: { marginLeft: 2, color: urgent ? WARN_COLOR : undefined },
           children: layout.summary
         }),
         layout.pinned
@@ -996,7 +1006,7 @@ export function barContent(model) {
     if (i) parts.push(' · ')
     parts.push(jsx('span', {
       key: e.id,
-      className: e.attention ? 'text-amber-600' : undefined,
+      style: { color: e.attention ? WARN_COLOR : undefined },
       children: e.code + ' ' + barValue(e, layout.mode === 'bare')
     }))
   })
@@ -1033,14 +1043,19 @@ export function tipBody(lines, stamp) {
           style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
           children: [
             jsx('span', {
-              className: line.attention ? 'bg-amber-600' : 'bg-(--ui-accent)',
-              style: { width: 4, height: 10, borderRadius: 2, display: 'inline-block', flex: 'none' }
+              style: {
+                width: 4,
+                height: 10,
+                borderRadius: 2,
+                display: 'inline-block',
+                flex: 'none',
+                background: line.attention ? WARN_COLOR : ACCENT_COLOR
+              }
             }),
             jsx('span', { style: { fontWeight: 500, whiteSpace: 'nowrap' }, children: line.name }),
             jsx('span', { style: { opacity: 0.6, whiteSpace: 'nowrap' }, children: line.label }),
             jsx('span', {
-              className: line.attention ? 'text-amber-600' : undefined,
-              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap' },
+              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap', color: line.attention ? WARN_COLOR : undefined },
               children: line.value
             })
           ]
@@ -1128,8 +1143,7 @@ export function miniSegments({ options, value, onChange, label, tabs = false, in
           option.dot
             ? jsx('span', {
                 key: 'dot',
-                className: 'bg-(--ui-accent)',
-                style: { width: 5, height: 5, borderRadius: '50%', flex: 'none' }
+                style: { width: 5, height: 5, borderRadius: '50%', flex: 'none', background: ACCENT_COLOR }
               })
             : null,
           option.label
@@ -1207,14 +1221,13 @@ function quotaCell(row, ctx) {
         style: { display: 'flex', alignItems: 'baseline', gap: 4, minWidth: 0 },
         children: [
           jsx('span', {
-            className: dot ? 'bg-(--ui-accent)' : undefined,
             style: {
               width: 5,
               height: 5,
               borderRadius: '50%',
               flex: 'none',
               alignSelf: 'center',
-              background: dot ? undefined : 'transparent'
+              background: dot ? ACCENT_COLOR : 'transparent'
             }
           }),
           jsx('span', {
@@ -1222,8 +1235,7 @@ function quotaCell(row, ctx) {
             children: row.label
           }),
           jsx('span', {
-            className: warn ? 'text-amber-600' : undefined,
-            style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none' },
+            style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none', color: warn ? WARN_COLOR : undefined },
             children: view.value
           }),
           extra
@@ -1243,11 +1255,11 @@ function quotaCell(row, ctx) {
         },
         children: hasWidth
           ? jsx('span', {
-              className: warn ? 'bg-amber-600' : 'bg-(--ui-accent)',
               style: {
                 display: 'block',
                 height: '100%',
-                width: Math.max(0, Math.min(100, Number(view.width) || 0)) + '%'
+                width: Math.max(0, Math.min(100, Number(view.width) || 0)) + '%',
+                background: warn ? WARN_COLOR : ACCENT_COLOR
               }
             })
           : null
@@ -1272,8 +1284,7 @@ function chartElement(p, row, model) {
     role: 'img',
     'aria-label':
       p.name + ' ' + row.label + ' ' + (model.overflow ? 'projected to run out before reset' : 'on track'),
-    className: amber ? 'text-amber-600' : undefined,
-    style: amber ? undefined : { color: 'var(--ui-accent)' },
+    style: { color: amber ? WARN_COLOR : ACCENT_COLOR },
     children: [
       model.alert
         ? jsx('line', {
@@ -1365,8 +1376,7 @@ function statsElement(row, nowMs) {
         children: [
           jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-secondary)' }, children: s.label }),
           jsx('span', {
-            className: s.warn ? 'text-amber-600' : undefined,
-            style: { fontSize: 12, fontWeight: 500, ...MONO },
+            style: { fontSize: 12, fontWeight: 500, ...MONO, color: s.warn ? WARN_COLOR : undefined },
             children: s.value
           })
         ]
@@ -1583,14 +1593,13 @@ export function providerRowElement(p, ctx) {
           })
         : null,
       jsx('span', {
-        className: note ? 'text-amber-600' : undefined,
         style: {
           marginLeft: 'auto',
           fontSize: 10,
           fontWeight: 500,
           ...MONO,
           whiteSpace: 'nowrap',
-          color: note ? undefined : 'var(--ui-text-tertiary)'
+          color: note ? WARN_COLOR : 'var(--ui-text-tertiary)'
         },
         children: note || stale
       }),
@@ -1653,13 +1662,12 @@ export function setBarQuota(providerId, key) {
 
 export function groupHeadingElement(title) {
   return jsx('div', {
-    className: title === 'Needs attention' ? 'text-amber-600' : undefined,
     style: {
       fontSize: 10,
       letterSpacing: '0.08em',
       textTransform: 'uppercase',
       padding: '8px 14px 2px',
-      color: title === 'Needs attention' ? undefined : 'var(--ui-text-tertiary)'
+      color: title === 'Needs attention' ? WARN_COLOR : 'var(--ui-text-tertiary)'
     },
     children: title
   })
@@ -1815,7 +1823,7 @@ function UsagePanel() {
       }),
       jsx(ScrollArea, {
         key: 'body',
-        className: 'min-h-0 flex-1 overflow-y-auto',
+        style: { flex: '1 1 0%', minHeight: 0, overflowY: 'auto' },
         children: jsx('div', {
           style: { display: 'flex', flexDirection: 'column' },
           children: body
