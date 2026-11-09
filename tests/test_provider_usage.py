@@ -352,6 +352,124 @@ class AnthropicFetcherTest(unittest.TestCase):
 
         API._http_json = fake
 
+    def _hermes_answers(self, answers):
+        asked = []
+
+        def fake(provider):
+            asked.append(provider)
+            return answers.get(provider)
+
+        API._hermes_usage = fake
+        return asked
+
+    @staticmethod
+    def _reading(label, stale=False):
+        payload = {
+            "id": "anthropic",
+            "status": "ok",
+            "windows": [
+                {
+                    "label": label,
+                    "percent": 10.0,
+                    "resets_at": None,
+                    "status": "ok",
+                    "scope": "account",
+                }
+            ],
+        }
+        if stale:
+            payload["stale"] = True
+        return payload
+
+    def test_directsdk_answers_when_hermes_anthropic_is_missing(self):
+        asked = self._hermes_answers({API.DIRECTSDK_PROVIDER: self._reading("DirectSDK 5h")})
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+
+        def forbidden(*args, **kwargs):
+            self.fail("direct HTTP must not run when DirectSDK answers")
+
+        API._http_json = forbidden
+        p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(p["windows"][0]["label"], "DirectSDK 5h")
+
+    def test_fresh_hermes_anthropic_does_not_ask_directsdk(self):
+        asked = self._hermes_answers({"anthropic": self._reading("Hermes 5h")})
+        p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic"])
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(p["windows"][0]["label"], "Hermes 5h")
+
+    def test_fresh_directsdk_replaces_a_stale_anthropic_reading(self):
+        asked = self._hermes_answers(
+            {
+                "anthropic": self._reading("Hermes stale", stale=True),
+                API.DIRECTSDK_PROVIDER: self._reading("DirectSDK fresh"),
+            }
+        )
+        p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(p["windows"][0]["label"], "DirectSDK fresh")
+        self.assertNotIn("stale", p)
+
+    def test_both_helpers_missing_fall_back_to_the_token(self):
+        API._direct_readings.clear()
+        API._direct_cooldown.clear()
+        asked = self._hermes_answers({})
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http(self.LIVE_BODY)
+        p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
+        self.assertEqual(p["id"], "anthropic")
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+
+    def test_fable_snapshot_windows_match_for_anthropic_and_directsdk(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        now = datetime.now(timezone.utc)
+
+        def snapshot():
+            return SimpleNamespace(
+                available=True,
+                fetched_at=now,
+                plan=None,
+                raw=None,
+                windows=[
+                    SimpleNamespace(
+                        label="Current session",
+                        used_percent=10.0,
+                        reset_at=now + timedelta(hours=2),
+                    ),
+                    SimpleNamespace(
+                        label="Current week", used_percent=20.0, reset_at=now + timedelta(days=3)
+                    ),
+                    SimpleNamespace(
+                        label="Fable week", used_percent=30.0, reset_at=now + timedelta(days=3)
+                    ),
+                ],
+            )
+
+        for provider in ("anthropic", API.DIRECTSDK_PROVIDER):
+            with self.subTest(provider=provider):
+                p = API._snap_payload(provider, snapshot())
+                self.assertEqual(p["id"], provider)
+                self.assertEqual([w["label"] for w in p["windows"]], ["5h", "Weekly", "Fable"])
+                self.assertEqual(
+                    [w["duration_seconds"] for w in p["windows"]],
+                    [5 * 3600, 7 * 86400, 7 * 86400],
+                )
+                self.assertEqual(
+                    [w["scope"] for w in p["windows"]], ["account", "account", "model"]
+                )
+                self.assertEqual(p["windows"][2]["key"], "fable:weekly")
+
+        anthropic = API._snap_payload("anthropic", snapshot())
+        directsdk = API._snap_payload(API.DIRECTSDK_PROVIDER, snapshot())
+        self.assertEqual(anthropic["windows"], directsdk["windows"])
+
     def test_hermes_result_takes_precedence(self):
         API._hermes_usage = lambda provider: {
             "id": provider,
