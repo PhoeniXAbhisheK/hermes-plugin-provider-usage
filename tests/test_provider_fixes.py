@@ -148,6 +148,19 @@ class OpenrouterCreditsTest(Base):
         self.route(table)
         return API.fetch_openrouter()
 
+    def test_bools_and_nan_are_not_credit_amounts(self):
+        for total, used in ((True, 1), (10, float("nan")), (float("nan"), 1)):
+            with self.subTest(total=total, used=used):
+                p = self._run(
+                    {
+                        "https://openrouter.ai/api/v1/key": {"data": {"limit": 20, "usage": 5}},
+                        "https://openrouter.ai/api/v1/credits": {
+                            "data": {"total_credits": total, "total_usage": used}
+                        },
+                    }
+                )
+                self.assertEqual([row["label"] for row in p["money"]], ["Key cap"])
+
     def test_a_denied_balance_keeps_the_key_cap(self):
         p = self._run(
             {
