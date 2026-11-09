@@ -587,6 +587,11 @@ class EpochTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(API._epoch_from_iso(text))
 
+    def test_forms_fromisoformat_accepts_but_we_reject(self):
+        for text in ("20261107", "2026-W45-6", "2026-11-07T10"):
+            with self.subTest(text=text):
+                self.assertIsNone(API._epoch_from_iso(text))
+
     def test_trailing_text_gives_none(self):
         for text in ("2026-11-07T10:00:00Z junk", "2026-11-07T10:00:00Zjunk"):
             with self.subTest(text=text):
