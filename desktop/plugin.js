@@ -479,21 +479,21 @@ const STALE_BACKEND_TEXT = 'Restart the Hermes dashboard to finish updating.'
 const WARN_COLOR = 'var(--color-amber-600, oklch(0.666 0.179 58.318))'
 const ACCENT_COLOR = 'var(--ui-accent)'
 
+/* One attention rule for the provider group, the chart colour and a quota cell. */
+export function rowAttention(row, nowMs) {
+  if (!row) return false
+  if (row.warn === true) return true
+  if (row.actionable_eta !== null && row.actionable_eta !== undefined) return true
+  return projectedFull(row, nowMs) !== null
+}
+
 /* A provider needs attention when it is ok and one of its rows is warned,
  * already carries an actionable ETA, or projects to full before its reset. */
 export function providerAttention(p, nowMs) {
   if (!p || p.status !== 'ok') return false
   const now = nowOf(nowMs)
-  for (const w of p.windows || []) {
-    if (!w) continue
-    if (w.warn === true) return true
-    if (w.actionable_eta !== null && w.actionable_eta !== undefined) return true
-    if (projectedFull(w, now) !== null) return true
-  }
-  for (const m of p.money || []) {
-    if (!m) continue
-    if (m.warn === true) return true
-    if (m.actionable_eta !== null && m.actionable_eta !== undefined) return true
+  for (const row of rowsOf(p)) {
+    if (rowAttention(row, now)) return true
   }
   return false
 }
@@ -725,10 +725,7 @@ export function chartModel(row, nowMs, alertAt) {
       }
     }
   }
-  const amber =
-    row.warn === true ||
-    (row.actionable_eta !== null && row.actionable_eta !== undefined) ||
-    projectedFull(row, now) !== null
+  const amber = rowAttention(row, now)
   return {
     series: series,
     current: [CHART_HISTORY_W, chartY(used)],
@@ -1156,8 +1153,7 @@ function pinButton(p, pinned, onPin) {
 function quotaCell(row, ctx) {
   const view = rowView(row, ctx.mode)
   const isMoney = row.kind === 'money'
-  const projected = projectedFull(row, ctx.now)
-  const warn = row.warn === true || projected !== null
+  const warn = rowAttention(row, ctx.now)
   /* Reset text only when the provider shows one quota: at 2 or 3 columns the
    * row has no room for it, so the window keeps label and value only. */
   const extra = isMoney
