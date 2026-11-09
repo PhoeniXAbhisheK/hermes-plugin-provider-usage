@@ -37,6 +37,7 @@ Endpoints hit (GET, machine credentials attached):
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
 - https://api.anthropic.com/api/oauth/usage (via Hermes, then DirectSDK, else the Claude Code token)
+- https://portal.nousresearch.com/api/oauth/account (via Hermes' Nous sign-in)
 - https://api.deepseek.com/user/balance
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
