@@ -1498,7 +1498,7 @@ export function expandedPanel(p, ctx) {
         : ctx.alertOpen
           ? jsxs('div', {
               key: 'alert',
-              style: { display: 'flex', flexDirection: 'column', gap: 5 },
+              style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5 },
               children: [
                 miniSegments({
                   options: ALERT_OPTIONS,
