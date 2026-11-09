@@ -15,7 +15,7 @@ class HistoryKeyTest(unittest.TestCase):
         p = {"windows": [], "money": []}
         p["windows" if kind == "window" else "money"].append(row)
         API._assign_keys(p)
-        return API._history_key("zai", kind, row)
+        return API._history_key("zai", row)
 
     def test_a_window_key(self):
         self.assertEqual(
@@ -107,6 +107,18 @@ class HistoryFieldTest(schema.Base):
         API._assign_keys(p)
         API._contract_rows(p, self.NOW)
         self.assertNotIn("history", p["money"][0])
+
+    def test_bools_and_nan_money_are_not_history_samples(self):
+        for total, left in ((True, 0.0), (100.0, float("nan")), (float("nan"), 0.0)):
+            with self.subTest(total=total, left=left):
+                API._history.clear()
+                p = {
+                    "id": "zai",
+                    "money": [{"label": "Balance", "total": total, "left": left, "cur": "USD"}],
+                }
+                API._assign_keys(p)
+                API._decorate("zai", p, self.NOW)
+                self.assertEqual(API._history, {})
 
     def test_a_stale_provider_keeps_history_without_adding_a_sample(self):
         now = time.time()

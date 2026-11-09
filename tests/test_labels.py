@@ -368,7 +368,7 @@ class KeyOrderTest(unittest.TestCase):
         API._assign_keys(p)
         row = p["windows"][0]
         self.assertEqual(row["key"], "session_5h")
-        self.assertEqual(API._history_key("zai", "window", row), ("zai", "session_5h"))
+        self.assertEqual(API._history_key("zai", row), ("zai", "session_5h"))
 
     def test_a_preset_key_is_kept_and_duplicates_get_a_suffix(self):
         p = {

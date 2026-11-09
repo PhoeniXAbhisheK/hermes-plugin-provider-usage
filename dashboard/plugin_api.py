@@ -218,9 +218,7 @@ def _timeout_result(pid):
     """A provider that ran out of time: last reading marked stale, or timeout."""
     last = _last_good.get(pid)
     if last is not None:
-        stale = copy.deepcopy(last)
-        stale["stale"] = True
-        return stale
+        return _as_stale(last)
     return {"id": pid, "status": "error", "error": "timeout"}
 
 
@@ -233,9 +231,7 @@ class _RateLimited(Exception):
 
     def __init__(self, reset_at):
         self.reset_at = float(reset_at)
-        super().__init__(
-            "rate limited until " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
-        )
+        super().__init__("rate limited until " + _iso_epoch(self.reset_at))
 
 
 class _ProviderError(RuntimeError, ValueError):
@@ -339,6 +335,14 @@ def _iso_from_epoch(epoch):
     return _iso_epoch(float(epoch) - float(epoch) % 60.0)
 
 
+def _iso_from_ms(value):
+    """A positive millisecond epoch as ISO UTC, or None for anything else."""
+    number = _num(value)
+    if number is not None and number > 0:
+        return _iso_epoch(number / 1000.0)
+    return None
+
+
 def _retry_after_seconds(value):
     """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
     text = str(value or "").strip()
@@ -363,6 +367,13 @@ def _iso_dt(dt):
     if isinstance(dt, datetime):
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return None
+
+
+def _as_utc(dt):
+    """A datetime in UTC: a naive value is taken as UTC, an aware one converted."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _num(value):
@@ -408,8 +419,7 @@ def _seconds_until(when):
     """Seconds from now until a datetime, or None when it is not a datetime."""
     if not isinstance(when, datetime):
         return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+    when = _as_utc(when)
     return (when - datetime.now(timezone.utc)).total_seconds()
 
 
@@ -634,10 +644,8 @@ def _codex_response_windows(payload, now=None):
     ):
         if not isinstance(w, dict):
             continue
-        ra = w.get("reset_after_seconds")
-        resets_at = None
-        if isinstance(ra, (int, float)):
-            resets_at = _iso_from_epoch(now + ra)
+        ra = _num(w.get("reset_after_seconds"))
+        resets_at = _iso_from_epoch(now + ra) if ra is not None else None
         seconds = _num(w.get("limit_window_seconds"))
         match = _duration_match(seconds) if seconds is not None else None
         label = match[0] if match is not None else fallback
@@ -694,26 +702,25 @@ def fetch_openrouter():
         denied = True
         c = {}
     money = []
-    total, used = c.get("total_credits"), c.get("total_usage")
-    if isinstance(total, (int, float)) and isinstance(used, (int, float)):
-        money.append(
-            {
-                "label": "Balance",
-                "left": round(total - used, 2),
-                "total": round(total, 2),
-                "cur": "USD",
-            }
-        )
-    limit, cap_used = k.get("limit"), k.get("usage")
-    if isinstance(limit, (int, float)) and isinstance(cap_used, (int, float)):
-        money.append(
-            {
-                "label": "Key cap",
-                "left": round(limit - cap_used, 2),
-                "total": round(limit, 2),
-                "cur": "USD",
-            }
-        )
+
+    def money_row(label, total, used):
+        total = _num(total)
+        used = _num(used)
+        if total is None or used is None:
+            return None
+        return {
+            "label": label,
+            "left": round(total - used, 2),
+            "total": round(total, 2),
+            "cur": "USD",
+        }
+
+    row = money_row("Balance", c.get("total_credits"), c.get("total_usage"))
+    if row is not None:
+        money.append(row)
+    row = money_row("Key cap", k.get("limit"), k.get("usage"))
+    if row is not None:
+        money.append(row)
     if not money:
         if denied:
             raise _ProviderError("OpenRouter: balance needs a management key", secret=key)
@@ -751,11 +758,8 @@ def _snapshot_age(snap):
     if not isinstance(fetched, datetime):
         return None
     try:
-        if fetched.tzinfo is None:
-            fetched = fetched.replace(tzinfo=timezone.utc)
-        return max(
-            0.0, (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds()
-        )
+        fetched = _as_utc(fetched)
+        return max(0.0, (datetime.now(timezone.utc) - fetched).total_seconds())
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -906,7 +910,7 @@ def _payload_age(payload):
     if not isinstance(text, str):
         return None
     try:
-        when = datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        when = _as_utc(datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
         return None
     return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
@@ -1033,9 +1037,11 @@ def _anthropic_direct():
         },
     )
     windows = []
-    for key, label, duration in (
-        ("five_hour", "5h", 5 * 3600),
-        ("seven_day", "Weekly", 7 * 86400),
+    for key, label, duration, scope, model in (
+        ("five_hour", "5h", 5 * 3600, "account", None),
+        ("seven_day", "Weekly", 7 * 86400, "account", None),
+        ("seven_day_opus", "Opus", 7 * 86400, "model", "opus"),
+        ("seven_day_sonnet", "Sonnet", 7 * 86400, "model", "sonnet"),
     ):
         w = d.get(key)
         if not isinstance(w, dict):
@@ -1046,24 +1052,7 @@ def _anthropic_direct():
             w.get("utilization"),
             resets if isinstance(resets, str) else None,
             duration=duration,
-        )
-        if row is not None:
-            windows.append(row)
-    # The per-model weekly caps ride in the same response: no extra request.
-    for key, label, model in (
-        ("seven_day_opus", "Opus", "opus"),
-        ("seven_day_sonnet", "Sonnet", "sonnet"),
-    ):
-        w = d.get(key)
-        if not isinstance(w, dict):
-            continue
-        resets = w.get("resets_at")
-        row = _window(
-            label,
-            w.get("utilization"),
-            resets if isinstance(resets, str) else None,
-            duration=7 * 86400,
-            scope="model",
+            scope=scope,
             model=model,
         )
         if row is not None:
@@ -1171,8 +1160,8 @@ def fetch_copilot():
         entry = snapshots.get(key) or {}
         if not isinstance(entry, dict) or entry.get("unlimited"):
             continue
-        entitlement = entry.get("entitlement")
-        if isinstance(entitlement, (int, float)) and entitlement <= 0:
+        entitlement = _num(entry.get("entitlement"))
+        if entitlement is not None and entitlement <= 0:
             continue
         remaining = _num(entry.get("percent_remaining"))
         if remaining is None:
@@ -1343,13 +1332,21 @@ def fetch_kimi():
     if not key:
         raise _Skip("kimi-coding")
     headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+
+    def used_limit(entry):
+        used = _num(entry.get("used"))
+        limit = _num(entry.get("limit"))
+        if used is None and limit is not None:
+            remaining = _num(entry.get("remaining"))
+            if remaining is not None:
+                used = limit - remaining
+        return used, limit
+
     # Coding-plan quota first; fall back to the Moonshot open-platform balance.
     payload = None
     try:
         payload = _http_json("https://api.kimi.com/coding/v1/usages", headers)
-    except _RateLimited:
-        raise
-    except _Timeout:
+    except (_RateLimited, _Timeout):
         raise
     except Exception:
         payload = None
@@ -1358,11 +1355,7 @@ def fetch_kimi():
         usage = payload.get("usage")
         if not isinstance(usage, dict):
             usage = {}
-        used, limit = _num(usage.get("used")), _num(usage.get("limit"))
-        if used is None and limit is not None:
-            remaining = _num(usage.get("remaining"))
-            if remaining is not None:
-                used = limit - remaining
+        used, limit = used_limit(usage)
         if used is not None and limit:
             row = _window(
                 "Weekly",
@@ -1379,11 +1372,7 @@ def fetch_kimi():
                 detail = {}
             percent = _num(entry.get("percentage"))
             if percent is None:
-                used, limit = _num(detail.get("used")), _num(detail.get("limit"))
-                if used is None and limit is not None:
-                    remaining = _num(detail.get("remaining"))
-                    if remaining is not None:
-                        used = limit - remaining
+                used, limit = used_limit(detail)
                 if used is None or not limit:
                     continue
                 percent = used / limit * 100.0
@@ -1443,9 +1432,10 @@ def fetch_zai():
         percent = _num(item.get("percentage"))
         total, current, usage_value = item.get("total"), item.get("currentValue"), item.get("usage")
         if percent is None:
-            base = total if isinstance(total, (int, float)) else usage_value
-            if isinstance(current, (int, float)) and isinstance(base, (int, float)) and base:
-                percent = float(current) / float(base) * 100.0
+            total, current = _num(total), _num(current)
+            base = total if total is not None else _num(usage_value)
+            if current is not None and base is not None and base:
+                percent = current / base * 100.0
         if kind == "TOKENS_LIMIT":
             label = "Session (5h)"
         elif kind == "TIME_LIMIT":
@@ -1459,10 +1449,7 @@ def fetch_zai():
         else:
             label = kind.replace("_", " ").title() or "Limit"
         # Only some windows carry nextResetTime (the daily one usually does not).
-        resets_at = None
-        reset_ms = item.get("nextResetTime")
-        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
-            resets_at = _iso_epoch(reset_ms / 1000.0)
+        resets_at = _iso_from_ms(item.get("nextResetTime"))
         row = _window(label, percent, resets_at)
         if row is not None:
             windows.append(row)
@@ -1518,6 +1505,7 @@ def fetch_minimax():
     credentials = _minimax_credentials()
     if not credentials:
         raise _Skip("minimax")
+    secrets = tuple(key for _family, key, _urls in credentials)
     payload = None
     last_error = None
     for family, key, urls in credentials:
@@ -1545,7 +1533,7 @@ def fetch_minimax():
         detail = _error_message(last_error) if last_error is not None else "no endpoint"
         raise _ProviderError(
             "MiniMax quota probe failed: %s" % detail,
-            secret=tuple(key for _family, key, _urls in credentials),
+            secret=secrets,
         )
     windows = []
     for row in payload.get("model_remains") or []:
@@ -1582,13 +1570,10 @@ def fetch_minimax():
             if remaining is not None:
                 percent = 100.0 - remaining
             else:
-                total, used = row.get(total_key), row.get(used_key)
-                if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
+                total, used = _num(row.get(total_key)), _num(row.get(used_key))
+                if total is not None and total > 0 and used is not None:
                     percent = min(max(used, 0), total) / total * 100.0
-            resets_at = None
-            end_ms = row.get(end_key)
-            if isinstance(end_ms, (int, float)) and end_ms > 0:
-                resets_at = _iso_epoch(end_ms / 1000.0)
+            resets_at = _iso_from_ms(row.get(end_key))
             window = _window(
                 prefix + label,
                 percent,
@@ -1602,7 +1587,7 @@ def fetch_minimax():
     if not windows:
         raise _ProviderError(
             "MiniMax returned no parseable plan rows",
-            secret=tuple(key for _family, key, _urls in credentials),
+            secret=secrets,
         )
     return {"id": "minimax", "status": "ok", "windows": windows}
 
@@ -1729,32 +1714,32 @@ def _project(key, current, target, now):
     return round(eta)
 
 
-def _history_key(pid, kind, row):
-    """The history key for a row: its stable contract key, whatever the kind."""
+def _history_key(pid, row):
+    """The history key for a row: its stable contract key."""
     return (pid, str(row["key"]))
 
 
 def _decorate(pid, p, now):
     for w in p.get("windows") or []:
-        v = w.get("percent")
-        if not isinstance(v, (int, float)):
+        v = _num(w.get("percent"))
+        if v is None:
             continue
-        key = _history_key(pid, "window", w)
-        _record(key, float(v), now)
-        eta = _project(key, float(v), 100.0, now)
+        key = _history_key(pid, w)
+        _record(key, v, now)
+        eta = _project(key, v, 100.0, now)
         if eta is not None:
             w["eta_seconds"] = eta
     for m in p.get("money") or []:
-        total = m.get("total")
-        left = m.get("left")
-        if not isinstance(total, (int, float)) or not isinstance(left, (int, float)) or total <= 0:
+        total = _num(m.get("total"))
+        left = _num(m.get("left"))
+        if total is None or left is None or total <= 0:
             continue
-        used = float(total) - float(left)
-        # One row per currency: two balances with the same label must not share
-        # a history.
-        key = _history_key(pid, "money", m)
+        used = total - left
+        # The history key is the row's stable contract key, so two balances with
+        # the same label cannot share a history.
+        key = _history_key(pid, m)
         _record(key, used, now)
-        eta = _project(key, used, float(total), now)
+        eta = _project(key, used, total, now)
         if eta is not None:
             m["depletes_in_seconds"] = eta
 
@@ -1830,9 +1815,9 @@ def _money_actionable(row):
     return int(value)
 
 
-def _row_history(pid, kind, row, now):
+def _row_history(pid, row, now):
     """Bucketed recent samples for one row: [epoch seconds, value], oldest first."""
-    key = _history_key(pid, kind, row)
+    key = _history_key(pid, row)
     with _history_lock:
         samples = list(_history.get(key) or ())
     buckets = {}
@@ -1901,7 +1886,7 @@ def _contract_rows(p, now):
                     row.get("label") == "Key cap" and used is not None and used >= WARN_PCT
                 )
                 row["actionable_eta"] = _money_actionable(row)
-            history = _row_history(p.get("id"), kind, row, now)
+            history = _row_history(p.get("id"), row, now)
             if history:
                 row["history"] = history
 
@@ -1991,8 +1976,7 @@ def _collect(deadline=None):
     for pid, until in held.items():
         last = _last_good.get(pid)
         if last is not None:
-            stale = copy.deepcopy(last)
-            stale["stale"] = True
+            stale = _as_stale(last)
             stale["hold_until"] = _iso_epoch(until)
             results[pid] = stale
         else:
@@ -2018,7 +2002,7 @@ def _collect(deadline=None):
         providers.append(p)
     _prune_history(now)
     return {
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": _iso_epoch(time.time()),
         "providers": providers,
     }
 
