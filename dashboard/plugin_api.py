@@ -67,7 +67,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     wait,
 )
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -1754,7 +1754,7 @@ _ISO_STAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})"
     r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2})"
     r"(?::(?P<second>\d{2})(?:\.(?P<fraction>\d+))?)?)?"
-    r"(?P<zone>Z|[+-]\d{2}:?\d{2})?$"
+    r"(?P<zone>Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?$"
 )
 
 
@@ -1765,31 +1765,12 @@ def _epoch_from_iso(text):
     match = _ISO_STAMP.match(text.strip())
     if match is None:
         return None
-    zone = match.group("zone") or "Z"
-    if zone == "Z":
-        offset = timezone.utc
-    else:
-        sign = -1 if zone[0] == "-" else 1
-        digits = zone[1:].replace(":", "")
-        hours, minutes = int(digits[:2]), int(digits[2:])
-        if hours > 23 or minutes > 59:
-            return None
-        offset = timezone(sign * timedelta(hours=hours, minutes=minutes))
-    fraction = (match.group("fraction") or "")[:6].ljust(6, "0")
-    date = match.group("date")
     try:
-        when = datetime(
-            int(date[0:4]),
-            int(date[5:7]),
-            int(date[8:10]),
-            int(match.group("hour") or 0),
-            int(match.group("minute") or 0),
-            int(match.group("second") or 0),
-            int(fraction or 0),
-            tzinfo=offset,
-        )
+        when = datetime.fromisoformat(text.strip())
     except ValueError:
         return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
     try:
         return when.timestamp()
     except (OverflowError, OSError, ValueError):
