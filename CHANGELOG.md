@@ -43,6 +43,7 @@ repository; the date is the release date.
   once it is more than ten minutes old the backend tries the provider's own token
   at most once per five minutes. A failed or rate-limited attempt keeps the newest
   reading available, so a good reading is never replaced by an older one.
+- Kimi shows its monthly pools again: the coding usage endpoint now reports them under `usages`, which is read alongside the older `usage` block (#58).
 - Anthropic reads plan limits through Nous' Claude Subscription DirectSDK plugin when Hermes has no Anthropic sign-in, before the Claude Code token on disk (#22).
 - Python 3.11 or newer is required, matching Hermes.
 
