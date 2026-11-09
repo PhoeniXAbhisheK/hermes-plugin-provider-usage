@@ -1305,6 +1305,147 @@ test('chartModel maps history and projects under the reset', async () => {
   assert.equal(warned.colour, 'amber')
 })
 
+test('chartModel puts 5h, weekly and monthly windows on one whole-window axis', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const five = chartModel(
+    {
+      kind: 'window',
+      used_pct: 20,
+      duration_seconds: 5 * 3600,
+      resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+    },
+    now
+  )
+  const weekly = chartModel(
+    {
+      kind: 'window',
+      used_pct: 20,
+      duration_seconds: 7 * 86400,
+      resets_at: new Date(now + (7 * 86400 - 6 * 3600) * 1000).toISOString()
+    },
+    now
+  )
+  const monthly = chartModel(
+    {
+      kind: 'window',
+      used_pct: 80,
+      duration_seconds: 30 * 86400,
+      resets_at: new Date(now + 22.5 * 3600 * 1000).toISOString()
+    },
+    now
+  )
+  assert.ok(Math.abs(five.nowX - 53.76) < 0.01)
+  assert.ok(Math.abs(weekly.nowX - 12) < 0.01)
+  assert.ok(Math.abs(monthly.nowX - 325.5) < 0.01)
+  assert.equal(five.current[0], five.nowX)
+  assert.equal(five.series[0][0], 0)
+  assert.ok(Math.abs(five.series[1][0] - five.nowX) < 0.01)
+  assert.equal(five.average, true)
+  assert.equal(five.nowLabel.y, 9)
+  assert.equal(weekly.nowLabel.y, 21)
+  assert.equal(monthly.nowLabel.y, 68)
+  assert.equal(monthly.nowLabel.anchor, 'end')
+  for (const model of [five, weekly, monthly]) {
+    const distance = Math.hypot(model.nowLabel.x - model.current[0], model.nowLabel.y - model.current[1])
+    assert.ok(distance >= 6)
+    if (model.alert) {
+      const alertY = Math.max(9, model.alert.y - 3.8)
+      const alertWidth = ('alert ' + model.alert.value + '%').length * 4.7
+      const left = model.nowLabel.anchor === 'start' ? model.nowLabel.x : model.nowLabel.x - 15
+      const right = model.nowLabel.anchor === 'start' ? model.nowLabel.x + 15 : model.nowLabel.x
+      if (left < alertWidth && right > 0) assert.ok(Math.abs(model.nowLabel.y - alertY) >= 10)
+    }
+  }
+})
+
+test('chartModel keeps only history inside the window on the window axis', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 20,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+  }
+  const start = Date.parse(row.resets_at) - row.duration_seconds * 1000
+  const m = chartModel(
+    {
+      ...row,
+      history: [
+        [start / 1000 - 60, 1],
+        [start / 1000 + 60, 2],
+        [now / 1000, 20]
+      ]
+    },
+    now
+  )
+  assert.equal(m.series.length, 2)
+  assert.ok(Math.abs(m.series[0][0] - 1.12) < 0.01)
+  assert.ok(Math.abs(m.series[1][0] - 53.76) < 0.01)
+})
+
+test('chartModel projects overflow from the window now position', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 90,
+    eta_seconds: 1000,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+  }
+  const start = Date.parse(row.resets_at) - row.duration_seconds * 1000
+  const m = chartModel(
+    {
+      ...row,
+      history: [
+        [start / 1000 + 60, 80],
+        [now / 1000, 90]
+      ]
+    },
+    now
+  )
+  const expected = 53.76 + (1000 / (4 * 3600 + 12 * 60)) * (336 - 53.76)
+  assert.equal(m.overflow, true)
+  assert.equal(m.projection.x0, m.nowX)
+  assert.ok(Math.abs(m.projection.x1 - expected) < 0.01)
+  assert.equal(m.projection.y1, 2)
+})
+
+test('chartModel keeps the old axis for money and windows without a duration', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const money = chartModel(
+    {
+      kind: 'money',
+      used_pct: 40,
+      total: 100,
+      left: 60,
+      cur: 'USD',
+      history: [
+        [now / 1000 - 3600, 20],
+        [now / 1000, 40]
+      ]
+    },
+    now
+  )
+  assert.equal(money.nowX, 220)
+  assert.deepEqual(money.nowLabel, { x: 223, y: 68, anchor: 'start' })
+  assert.ok(Math.abs(money.series[0][0] - (220 - 220 / 6)) < 0.01)
+  const noDuration = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      resets_at: new Date(now + 4 * 3600 * 1000).toISOString()
+    },
+    now
+  )
+  assert.equal(noDuration.nowX, 220)
+  assert.deepEqual(noDuration.nowLabel, { x: 223, y: 68, anchor: 'start' })
+  assert.equal(noDuration.series[0][0], 220)
+})
+
 test('chartModel stops the projection where it reaches 100', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
@@ -3117,7 +3258,9 @@ test('chartModel starts a no-history window at zero and ends at now', async () =
   )
   assert.equal(model.series[0][0], 0)
   assert.equal(model.series[0][1], zero.current[1])
-  assert.equal(model.series[1][0], 220)
+  assert.equal(model.series[1][0], 67.2)
+  assert.equal(model.current[0], 67.2)
+  assert.equal(model.nowX, 67.2)
   assert.equal(model.series[1][1], model.current[1])
 })
 
@@ -3134,7 +3277,8 @@ test('chartModel draws a no-history window line and leaves money without one', a
   assert.equal(model.average, true)
   assert.equal(model.series.length, 2)
   assert.equal(model.series[0][0], 0)
-  assert.equal(model.series[1][0], 220)
+  assert.equal(model.series[1][0], 22.4)
+  assert.equal(model.nowX, 22.4)
   assert.ok(model.series[0][1] > model.series[1][1])
   assert.ok(model.projection !== null)
   assert.equal(model.rate, 35 / (2 * 86400))

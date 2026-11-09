@@ -676,6 +676,14 @@ export function chartModel(row, nowMs, alertAt) {
   const threshold = alertAt === 'off' ? null : alertAt === null || alertAt === undefined ? 80 : Number(alertAt)
   const used = clampPct(raw)
   const now = nowOf(nowMs)
+  const duration = Number(row.duration_seconds)
+  const reset = Date.parse(row.resets_at)
+  const windowAxis = !isMoney && isFinite(duration) && duration > 0 && isFinite(reset)
+  const durationMs = windowAxis ? duration * 1000 : 0
+  const start = windowAxis ? reset - durationMs : 0
+  const nowX = windowAxis
+    ? Math.max(0, Math.min(1, (now - start) / durationMs)) * CHART_W
+    : CHART_HISTORY_W
   const total = Number(row.total) || 0
   const history = Array.isArray(row.history) ? row.history : []
   const points = []
@@ -684,10 +692,18 @@ export function chartModel(row, nowMs, alertAt) {
     const t = Number(sample[0])
     const v = Number(sample[1])
     if (!isFinite(t) || !isFinite(v)) continue
-    const age = now / 1000 - t
-    if (age < 0 || age > CHART_HISTORY_S) continue
+    if (windowAxis) {
+      const tMs = t * 1000
+      if (tMs < start || tMs > now) continue
+    } else {
+      const age = now / 1000 - t
+      if (age < 0 || age > CHART_HISTORY_S) continue
+    }
     const pct = isMoney ? (total > 0 ? (v / total) * 100 : v) : v
-    points.push([CHART_HISTORY_W - (age / CHART_HISTORY_S) * CHART_HISTORY_W, chartY(pct)])
+    const x = windowAxis
+      ? Math.max(0, Math.min(1, (t * 1000 - start) / durationMs)) * CHART_W
+      : CHART_HISTORY_W - ((now / 1000 - t) / CHART_HISTORY_S) * CHART_HISTORY_W
+    points.push([x, chartY(pct)])
   }
   points.sort((a, b) => a[0] - b[0])
   const derived = isMoney ? null : derivedRate(row, now)
@@ -696,8 +712,8 @@ export function chartModel(row, nowMs, alertAt) {
     points.length >= 2
       ? points
       : average
-        ? [[0, chartY(0)], [CHART_HISTORY_W, chartY(used)]]
-        : [[CHART_HISTORY_W, chartY(used)]]
+        ? [[0, chartY(0)], [nowX, chartY(used)]]
+        : [[nowX, chartY(used)]]
   const measured = isMoney ? null : windowRate(row)
   const rate = isMoney ? null : average ? derived.rate : measured !== null ? measured : derived ? derived.rate : null
   let projection = null
@@ -706,35 +722,53 @@ export function chartModel(row, nowMs, alertAt) {
   if (isMoney) {
     const depletes = Number(row.depletes_in_seconds)
     if (isFinite(depletes) && depletes > 0) {
-      projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: CHART_W, y1: chartY(100) }
+      projection = { x0: nowX, y0: chartY(used), x1: CHART_W, y1: chartY(100) }
       valueAtReset = 100
       overflow = true
     }
   } else {
-    const reset = Date.parse(row.resets_at)
     if (isFinite(reset) && reset > now) {
       const seconds = (reset - now) / 1000
       valueAtReset = used + (rate === null ? 0 : rate * seconds)
       if (valueAtReset >= 100) {
         overflow = true
         const to100 = rate > 0 ? (100 - used) / rate : seconds
-        const x = Math.min(CHART_W, CHART_HISTORY_W + (to100 / seconds) * (CHART_W - CHART_HISTORY_W))
-        projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: x, y1: chartY(100) }
+        const x = Math.min(CHART_W, nowX + (to100 / seconds) * (CHART_W - nowX))
+        projection = { x0: nowX, y0: chartY(used), x1: x, y1: chartY(100) }
       } else {
-        projection = { x0: CHART_HISTORY_W, y0: chartY(used), x1: CHART_W, y1: chartY(valueAtReset) }
+        projection = { x0: nowX, y0: chartY(used), x1: CHART_W, y1: chartY(valueAtReset) }
       }
     }
+  }
+  const alert = threshold === null ? null : { value: threshold, y: chartY(threshold) }
+  let nowLabel = { x: CHART_HISTORY_W + 3, y: 68, anchor: 'start' }
+  if (windowAxis) {
+    const currentY = chartY(used)
+    const anchor = nowX > CHART_W - 24 ? 'end' : 'start'
+    const x = anchor === 'start' ? nowX + 3 : nowX - 3
+    let y = currentY < CHART_H / 2 ? 68 : 9
+    if (alert && y === 9) {
+      const alertY = Math.max(9, alert.y - 3.8)
+      const alertWidth = ('alert ' + alert.value + '%').length * 4.7
+      const labelLeft = anchor === 'start' ? x : x - 15
+      const labelRight = anchor === 'start' ? x + 15 : x
+      if (labelLeft < alertWidth && labelRight > 0 && alertY + 10 <= 68) y = alertY + 10
+    }
+    if (Math.abs(y - currentY) < 6) y = currentY < CHART_H / 2 ? 68 : 9
+    nowLabel = { x: x, y: y, anchor: anchor }
   }
   const amber = rowAttention(row, now)
   return {
     series: series,
-    current: [CHART_HISTORY_W, chartY(used)],
+    current: [nowX, chartY(used)],
+    nowX: nowX,
+    nowLabel: nowLabel,
     projection: projection,
     valueAtReset: valueAtReset === null ? null : Math.round(valueAtReset),
     rate: rate,
     average: average,
     overflow: overflow,
-    alert: threshold === null ? null : { value: threshold, y: chartY(threshold) },
+    alert: alert,
     colour: amber ? 'amber' : 'accent'
   }
 }
@@ -1274,7 +1308,7 @@ function chartElement(p, row, model) {
             strokeLinecap: 'round',
             opacity: model.average ? 0.55 : undefined
           })
-        : jsx('circle', { key: 'current', cx: CHART_HISTORY_W, cy: model.current[1], r: 3, fill: 'currentColor' }),
+        : jsx('circle', { key: 'current', cx: model.current[0], cy: model.current[1], r: 3, fill: 'currentColor' }),
       proj
         ? jsx('line', {
             key: 'proj',
@@ -1290,9 +1324,9 @@ function chartElement(p, row, model) {
       proj ? jsx('circle', { key: 'end', cx: proj.x1, cy: proj.y1, r: 3, fill: 'currentColor' }) : null,
       jsx('line', {
         key: 'now',
-        x1: CHART_HISTORY_W,
+        x1: model.nowX,
         y1: 0,
-        x2: CHART_HISTORY_W,
+        x2: model.nowX,
         y2: CHART_H,
         stroke: 'currentColor',
         strokeDasharray: '2 3',
@@ -1300,8 +1334,9 @@ function chartElement(p, row, model) {
       }),
       jsx('text', {
         key: 'nowLabel',
-        x: 223,
-        y: 68,
+        x: model.nowLabel.x,
+        y: model.nowLabel.y,
+        textAnchor: model.nowLabel.anchor,
         fontSize: 8.5,
         fill: 'currentColor',
         opacity: 0.55,
