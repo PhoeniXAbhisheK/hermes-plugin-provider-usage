@@ -716,6 +716,10 @@ export function chartModel(row, nowMs, alertAt, mode) {
       : average
         ? [[0, plotY(0)], [nowX, plotY(used)]]
         : [[nowX, plotY(used)]]
+  const leadIn =
+    windowAxis && points.length >= 2 && points[0][0] > 2
+      ? [[0, plotY(0)], [points[0][0], points[0][1]]]
+      : null
   const measured = isMoney ? null : windowRate(row)
   const rate = isMoney ? null : average ? derived.rate : measured !== null ? measured : derived ? derived.rate : null
   let projection = null
@@ -769,6 +773,7 @@ export function chartModel(row, nowMs, alertAt, mode) {
   const amber = rowAttention(row, now)
   return {
     series: series,
+    leadIn: leadIn,
     current: [nowX, plotY(used)],
     nowX: nowX,
     nowLabel: nowLabel,
@@ -1304,6 +1309,18 @@ function chartElement(p, row, model) {
             fill: 'currentColor',
             opacity: 0.55,
             children: model.alert.label
+          })
+        : null,
+      model.leadIn
+        ? jsx('polyline', {
+            key: 'leadIn',
+            points: model.leadIn.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' '),
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeLinejoin: 'round',
+            strokeLinecap: 'round',
+            opacity: 0.55
           })
         : null,
       model.series.length >= 2
