@@ -67,6 +67,7 @@ CASES = {
     "kimi-coding": [
         ("ok.json", "http", "ok"),
         ("ok_after_reset.json", "http", "ok"),
+        ("ok_usages.json", "http", "ok"),
         ("skip_no_key.json", "no_key", "skip"),
     ],
     "minimax": [
@@ -250,17 +251,60 @@ class FixtureCaseTest(unittest.TestCase):
                             curs = sorted(row["cur"] for row in payload["money"])
                             self.assertEqual(curs, ["CNY", "USD"])
                         if pid == "kimi-coding":
-                            rows = [
-                                (row["label"], row["percent"], row["resets_at"])
-                                for row in payload["windows"]
-                            ]
-                            self.assertEqual(
-                                rows,
-                                [
-                                    ("Weekly", 26.0, "2026-02-11T17:32:50.757941Z"),
-                                    ("5h", 15.0, "2026-02-07T12:32:50.757941Z"),
-                                ],
-                            )
+                            if names[0] == "ok_usages.json":
+                                rows = [
+                                    (
+                                        row["label"],
+                                        row["percent"],
+                                        row["resets_at"],
+                                        row["duration_seconds"],
+                                        row["scope"],
+                                        row["key"],
+                                    )
+                                    for row in payload["windows"]
+                                ]
+                                self.assertEqual(
+                                    rows,
+                                    [
+                                        (
+                                            "5h",
+                                            0.0,
+                                            "2026-11-09T18:15:17.902245Z",
+                                            18000,
+                                            "account",
+                                            "5h",
+                                        ),
+                                        (
+                                            "Monthly",
+                                            100.0,
+                                            "2026-11-13T00:00:00Z",
+                                            2592000,
+                                            "account",
+                                            "monthly",
+                                        ),
+                                        (
+                                            "Code",
+                                            32.9,
+                                            "2026-11-13T00:00:00Z",
+                                            2592000,
+                                            "model",
+                                            "code:monthly",
+                                        ),
+                                    ],
+                                )
+                                self.assertNotIn("money", payload)
+                            else:
+                                rows = [
+                                    (row["label"], row["percent"], row["resets_at"])
+                                    for row in payload["windows"]
+                                ]
+                                self.assertEqual(
+                                    rows,
+                                    [
+                                        ("Weekly", 26.0, "2026-02-11T17:32:50.757941Z"),
+                                        ("5h", 15.0, "2026-02-07T12:32:50.757941Z"),
+                                    ],
+                                )
 
     def test_manifest_covers_disk(self):
         for pid, cases in CASES.items():

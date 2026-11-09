@@ -284,6 +284,62 @@ class KimiFetcherTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["percent"], 25.0)
         self.assertNotIn("money", p)
 
+    def test_usages_5h_fills_in_when_limits_has_no_window(self):
+        self._key()
+        self._routes(
+            {
+                CODING_URL: {
+                    "limits": [],
+                    "usages": {
+                        "limit_5h": {
+                            "used_ratio": 0.25,
+                            "reset_time": "2026-11-09T18:15:17Z",
+                        }
+                    },
+                }
+            }
+        )
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL])
+        self.assertEqual(
+            [
+                (row["label"], row["percent"], row["duration_seconds"], row["scope"], row["key"])
+                for row in p["windows"]
+            ],
+            [("5h", 25.0, 18000, "account", "5h")],
+        )
+        self.assertNotIn("money", p)
+
+    def test_usages_accepts_string_ratios_and_skips_bad_entries(self):
+        self._key()
+        self._routes(
+            {
+                CODING_URL: {
+                    "limits": [],
+                    "usages": {
+                        "limit_month_total": {
+                            "used_ratio": "0.5",
+                            "reset_time": "2026-11-13T00:00:00Z",
+                        },
+                        "limit_month_code": {
+                            "used_ratio": "not-a-number",
+                            "reset_time": "2026-11-13T00:00:00Z",
+                        },
+                        "limit_5h": [],
+                    },
+                }
+            }
+        )
+        p = API.fetch_kimi()
+        self.assertEqual(self.calls, [CODING_URL])
+        self.assertEqual(
+            [
+                (row["label"], row["percent"], row["duration_seconds"], row["key"])
+                for row in p["windows"]
+            ],
+            [("Monthly", 50.0, 2592000, "monthly")],
+        )
+
     def test_balance_body_without_number_raises(self):
         self._key()
         self._routes(

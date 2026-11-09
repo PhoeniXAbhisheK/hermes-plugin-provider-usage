@@ -1428,6 +1428,31 @@ def fetch_kimi():
             )
             if row is not None:
                 windows.append(row)
+        usages = payload.get("usages")
+        if isinstance(usages, dict):
+            for name, label, duration, scope, model in (
+                ("limit_5h", "5h", 5 * 3600, "account", None),
+                ("limit_month_total", "Monthly", 30 * 86400, "account", None),
+                ("limit_month_code", "Code", 30 * 86400, "model", "code"),
+            ):
+                entry = usages.get(name)
+                if not isinstance(entry, dict):
+                    continue
+                percent = _num(entry.get("used_ratio"))
+                if percent is None:
+                    continue
+                if name == "limit_5h" and any(row.get("key") == "5h" for row in windows):
+                    continue
+                row = _window(
+                    label,
+                    percent * 100.0,
+                    _reset_text(entry.get("reset_time"), entry.get("resetTime")),
+                    duration=duration,
+                    scope=scope,
+                    model=model,
+                )
+                if row is not None:
+                    windows.append(row)
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
     available, balance_url = _fetch_moonshot_balance(headers)
