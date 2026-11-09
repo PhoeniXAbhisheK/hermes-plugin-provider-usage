@@ -21,9 +21,11 @@ Credential sources (read-only):
   surfaces as unavailable; re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic: resolved by Hermes' own read-only account-usage helper, falling
-  back to the Claude Code OAuth token in ``~/.claude/.credentials.json`` when
-  the helper returns nothing (the desktop plugin host). A refused helper read
+- Anthropic: resolved by Hermes' own read-only account-usage helper, then by
+  the ``claude-subscription-directsdk-experimental`` provider when Nous'
+  claude-subscription-directsdk plugin is installed (it asks Claude Code for
+  its plan limits; the token never reaches this plugin), then by the Claude
+  Code OAuth token in ``~/.claude/.credentials.json``. A refused helper read
   keeps the last reading for up to six hours, marked stale.
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
@@ -34,7 +36,7 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes, else the Claude Code token)
+- https://api.anthropic.com/api/oauth/usage (via Hermes, then DirectSDK, else the Claude Code token)
 - https://api.deepseek.com/user/balance
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
@@ -44,7 +46,9 @@ Endpoints hit (GET, machine credentials attached):
   subscription keys are region-bound
 - https://api.github.com/copilot_internal/user
 
-All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
+All provider HTTPS calls use httpx in-process; this plugin spawns no
+subprocesses. The DirectSDK provider's own usage hook runs the Claude Code CLI
+behind a zero-inference admission gate; that is the provider's code.
 
 Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
 while held, the last reading is served marked ``stale`` and the endpoint is not polled.
@@ -764,13 +768,19 @@ def _snapshot_age(snap):
         return None
 
 
+# Provider profile registered by Nous' claude-subscription-directsdk plugin.
+DIRECTSDK_PROVIDER = "claude-subscription-directsdk-experimental"
+
+_ANTHROPIC_SNAP_WINDOWS = {
+    "current session": ("5h", 5 * 3600, "account", None),
+    "current week": ("Weekly", 7 * 86400, "account", None),
+    "opus week": ("Opus", 7 * 86400, "model", "opus"),
+    "sonnet week": ("Sonnet", 7 * 86400, "model", "sonnet"),
+    "fable week": ("Fable", 7 * 86400, "model", "fable"),
+}
 _SNAP_WINDOWS = {
-    "anthropic": {
-        "current session": ("5h", 5 * 3600, "account", None),
-        "current week": ("Weekly", 7 * 86400, "account", None),
-        "opus week": ("Opus", 7 * 86400, "model", "opus"),
-        "sonnet week": ("Sonnet", 7 * 86400, "model", "sonnet"),
-    },
+    "anthropic": _ANTHROPIC_SNAP_WINDOWS,
+    DIRECTSDK_PROVIDER: _ANTHROPIC_SNAP_WINDOWS,
     "openai-codex": {
         "session": ("5h", 5 * 3600, "account", None),
         "weekly": ("Weekly", 7 * 86400, "account", None),
@@ -948,7 +958,7 @@ def _newest_reading(provider, helper_payload):
     return best
 
 
-def _helper_or_direct(provider, direct, normalize=None):
+def _helper_or_direct(provider, direct, normalize=None, helper=None):
     """Hermes helper first, then one direct token attempt once the reading is old.
 
     The decision uses the newest reading available: the helper's stale payload or
@@ -957,18 +967,25 @@ def _helper_or_direct(provider, direct, normalize=None):
     once per HELPER_COOLDOWN_S, and a failure returns the newest reading rather
     than an error. With no reading at all the direct token is the ordinary
     fallback. A helper payload with nothing to render is a skip, not a card.
+
+    ``helper`` defaults to the account-usage helper for ``provider``. A provider
+    with a second helper source passes its own callable; the cooldowns and the
+    snapshot cache remain keyed by the providers that callable asks.
     """
 
     def finish(payload):
         return normalize(payload) if normalize is not None else payload
 
-    helper = _hermes_usage(provider)
-    if helper is not None and not helper.get("stale"):
-        if not _has_rows(helper):
+    if helper is None:
+        helper_payload = _hermes_usage(provider)
+    else:
+        helper_payload = helper()
+    if helper_payload is not None and not helper_payload.get("stale"):
+        if not _has_rows(helper_payload):
             raise _Skip(provider)
-        return finish(helper)
+        return finish(helper_payload)
     now = time.time()
-    best = _newest_reading(provider, helper)
+    best = _newest_reading(provider, helper_payload)
     if best is None:
         return direct()
     age, reading = best
@@ -1019,8 +1036,30 @@ def _claude_code_oauth_token():
     return token
 
 
+def _anthropic_helper():
+    """Hermes anthropic reading, then the DirectSDK provider.
+
+    A fresh anthropic reading wins without asking DirectSDK. Otherwise a fresh
+    DirectSDK reading replaces a stale anthropic one; when neither is fresh, the
+    anthropic reading is kept and DirectSDK is used only when it is absent.
+    DirectSDK rows keep the Anthropic card id.
+    """
+    anthropic = _hermes_usage("anthropic")
+    if anthropic is not None and not anthropic.get("stale"):
+        return anthropic
+    direct = _hermes_usage(DIRECTSDK_PROVIDER)
+    if direct is not None and not direct.get("stale"):
+        return dict(direct, id="anthropic")
+    if anthropic is not None:
+        return anthropic
+    if direct is not None:
+        return dict(direct, id="anthropic")
+    return None
+
+
 def fetch_anthropic():
-    return _helper_or_direct("anthropic", _anthropic_direct)
+    """Anthropic quota windows: Hermes sign-in, DirectSDK, then the token on disk."""
+    return _helper_or_direct("anthropic", _anthropic_direct, helper=_anthropic_helper)
 
 
 def _anthropic_direct():
