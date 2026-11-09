@@ -3,13 +3,32 @@
 Notable changes to the Provider Usage plugin. Versions follow the tags in this
 repository; the date is the release date.
 
-## Unreleased
+## 0.4.1 (2026-11-09)
+
+Panel:
+
+- [behaviour] Pins replace the eye toggles. Your saved eye choices carry over as
+  pins. With nothing pinned, the status bar follows the provider of the chat you
+  are in, and from four or seven pins the bar steps down to a compact form.
+- [behaviour] The bar shows each provider's most used window unless you choose
+  one with "Show in status bar". It used to show the 5h window.
+- The popover is sorted by risk, with a Needs attention group, All / Pinned
+  filters, Pin all / Unpin all, and `+N more` when a provider has more windows
+  than fit.
+- Clicking a provider opens one tab per window with a usage chart over the whole
+  window (now marker, projected path, alert line) and Burn, At reset and Pace.
+- Alerts can be set per window with "Alert at": 50, 70, 80, 90, 95 or off, 80 by
+  default.
+- [behaviour] Windows of a known length share the labels 5h, Weekly and Monthly
+  across providers, so OpenCode's 7d reads Weekly and Anthropic's current session
+  and week read 5h and Weekly.
+- When the panel is newer than the running backend, it says so ("Restart the
+  Hermes dashboard to finish updating.") instead of showing wrong values.
+
+Providers and backend:
 
 - Keep the last reading when the Hermes usage helper refuses, instead of
   dropping the provider for one refresh (#20).
-- [behaviour] MiniMax probes only `api.minimaxi.com` and `api.minimax.io`; the
-  two `www` variants are no longer contacted. Affected test:
-  `test_fetchers_only_reach_declared_hosts`.
 - [behaviour] Codex reads only the OAuth access token from `~/.codex/auth.json`.
   The `OPENAI_API_KEY` entry is never sent to the ChatGPT backend. Affected
   tests: `test_platform_key_is_never_sent`,
@@ -32,8 +51,9 @@ repository; the date is the release date.
   answering from a snapshot up to 4 minutes old.
 - [behaviour] A provider that answers with no rows is left out instead of showing a
   card with a fabricated 0%.
-- [behaviour] Codex windows are labelled by their own length: 5h, 7d or Monthly. A
-  monthly-only plan used to show as 5h.
+- [behaviour] Codex windows are labelled by their own length: 5h, Weekly or
+  Monthly. A monthly-only plan used to show as 5h. The tag shows the account's
+  plan instead of always Plus.
 - [behaviour] Balances in different currencies get distinct rows and separate
   history, so two DeepSeek balances no longer collide.
 - Computed reset times are rounded to the minute and compared within a tolerance,
@@ -43,8 +63,13 @@ repository; the date is the release date.
   once it is more than ten minutes old the backend tries the provider's own token
   at most once per five minutes. A failed or rate-limited attempt keeps the newest
   reading available, so a good reading is never replaced by an older one.
-- Kimi shows its monthly pools again: the coding usage endpoint now reports them under `usages`, which is read alongside the older `usage` block (#58).
-- Anthropic reads plan limits through Nous' Claude Subscription DirectSDK plugin when Hermes has no Anthropic sign-in, before the Claude Code token on disk (#22).
+- Kimi shows its monthly pools again: the coding usage endpoint now reports them
+  under `usages`, which is read alongside the older `usage` block (#58).
+- Anthropic reads plan limits through Nous' Claude Subscription DirectSDK plugin
+  when Hermes has no Anthropic sign-in, before the Claude Code token on disk (#22).
+- GitHub Copilot shows on Hermes 0.22.5 or older only. Hermes 0.22.6 moved Copilot
+  out of core into the `github-copilot` plugin, which does not report usage yet,
+  so the card stays hidden on newer Hermes.
 - Python 3.11 or newer is required, matching Hermes.
 
 ## 0.3.1 (2026-10-23)
