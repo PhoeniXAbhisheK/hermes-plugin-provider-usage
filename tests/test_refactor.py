@@ -1,7 +1,6 @@
 """Tests for the Step 5.1 registry and the Step 5.3 host probe helper."""
 
 import importlib.util
-import re
 import sys
 import time
 import unittest
@@ -110,11 +109,10 @@ class RegistryTest(Base):
             {pid: p["fetch"] for pid, p in API.PROVIDERS.items()},
         )
 
-    def test_codes_match_the_desktop_table(self):
+    def test_desktop_reads_codes_from_the_payload(self):
         source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
-        block = re.search(r"const CODE = \{(.*?)\}", source, re.S).group(1)
-        desktop = dict(re.findall(r"'?([A-Za-z0-9-]+)'?\s*:\s*'([A-Za-z0-9-]+)'", block))
-        self.assertEqual({pid: p["code"] for pid, p in API.PROVIDERS.items()}, desktop)
+        self.assertNotIn("const CODE", source)
+        self.assertIn("p.code || p.id", source)
 
 
 class CollectedCodeTest(Base):
