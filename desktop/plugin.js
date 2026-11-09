@@ -100,17 +100,16 @@ function bindStorage(s) {
   $alertAt.listen(v => persist(STORE_ALERT_AT, v))
 }
 
-async function fetchUsage(fresh, manual) {
+async function fetchUsage(manual) {
   if (!rest) throw new Error('plugin backend not bound')
-  if (manual) return rest('/usage?fresh=1&refresh=1')
-  return rest(fresh ? '/usage?fresh=1' : '/usage')
+  return rest(manual ? '/usage?fresh=1&refresh=1' : '/usage?fresh=1')
 }
 
 function useUsage() {
   const interval = useValue($interval)
   return useQuery({
     queryKey: USAGE_KEY,
-    queryFn: () => fetchUsage(true),
+    queryFn: () => fetchUsage(false),
     refetchInterval: interval,
     retry: 1,
     staleTime: 30000
@@ -146,19 +145,20 @@ export function money(v, cur) {
 }
 
 export const pct = v => Math.round(Number(v) || 0) + '%'
-const CODE = {
-  'opencode-go': 'opencode',
-  'openai-codex': 'codex',
-  openrouter: 'openrouter',
-  anthropic: 'claude',
-  copilot: 'copilot',
-  nous: 'nous',
-  zai: 'zai',
-  'kimi-coding': 'kimi',
-  minimax: 'minimax',
-  deepseek: 'deepseek'
+
+function rowsOf(p) {
+  return (Array.isArray(p && p.windows) ? p.windows : []).concat(
+    Array.isArray(p && p.money) ? p.money : []
+  )
 }
-export const code = p => CODE[p.id] || p.id
+
+function nowOf(nowMs) {
+  return isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+}
+
+function clampPct(v) {
+  return Math.max(0, Math.min(100, Number(v) || 0))
+}
 
 export function etaText(iso) {
   if (!iso) return ''
@@ -183,20 +183,7 @@ export function fmtEta(sec) {
 }
 
 export function usedPercentOf(w) {
-  return Math.max(0, Math.min(100, Number(w && w.used_pct) || 0))
-}
-
-export function capUsedPercent(m) {
-  const total = Number(m && m.total) || 0
-  const left = Number(m && m.left) || 0
-  return total > 0 ? Math.max(0, Math.min(100, ((total - left) / total) * 100)) : 0
-}
-
-export function providerWarn(p) {
-  if (!p || p.status !== 'ok') return false
-  const rows = (p.windows || []).concat(p.money || [])
-  for (const row of rows) if (row.warn === true) return true
-  return false
+  return clampPct(w && w.used_pct)
 }
 
 /* ---------- session provider (read on focus/model change only) ---------- */
@@ -205,14 +192,9 @@ const $sessionProvider = atom(null)
 
 const $alertAt = atom({})
 const ALERT_STEPS = [50, 70, 80, 90, 95]
-const ALERT_OPTIONS = [
-  { id: '50', label: '50' },
-  { id: '70', label: '70' },
-  { id: '80', label: '80' },
-  { id: '90', label: '90' },
-  { id: '95', label: '95' },
+const ALERT_OPTIONS = ALERT_STEPS.map(n => ({ id: String(n), label: String(n) })).concat([
   { id: 'off', label: 'Off' }
-]
+])
 
 function validAlertValue(value) {
   if (value === 'off') return 'off'
@@ -237,12 +219,7 @@ export function alertThreshold(choice, providerId, row) {
   const map = choice && typeof choice === 'object' ? choice : {}
   const key = providerId + ':' + row.key
   if (!Object.prototype.hasOwnProperty.call(map, key)) return null
-  const value = validAlertValue(map[key])
-  return value === null ? null : value
-}
-
-export function currentAlertAt() {
-  return { ...$alertAt.get() }
+  return validAlertValue(map[key])
 }
 
 export function setAlert(providerId, rowKey, value) {
@@ -368,7 +345,6 @@ export function rowView(row, mode) {
       value: money(amount, row.cur),
       totalText: total > 0 ? money(total, row.cur) : '',
       shown: cap === null ? 0 : shown,
-      width: cap === null ? 0 : shown,
       eta: Number(row.actionable_eta) || null
     }
   }
@@ -379,19 +355,8 @@ export function rowView(row, mode) {
     value: pct(shown),
     totalText: '',
     shown: shown,
-    width: shown,
     eta: Number(row && row.actionable_eta) || null
   }
-}
-
-/* One-line summary for the bar, in the CURRENT value mode: the bar quota row. */
-export function summary(p, mode, choice) {
-  if (!p || p.status !== 'ok') return '-'
-  const key = barQuotaKey(p, choice)
-  const row = (Array.isArray(p.windows) ? p.windows : [])
-    .concat(Array.isArray(p.money) ? p.money : [])
-    .find(r => r && r.key === key)
-  return row ? rowView(row, mode).value : '-'
 }
 
 /* ---------- redesign phase 1: pins, session follow, grouping, bar layout ---------- */
@@ -502,7 +467,7 @@ export function staleBackend(data) {
   if (!data || !Array.isArray(data.providers)) return false
   for (const p of data.providers) {
     if (!p || p.status !== 'ok') continue
-    for (const row of (p.windows || []).concat(p.money || [])) {
+    for (const row of rowsOf(p)) {
       if (!row || typeof row !== 'object') continue
       if (!('key' in row) || !('used_pct' in row)) return true
     }
@@ -518,7 +483,7 @@ const ACCENT_COLOR = 'var(--ui-accent)'
  * already carries an actionable ETA, or projects to full before its reset. */
 export function providerAttention(p, nowMs) {
   if (!p || p.status !== 'ok') return false
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const now = nowOf(nowMs)
   for (const w of p.windows || []) {
     if (!w) continue
     if (w.warn === true) return true
@@ -537,7 +502,7 @@ export function providerAttention(p, nowMs) {
  * also considers its derived run-out projection when measured history is absent. */
 export function attentionNote(p, nowMs) {
   if (!p || p.status !== 'ok') return ''
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const now = nowOf(nowMs)
   let best = null
   const consider = (eta, money) => {
     const value = Number(eta)
@@ -559,9 +524,13 @@ export function groupProviders(providers, view, set, nowMs) {
   const rows = Array.isArray(providers) ? providers : []
   const pins = pinnedIds(set, rows.map(p => p.id))
   const kept = view === 'pinned' ? rows.filter(p => pins.indexOf(p.id) !== -1) : rows.slice()
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
-  const attention = kept.filter(p => providerAttention(p, now))
-  const rest = kept.filter(p => !providerAttention(p, now))
+  const now = nowOf(nowMs)
+  const attention = []
+  const rest = []
+  for (const p of kept) {
+    if (providerAttention(p, now)) attention.push(p)
+    else rest.push(p)
+  }
   const groups = []
   if (attention.length) groups.push({ title: 'Needs attention', rows: attention })
   if (rest.length) groups.push({ title: attention.length ? 'Everything else' : 'Providers', rows: rest })
@@ -592,7 +561,7 @@ function quotaUsed(row) {
  * (null lowest, ties in payload order, no usable value at all = first row). */
 export function barQuotaKey(p, choice) {
   if (!p) return null
-  const rows = (Array.isArray(p.windows) ? p.windows : []).concat(Array.isArray(p.money) ? p.money : [])
+  const rows = rowsOf(p)
   if (!rows.length) return null
   const picked = choice && typeof choice === 'object' ? choice[p.id] : null
   if (picked && rows.some(r => r && r.key === picked)) return picked
@@ -600,9 +569,7 @@ export function barQuotaKey(p, choice) {
   let bestUsed = -Infinity
   for (const row of rows) {
     if (!row) continue
-    const raw = row.used_pct
-    const used = raw === null || raw === undefined ? -Infinity : Number(raw)
-    const score = isFinite(used) ? used : -Infinity
+    const score = quotaUsed(row)
     if (best === null || score > bestUsed) {
       best = row
       bestUsed = score
@@ -643,12 +610,13 @@ export function visibleQuotas(p, barKey) {
 
 const CHART_W = 336
 const CHART_HISTORY_W = 220
+const CHART_H = 70
 const CHART_BASE = 66
 const CHART_SCALE = 0.64
 const CHART_HISTORY_S = 21600
 
 function chartY(pct) {
-  const y = CHART_BASE - Math.max(0, Math.min(100, Number(pct) || 0)) * CHART_SCALE
+  const y = CHART_BASE - clampPct(pct) * CHART_SCALE
   return Math.round(y * 100) / 100
 }
 
@@ -668,7 +636,7 @@ export function derivedRate(row, nowMs) {
   if (!row || row.kind === 'money') return null
   const duration = Number(row.duration_seconds)
   const reset = Date.parse(row.resets_at)
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const now = nowOf(nowMs)
   const used = Number(row.used_pct)
   if (!isFinite(duration) || duration <= 0 || !isFinite(reset) || !isFinite(used)) return null
   const elapsed = duration - (reset - now) / 1000
@@ -691,7 +659,7 @@ export function projectedFull(row, nowMs) {
   if (!(derived.rate > 0)) return null
   const seconds = (100 - used) / derived.rate
   if (!(seconds > 0)) return null
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const now = nowOf(nowMs)
   const untilReset = (Date.parse(row.resets_at) - now) / 1000
   return seconds < untilReset ? seconds : null
 }
@@ -706,8 +674,8 @@ export function chartModel(row, nowMs, alertAt) {
   const raw = row.used_pct
   if (raw === null || raw === undefined) return null
   const threshold = alertAt === 'off' ? null : alertAt === null || alertAt === undefined ? 80 : Number(alertAt)
-  const used = Math.max(0, Math.min(100, Number(raw) || 0))
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const used = clampPct(raw)
+  const now = nowOf(nowMs)
   const total = Number(row.total) || 0
   const history = Array.isArray(row.history) ? row.history : []
   const points = []
@@ -777,8 +745,8 @@ export function chartModel(row, nowMs, alertAt) {
 export function statsFor(row, nowMs, mode) {
   if (!row) return []
   const raw = row.used_pct
-  const used = raw === null || raw === undefined ? null : Math.max(0, Math.min(100, Number(raw) || 0))
-  const now = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const used = raw === null || raw === undefined ? null : clampPct(raw)
+  const now = nowOf(nowMs)
   const remaining = mode === 'remaining'
   if (row.kind === 'money') {
     const left = Number(row.left)
@@ -874,9 +842,7 @@ export function barLayout(entries, following, availPx) {
       mode: 'meters',
       meters: ordered.map(e => {
         const raw = e.used_pct
-        const height = raw === null || raw === undefined
-          ? 30
-          : Math.max(0, Math.min(100, Number(raw) || 0))
+        const height = raw === null || raw === undefined ? 30 : clampPct(raw)
         return { code: e.code, height: height }
       }),
       summary: (() => {
@@ -911,11 +877,12 @@ export function barModel(providers, set, sessionProvider, mode, availPx, choice)
   const visible = rows.filter(p => ids.indexOf(p.id) !== -1)
   const entries = visible.map(p => {
     const key = barQuotaKey(p, choice)
-    const row = (p.windows || []).concat(p.money || []).find(r => r && r.key === key) || null
+    const row = rowsOf(p).find(r => r && r.key === key) || null
+    const value = row && p.status === 'ok' ? rowView(row, mode).value : '-'
     return {
       id: p.id,
-      code: p.code || code(p),
-      value: summary(p, mode, choice),
+      code: p.code || p.id,
+      value: value,
       used_pct: row ? row.used_pct : null,
       attention: providerAttention(p),
       name: p.name,
@@ -1024,28 +991,6 @@ export function barContent(model) {
     }))
   })
   return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
-}
-
-export function tipLine(p, mode) {
-  if (p.status !== 'ok') return 'unavailable'
-  const moneyRows = Array.isArray(p.money) ? p.money : []
-  if (moneyRows.length) {
-    return moneyRows
-      .map(m => {
-        const view = rowView(m, mode)
-        const tag = view.eta ? ' (' + fmtEta(view.eta) + ')' : ''
-        const amount = view.value + (view.totalText ? '/' + view.totalText : '')
-        return view.label + ' ' + amount + tag
-      })
-      .join(' · ')
-  }
-  return (p.windows || [])
-    .map(w => {
-      const view = rowView(w, mode)
-      const tag = view.eta ? ' (' + fmtEta(view.eta) + ')' : ''
-      return view.label + ' ' + view.value + tag
-    })
-    .join(' · ')
 }
 
 export function tipBody(lines, stamp) {
@@ -1271,7 +1216,7 @@ function quotaCell(row, ctx) {
               style: {
                 display: 'block',
                 height: '100%',
-                width: Math.max(0, Math.min(100, Number(view.width) || 0)) + '%',
+                width: clampPct(view.shown) + '%',
                 background: warn ? WARN_COLOR : ACCENT_COLOR
               }
             })
@@ -1292,7 +1237,7 @@ function chartElement(p, row, model) {
   const series = model.series.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' ')
   const proj = model.projection
   return jsxs('svg', {
-    viewBox: '0 0 336 70',
+    viewBox: '0 0 ' + CHART_W + ' ' + CHART_H,
     width: '100%',
     role: 'img',
     'aria-label':
@@ -1304,7 +1249,7 @@ function chartElement(p, row, model) {
             key: 'alert',
             x1: 0,
             y1: model.alert.y,
-            x2: 336,
+            x2: CHART_W,
             y2: model.alert.y,
             stroke: 'currentColor',
             strokeDasharray: '3 3',
@@ -1333,7 +1278,7 @@ function chartElement(p, row, model) {
             strokeLinecap: 'round',
             opacity: model.average ? 0.55 : undefined
           })
-        : jsx('circle', { key: 'current', cx: 220, cy: model.current[1], r: 3, fill: 'currentColor' }),
+        : jsx('circle', { key: 'current', cx: CHART_HISTORY_W, cy: model.current[1], r: 3, fill: 'currentColor' }),
       proj
         ? jsx('line', {
             key: 'proj',
@@ -1349,10 +1294,10 @@ function chartElement(p, row, model) {
       proj ? jsx('circle', { key: 'end', cx: proj.x1, cy: proj.y1, r: 3, fill: 'currentColor' }) : null,
       jsx('line', {
         key: 'now',
-        x1: 220,
+        x1: CHART_HISTORY_W,
         y1: 0,
-        x2: 220,
-        y2: 70,
+        x2: CHART_HISTORY_W,
+        y2: CHART_H,
         stroke: 'currentColor',
         strokeDasharray: '2 3',
         opacity: 0.35
@@ -1398,12 +1343,24 @@ function statsElement(row, nowMs, mode) {
   })
 }
 
+function actionButtonStyle(active) {
+  return {
+    height: 26,
+    padding: '0 10px',
+    borderRadius: 6,
+    fontSize: 11,
+    fontWeight: 500,
+    cursor: 'pointer',
+    border: '1px solid ' + (active ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
+    background: active ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
+    color: active ? 'var(--ui-accent)' : 'var(--ui-text-secondary)'
+  }
+}
+
 /* The open row's detail panel: tabs per quota, chart, three stats, and the
  * "show this quota in the status bar" action. Hook-free for tests. */
 export function expandedPanel(p, ctx) {
-  const quotas = (Array.isArray(p.windows) ? p.windows : []).concat(
-    Array.isArray(p.money) ? p.money : []
-  )
+  const quotas = rowsOf(p)
   if (!quotas.length) return null
   const barKey = barQuotaKey(p, ctx.choice)
   const picked = ctx.tab && quotas.some(q => q && q.key === ctx.tab) ? ctx.tab : barKey
@@ -1416,8 +1373,8 @@ export function expandedPanel(p, ctx) {
         ? money(tabRow.left, tabRow.cur) + ' of ' + money(tabRow.total, tabRow.cur) + ' left'
         : money(tabRow.left, tabRow.cur) + ' left'
       : etaText(tabRow.resets_at)
-  const model = chartModel(tabRow, ctx.now, alertThreshold(ctx.alertAt, p.id, tabRow))
   const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
+  const model = chartModel(tabRow, ctx.now, threshold)
   const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
     style: {
@@ -1465,17 +1422,7 @@ export function expandedPanel(p, ctx) {
           jsx('button', {
             type: 'button',
             onClick: () => ctx.onShowInBar && ctx.onShowInBar(tabRow.key),
-            style: {
-              height: 26,
-              padding: '0 10px',
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 500,
-              cursor: 'pointer',
-              border: '1px solid ' + (shownInBar ? 'var(--ui-accent)' : 'var(--ui-stroke-tertiary)'),
-              background: shownInBar ? 'color-mix(in srgb, var(--ui-accent) 15%, transparent)' : 'transparent',
-              color: shownInBar ? 'var(--ui-accent)' : 'var(--ui-text-secondary)'
-            },
+            style: actionButtonStyle(shownInBar),
             children: shownInBar ? 'Shown in status bar' : 'Show ' + tabRow.label + ' in status bar'
           }),
           tabRow.kind === 'money'
@@ -1484,17 +1431,7 @@ export function expandedPanel(p, ctx) {
                 type: 'button',
                 onClick: ctx.onAlertToggle,
                 'aria-expanded': ctx.alertOpen === true,
-                style: {
-                  height: 26,
-                  padding: '0 10px',
-                  borderRadius: 6,
-                  fontSize: 11,
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  border: '1px solid var(--ui-stroke-tertiary)',
-                  background: 'transparent',
-                  color: 'var(--ui-text-secondary)'
-                },
+                style: actionButtonStyle(false),
                 children: alertLabel
               })
         ]
@@ -1533,9 +1470,7 @@ export function providerRowElement(p, ctx) {
   const pinned = pins.indexOf(p.id) !== -1
   const barKey = barQuotaKey(p, ctx.choice)
   const barHere = (ctx.barIds || []).indexOf(p.id) !== -1
-  const windows = Array.isArray(p.windows) ? p.windows : []
-  const moneyRows = Array.isArray(p.money) ? p.money : []
-  const all = windows.concat(moneyRows)
+  const all = rowsOf(p)
   const toggle = pinButton(p, pinned, ctx.onPin)
   const note = attentionNote(p, ctx.now)
   const stale = staleText(p)
@@ -1652,7 +1587,7 @@ export function providerRowElement(p, ctx) {
         style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 12, paddingLeft: 16, paddingRight: 30 },
         children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols, now: ctx.now }))
       }),
-      open ? expandedPanel(p, { mode: ctx.mode, choice: ctx.choice, barIds: ctx.barIds, tab: ctx.tab, onTab: ctx.onTab, onShowInBar: ctx.onShowInBar, alertAt: ctx.alertAt, alertOpen: ctx.alertOpen, onAlertToggle: ctx.onAlertToggle, onAlertClose: ctx.onAlertClose, onAlert: ctx.onAlert, now: ctx.now }) : null
+      open ? expandedPanel(p, ctx) : null
     ]
   })
 }
@@ -1704,7 +1639,7 @@ function UsagePanel() {
   const refresh = () => {
     if (spinning) return
     setSpinning(true)
-    fetchUsage(true, true)
+    fetchUsage(true)
       .then(d => qc.setQueryData(USAGE_KEY, d))
       .catch(() => {})
       .then(() => setTimeout(() => setSpinning(false), 600))
