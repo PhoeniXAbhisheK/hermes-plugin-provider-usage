@@ -668,11 +668,13 @@ export function projectedFull(row, nowMs) {
  * rows store the used amount in the row's currency (see _row_history in
  * dashboard/plugin_api.py). Money values are divided by the row total so the
  * chart stays on the same 0-100 axis. */
-export function chartModel(row, nowMs, alertAt) {
+export function chartModel(row, nowMs, alertAt, mode) {
   if (!row) return null
   const isMoney = row.kind === 'money'
   const raw = row.used_pct
   if (raw === null || raw === undefined) return null
+  const remaining = mode === 'remaining'
+  const plotY = pct => chartY(remaining ? 100 - pct : pct)
   const threshold = alertAt === 'off' ? null : alertAt === null || alertAt === undefined ? 80 : Number(alertAt)
   const used = clampPct(raw)
   const now = nowOf(nowMs)
@@ -703,7 +705,7 @@ export function chartModel(row, nowMs, alertAt) {
     const x = windowAxis
       ? Math.max(0, Math.min(1, (t * 1000 - start) / durationMs)) * CHART_W
       : CHART_HISTORY_W - ((now / 1000 - t) / CHART_HISTORY_S) * CHART_HISTORY_W
-    points.push([x, chartY(pct)])
+    points.push([x, plotY(pct)])
   }
   points.sort((a, b) => a[0] - b[0])
   const derived = isMoney ? null : derivedRate(row, now)
@@ -712,8 +714,8 @@ export function chartModel(row, nowMs, alertAt) {
     points.length >= 2
       ? points
       : average
-        ? [[0, chartY(0)], [nowX, chartY(used)]]
-        : [[nowX, chartY(used)]]
+        ? [[0, plotY(0)], [nowX, plotY(used)]]
+        : [[nowX, plotY(used)]]
   const measured = isMoney ? null : windowRate(row)
   const rate = isMoney ? null : average ? derived.rate : measured !== null ? measured : derived ? derived.rate : null
   let projection = null
@@ -722,7 +724,7 @@ export function chartModel(row, nowMs, alertAt) {
   if (isMoney) {
     const depletes = Number(row.depletes_in_seconds)
     if (isFinite(depletes) && depletes > 0) {
-      projection = { x0: nowX, y0: chartY(used), x1: CHART_W, y1: chartY(100) }
+      projection = { x0: nowX, y0: plotY(used), x1: CHART_W, y1: plotY(100) }
       valueAtReset = 100
       overflow = true
     }
@@ -734,22 +736,29 @@ export function chartModel(row, nowMs, alertAt) {
         overflow = true
         const to100 = rate > 0 ? (100 - used) / rate : seconds
         const x = Math.min(CHART_W, nowX + (to100 / seconds) * (CHART_W - nowX))
-        projection = { x0: nowX, y0: chartY(used), x1: x, y1: chartY(100) }
+        projection = { x0: nowX, y0: plotY(used), x1: x, y1: plotY(100) }
       } else {
-        projection = { x0: nowX, y0: chartY(used), x1: CHART_W, y1: chartY(valueAtReset) }
+        projection = { x0: nowX, y0: plotY(used), x1: CHART_W, y1: plotY(valueAtReset) }
       }
     }
   }
-  const alert = threshold === null ? null : { value: threshold, y: chartY(threshold) }
+  const alert =
+    threshold === null
+      ? null
+      : {
+          value: threshold,
+          y: plotY(threshold),
+          label: remaining ? 'alert ' + threshold + '% used' : 'alert ' + threshold + '%'
+        }
   let nowLabel = { x: CHART_HISTORY_W + 3, y: 68, anchor: 'start' }
   if (windowAxis) {
-    const currentY = chartY(used)
+    const currentY = plotY(used)
     const anchor = nowX > CHART_W - 24 ? 'end' : 'start'
     const x = anchor === 'start' ? nowX + 3 : nowX - 3
     let y = currentY < CHART_H / 2 ? 68 : 9
     if (alert && y === 9) {
       const alertY = Math.max(9, alert.y - 3.8)
-      const alertWidth = ('alert ' + alert.value + '%').length * 4.7
+      const alertWidth = alert.label.length * 4.7
       const labelLeft = anchor === 'start' ? x : x - 15
       const labelRight = anchor === 'start' ? x + 15 : x
       if (labelLeft < alertWidth && labelRight > 0 && alertY + 10 <= 68) y = alertY + 10
@@ -760,7 +769,7 @@ export function chartModel(row, nowMs, alertAt) {
   const amber = rowAttention(row, now)
   return {
     series: series,
-    current: [nowX, chartY(used)],
+    current: [nowX, plotY(used)],
     nowX: nowX,
     nowLabel: nowLabel,
     projection: projection,
@@ -1294,7 +1303,7 @@ function chartElement(p, row, model) {
             fontSize: 8.5,
             fill: 'currentColor',
             opacity: 0.55,
-            children: 'alert ' + model.alert.value + '%'
+            children: model.alert.label
           })
         : null,
       model.series.length >= 2
@@ -1405,7 +1414,7 @@ export function expandedPanel(p, ctx) {
         : money(tabRow.left, tabRow.cur) + ' left'
       : etaText(tabRow.resets_at)
   const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
-  const model = chartModel(tabRow, ctx.now, threshold)
+  const model = chartModel(tabRow, ctx.now, threshold, ctx.mode)
   const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
     style: {

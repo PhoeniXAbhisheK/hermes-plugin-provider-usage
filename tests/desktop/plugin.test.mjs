@@ -1351,7 +1351,7 @@ test('chartModel puts 5h, weekly and monthly windows on one whole-window axis', 
     assert.ok(distance >= 6)
     if (model.alert) {
       const alertY = Math.max(9, model.alert.y - 3.8)
-      const alertWidth = ('alert ' + model.alert.value + '%').length * 4.7
+      const alertWidth = model.alert.label.length * 4.7
       const left = model.nowLabel.anchor === 'start' ? model.nowLabel.x : model.nowLabel.x - 15
       const right = model.nowLabel.anchor === 'start' ? model.nowLabel.x + 15 : model.nowLabel.x
       if (left < alertWidth && right > 0) assert.ok(Math.abs(model.nowLabel.y - alertY) >= 10)
@@ -1444,6 +1444,110 @@ test('chartModel keeps the old axis for money and windows without a duration', a
   assert.equal(noDuration.nowX, 220)
   assert.deepEqual(noDuration.nowLabel, { x: 223, y: 68, anchor: 'start' })
   assert.equal(noDuration.series[0][0], 220)
+})
+
+test('chartModel plots remaining values for a window', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 20,
+    eta_seconds: 30240,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+  }
+  const start = Date.parse(row.resets_at) - row.duration_seconds * 1000
+  const m = chartModel(
+    {
+      ...row,
+      history: [
+        [start / 1000 + 60, 10],
+        [now / 1000, 20]
+      ]
+    },
+    now,
+    80,
+    'remaining'
+  )
+  assert.equal(m.series[0][1], 8.4)
+  assert.equal(m.series[1][1], 14.8)
+  assert.equal(m.current[1], 14.8)
+  assert.equal(m.projection.y0, 14.8)
+  assert.ok(Math.abs(m.projection.y1 - 40.4) < 0.01)
+})
+
+test('chartModel plots remaining values for money and ends overflow at zero left', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const money = chartModel(
+    {
+      kind: 'money',
+      used_pct: 40,
+      total: 100,
+      left: 60,
+      cur: 'USD',
+      depletes_in_seconds: 86400,
+      history: [
+        [now / 1000 - 3600, 20],
+        [now / 1000, 40]
+      ]
+    },
+    now,
+    80,
+    'remaining'
+  )
+  assert.equal(money.series[0][1], 14.8)
+  assert.equal(money.series[1][1], 27.6)
+  assert.equal(money.current[1], 27.6)
+  assert.equal(money.projection.y0, 27.6)
+  assert.equal(money.projection.y1, 66)
+  const row = {
+    kind: 'window',
+    used_pct: 90,
+    eta_seconds: 1000,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+  }
+  const start = Date.parse(row.resets_at) - row.duration_seconds * 1000
+  const history = [
+    [start / 1000 + 60, 80],
+    [now / 1000, 90]
+  ]
+  const used = chartModel({ ...row, history: history }, now, 80, 'used')
+  const remaining = chartModel({ ...row, history: history }, now, 80, 'remaining')
+  assert.equal(remaining.overflow, true)
+  assert.equal(remaining.projection.x1, used.projection.x1)
+  assert.equal(remaining.projection.y1, 66)
+})
+
+test('chartModel plots the average, alert and now label in remaining terms', async () => {
+  const { chartModel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const row = {
+    kind: 'window',
+    used_pct: 20,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
+  }
+  const used = chartModel(row, now, 80, 'used')
+  const remaining = chartModel(row, now, 80, 'remaining')
+  assert.deepEqual(used, chartModel(row, now, 80))
+  assert.equal(remaining.series[0][1], 2)
+  assert.equal(remaining.series[1][1], 14.8)
+  assert.equal(remaining.alert.y, 53.2)
+  assert.equal(remaining.alert.label, 'alert 80% used')
+  assert.equal(used.alert.y, 14.8)
+  assert.equal(used.alert.label, 'alert 80%')
+  const distance = Math.hypot(
+    remaining.nowLabel.x - remaining.current[0],
+    remaining.nowLabel.y - remaining.current[1]
+  )
+  assert.ok(distance >= 6)
+  const alertY = Math.max(9, remaining.alert.y - 3.8)
+  const alertWidth = remaining.alert.label.length * 4.7
+  const left = remaining.nowLabel.anchor === 'start' ? remaining.nowLabel.x : remaining.nowLabel.x - 15
+  const right = remaining.nowLabel.anchor === 'start' ? remaining.nowLabel.x + 15 : remaining.nowLabel.x
+  if (left < alertWidth && right > 0) assert.ok(Math.abs(remaining.nowLabel.y - alertY) >= 10)
 })
 
 test('chartModel stops the projection where it reaches 100', async () => {
@@ -2234,8 +2338,8 @@ test('the chart follows the saved threshold and drops the line when off', async 
     used_pct: 40,
     resets_at: new Date(now + 3600000).toISOString()
   }
-  assert.deepEqual(chartModel(row, now).alert, { value: 80, y: 14.8 })
-  assert.deepEqual(chartModel(row, now, 90).alert, { value: 90, y: 8.4 })
+  assert.deepEqual(chartModel(row, now).alert, { value: 80, y: 14.8, label: 'alert 80%' })
+  assert.deepEqual(chartModel(row, now, 90).alert, { value: 90, y: 8.4, label: 'alert 90%' })
   assert.equal(chartModel(row, now, 'off').alert, null)
   const loud = chartModel({ ...row, used_pct: 90, warn: false }, now, 50)
   assert.equal(loud.colour, 'accent')
