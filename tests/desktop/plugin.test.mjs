@@ -37,6 +37,11 @@ function fakeContext() {
   return { ctx, data, notices, registrations }
 }
 
+function barValue(barModel, p, mode, choice) {
+  const provider = { id: 'p', ...p }
+  return barModel([provider], [provider.id], null, mode, null, choice).entries[0].value
+}
+
 test('money follows the row currency and the en-US locale', async () => {
   const { money } = await loadPlugin()
   assert.equal(money(9.02, 'USD'), '$9.02')
@@ -62,13 +67,6 @@ test('pct rounds and treats a non-number as zero', async () => {
   assert.equal(pct(12.5), '13%')
   assert.equal(pct('abc'), '0%')
   assert.equal(pct(undefined), '0%')
-})
-
-test('code maps known ids and returns unknown ones as is', async () => {
-  const { code } = await loadPlugin()
-  assert.equal(code({ id: 'opencode-go' }), 'opencode')
-  assert.equal(code({ id: 'zai' }), 'zai')
-  assert.equal(code({ id: 'unknown' }), 'unknown')
 })
 
 test('etaText handles the minute and hour boundaries', async () => {
@@ -115,35 +113,6 @@ test('usedPercentOf reads used_pct, not percent', async () => {
   assert.equal(rowView({ label: 'x', percent: 90, used_pct: 10, kind: 'window' }, 'used').value, '10%')
 })
 
-test('capUsedPercent clamps and returns zero without a total', async () => {
-  const { capUsedPercent } = await loadPlugin()
-  assert.equal(capUsedPercent({ total: 100, left: 40 }), 60)
-  assert.equal(capUsedPercent({ total: 0, left: 5 }), 0)
-  assert.equal(capUsedPercent({}), 0)
-  assert.equal(capUsedPercent({ total: 100, left: 120 }), 0)
-  assert.equal(capUsedPercent({ total: 100, left: -20 }), 100)
-})
-
-test('providerWarn follows the backend warn flag', async () => {
-  const { providerWarn } = await loadPlugin()
-  assert.equal(
-    providerWarn({ status: 'ok', windows: [{ percent: 95, used_pct: 95, warn: false }] }),
-    false
-  )
-  assert.equal(
-    providerWarn({ status: 'ok', windows: [{ percent: 10, used_pct: 10, warn: true }] }),
-    true
-  )
-  assert.equal(
-    providerWarn({
-      status: 'ok',
-      money: [{ key: 'money:balance:usd', total: 100, left: 5, used_pct: 95, warn: false }]
-    }),
-    false
-  )
-  assert.equal(providerWarn({ status: 'error', windows: [{ percent: 99, warn: true }] }), false)
-})
-
 test('rowView renders windows in both modes', async () => {
   const { rowView } = await loadPlugin()
   const row = { key: '5h', label: '5h', kind: 'window', percent: 42, used_pct: 42, actionable_eta: 7200 }
@@ -152,12 +121,11 @@ test('rowView renders windows in both modes', async () => {
     value: '42%',
     totalText: '',
     shown: 42,
-    width: 42,
     eta: 7200
   })
   const rest = rowView(row, 'remaining')
   assert.equal(rest.value, '58%')
-  assert.equal(rest.width, 58)
+  assert.equal(rest.shown, 58)
   assert.equal(rowView({ label: 'x', percent: 10, used_pct: 10 }, 'used').eta, null)
 })
 
@@ -176,11 +144,11 @@ test('rowView renders money in both modes and keys the heading on the row key', 
   assert.equal(used.label, 'Spent')
   assert.equal(used.value, '$7.50')
   assert.equal(used.totalText, '$20.00')
-  assert.equal(used.width, 37.5)
+  assert.equal(used.shown, 37.5)
   const rest = rowView(balance, 'remaining')
   assert.equal(rest.label, 'Balance')
   assert.equal(rest.value, '$12.50')
-  assert.equal(rest.width, 62.5)
+  assert.equal(rest.shown, 62.5)
   const cap = rowView(
     { key: 'money:key_cap:usd', label: 'Allowance', kind: 'money', total: 10, left: 2, cur: 'USD', used_pct: 80 },
     'used'
@@ -195,13 +163,12 @@ test('rowView renders money in both modes and keys the heading on the row key', 
   const noTotal = rowView({ key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }, 'used')
   assert.equal(noTotal.value, '$7.00')
   assert.equal(noTotal.totalText, '')
-  assert.equal(noTotal.width, 0)
+  assert.equal(noTotal.shown, 0)
   const noTotalRest = rowView(
     { key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null },
     'remaining'
   )
   assert.equal(noTotalRest.value, '$7.00')
-  assert.equal(noTotalRest.width, 0)
   assert.equal(noTotalRest.shown, 0)
 })
 
@@ -218,8 +185,8 @@ test('sameReset compares stamps inside the tolerance and skips junk keys', async
   assert.equal(sameReset({ ['zai:7d:' + isoAt(stamp)]: 1 }, prefix, stamp), false)
 })
 
-test('summary shows the highest used quota across windows and money', async () => {
-  const { summary } = await loadPlugin()
+test('barModel shows the highest used quota across windows and money', async () => {
+  const { barModel } = await loadPlugin()
   const cap = {
     status: 'ok',
     money: [
@@ -234,8 +201,8 @@ test('summary shows the highest used quota across windows and money', async () =
       }
     ]
   }
-  assert.equal(summary(cap, 'used'), '$6.00')
-  assert.equal(summary(cap, 'remaining'), '$4.00')
+  assert.equal(barValue(barModel, cap, 'used'), '$6.00')
+  assert.equal(barValue(barModel, cap, 'remaining'), '$4.00')
   const noCap = {
     status: 'ok',
     money: [
@@ -250,15 +217,15 @@ test('summary shows the highest used quota across windows and money', async () =
       }
     ]
   }
-  assert.equal(summary(noCap, 'used'), '$6.00')
+  assert.equal(barValue(barModel, noCap, 'used'), '$6.00')
   const noTotal = {
     status: 'ok',
     money: [
       { key: 'money:balance:usd', label: 'Balance', kind: 'money', left: 7, cur: 'USD', used_pct: null }
     ]
   }
-  assert.equal(summary(noTotal, 'used'), '$7.00')
-  assert.equal(summary(noTotal, 'remaining'), '$7.00')
+  assert.equal(barValue(barModel, noTotal, 'used'), '$7.00')
+  assert.equal(barValue(barModel, noTotal, 'remaining'), '$7.00')
   const windows = {
     status: 'ok',
     windows: [
@@ -266,8 +233,8 @@ test('summary shows the highest used quota across windows and money', async () =
       { key: '5h', label: '5h', percent: 20, used_pct: 20, scope: 'account', duration_seconds: 18000 }
     ]
   }
-  assert.equal(summary(windows, 'used'), '20%')
-  assert.equal(summary(windows, 'remaining'), '80%')
+  assert.equal(barValue(barModel, windows, 'used'), '20%')
+  assert.equal(barValue(barModel, windows, 'remaining'), '80%')
   const modelHigher = {
     status: 'ok',
     windows: [
@@ -275,7 +242,7 @@ test('summary shows the highest used quota across windows and money', async () =
       { key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model', duration_seconds: 3600 }
     ]
   }
-  assert.equal(summary(modelHigher, 'used'), '90%')
+  assert.equal(barValue(barModel, modelHigher, 'used'), '90%')
   const noDurations = {
     status: 'ok',
     windows: [
@@ -283,13 +250,13 @@ test('summary shows the highest used quota across windows and money', async () =
       { key: 'second', label: 'Second', percent: 60, used_pct: 60, scope: 'account' }
     ]
   }
-  assert.equal(summary(noDurations, 'used'), '60%')
+  assert.equal(barValue(barModel, noDurations, 'used'), '60%')
   assert.equal(
-    summary({ status: 'ok', windows: [{ key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model' }] }, 'used'),
+    barValue(barModel, { status: 'ok', windows: [{ key: 'opus:weekly', label: 'Opus', percent: 90, used_pct: 90, scope: 'model' }] }, 'used'),
     '90%'
   )
-  assert.equal(summary({ status: 'ok' }, 'used'), '-')
-  assert.equal(summary({ status: 'error' }, 'used'), '-')
+  assert.equal(barValue(barModel, { status: 'ok' }, 'used'), '-')
+  assert.equal(barValue(barModel, { status: 'error' }, 'used'), '-')
   const capSecond = {
     status: 'ok',
     money: [
@@ -313,13 +280,13 @@ test('summary shows the highest used quota across windows and money', async () =
       }
     ]
   }
-  assert.equal(summary(capSecond, 'used'), '$6.00')
-  assert.equal(summary(capSecond, 'remaining'), '$4.00')
-  assert.equal(summary(capSecond, 'used', { zai: 'money:balance:usd' }), '$6.00')
+  assert.equal(barValue(barModel, capSecond, 'used'), '$6.00')
+  assert.equal(barValue(barModel, capSecond, 'remaining'), '$4.00')
+  assert.equal(barValue(barModel, capSecond, 'used', { zai: 'money:balance:usd' }), '$6.00')
 })
 
-test('summary follows a chosen bar quota', async () => {
-  const { summary } = await loadPlugin()
+test('barModel follows a chosen bar quota', async () => {
+  const { barModel } = await loadPlugin()
   const p = {
     id: 'zai',
     status: 'ok',
@@ -328,52 +295,11 @@ test('summary follows a chosen bar quota', async () => {
       { key: 'weekly', label: 'Weekly', used_pct: 40, scope: 'account', duration_seconds: 604800 }
     ]
   }
-  assert.equal(summary(p, 'used'), '40%')
-  assert.equal(summary(p, 'used', { zai: '5h' }), '20%')
-  assert.equal(summary(p, 'remaining', { zai: '5h' }), '80%')
-  assert.equal(summary(p, 'used', { zai: 'gone' }), '40%')
-  assert.equal(summary(p, 'used', { other: '5h' }), '40%')
-})
-
-test('tipLine uses the actionable eta and the row keys', async () => {
-  const { tipLine } = await loadPlugin()
-  const windows = {
-    status: 'ok',
-    windows: [
-      { key: '5h', label: '5h', percent: 20, used_pct: 20, actionable_eta: 5400 },
-      { key: 'weekly', label: 'Weekly', percent: 20, used_pct: 20, eta_seconds: 5400, actionable_eta: null }
-    ]
-  }
-  assert.equal(tipLine(windows, 'used'), '5h 20% (~1h) · Weekly 20%')
-  assert.equal(tipLine(windows, 'remaining'), '5h 80% (~1h) · Weekly 80%')
-  const moneyRows = {
-    status: 'ok',
-    money: [
-      {
-        key: 'money:balance:usd',
-        label: 'Balance',
-        kind: 'money',
-        total: 10,
-        left: 4,
-        cur: 'USD',
-        used_pct: 60,
-        actionable_eta: 5400
-      },
-      {
-        key: 'money:key_cap:usd',
-        label: 'Key cap',
-        kind: 'money',
-        total: 10,
-        left: 4,
-        cur: 'USD',
-        used_pct: 60,
-        actionable_eta: null
-      }
-    ]
-  }
-  assert.equal(tipLine(moneyRows, 'used'), 'Spent $6.00/$10.00 (~1h) · Cap used $6.00/$10.00')
-  assert.equal(tipLine(moneyRows, 'remaining'), 'Balance $4.00/$10.00 (~1h) · Key cap $4.00/$10.00')
-  assert.equal(tipLine({ status: 'error' }, 'used'), 'unavailable')
+  assert.equal(barValue(barModel, p, 'used'), '40%')
+  assert.equal(barValue(barModel, p, 'used', { zai: '5h' }), '20%')
+  assert.equal(barValue(barModel, p, 'remaining', { zai: '5h' }), '80%')
+  assert.equal(barValue(barModel, p, 'used', { zai: 'gone' }), '40%')
+  assert.equal(barValue(barModel, p, 'used', { other: '5h' }), '40%')
 })
 
 test('checkAlerts fires a warned window once and stores it under the row key', async () => {
@@ -791,6 +717,16 @@ test('barModel follows the session provider when nothing is pinned', async () =>
   const amber = findNodes(barContent(followed), n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
   assert.equal(amber.length, 1)
   assert.equal(nodeText(amber[0]), 'claude 95%')
+})
+
+test('barModel uses the provider code and falls back to its id', async () => {
+  const { barModel } = await loadPlugin()
+  const provs = [
+    okProvider('zai', 'Zai', 'zai-code', 20, false),
+    okProvider('no-code', 'No code', undefined, 30, false)
+  ]
+  const model = barModel(provs, ['zai', 'no-code'], null, 'used', null)
+  assert.deepEqual(model.entries.map(e => e.code), ['zai-code', 'no-code'])
 })
 
 test('barContent renders Usage when the session provider is unknown or unread', async () => {
@@ -1916,18 +1852,18 @@ test('alertThreshold reads only saved window steps', async () => {
 })
 
 test('the saved alert map drops junk on load and persists new picks', async () => {
-  const { default: plugin, currentAlertAt, setAlert } = await loadPlugin()
+  const { default: plugin, setAlert } = await loadPlugin()
   const { ctx, data } = fakeContext()
   data.alertAt = { 'zai:5h': 90, 'zai:weekly': '40', 'nous:5h': 'off', 'x:y': 'junk' }
   plugin.register(ctx)
-  assert.deepEqual(currentAlertAt(), { 'zai:5h': 90, 'nous:5h': 'off' })
   setAlert('zai', '5h', 95)
   assert.deepEqual(data.alertAt, { 'zai:5h': 95, 'nous:5h': 'off' })
   const again = await loadPlugin()
   const second = fakeContext()
   second.data.alertAt = 'not an object'
   again.default.register(second.ctx)
-  assert.deepEqual(again.currentAlertAt(), {})
+  again.setAlert('a', 'b', 90)
+  assert.deepEqual(second.data.alertAt, { 'a:b': 90 })
 })
 
 test('a 90 threshold alarms at 92 and stays silent at 85', async () => {
@@ -2214,22 +2150,15 @@ test('the open alert control offers the six steps, reports a pick and closes', a
   assert.equal(nodeText(moneyPanel).includes('Notifications appear while Hermes is in the background.'), false)
 })
 
-test('a real payload shape drives the bar, the tip and the warn flag', async () => {
+test('a real payload shape drives the bar values', async () => {
   const { readFile } = await import('node:fs/promises')
   const payload = JSON.parse(await readFile(new URL('./payload.json', import.meta.url), 'utf8'))
-  const { summary, tipLine, providerWarn } = await loadPlugin()
+  const { barModel } = await loadPlugin()
   const [anthropic, openrouter] = payload.providers
-  assert.equal(summary(anthropic, 'used'), '95%')
-  assert.equal(summary(anthropic, 'remaining'), '5%')
-  assert.equal(summary(openrouter, 'used'), '$8.00')
-  assert.equal(summary(openrouter, 'remaining'), '$2.00')
-  assert.equal(tipLine(anthropic, 'used'), '5h 42% (~2h) · Weekly 88% · Opus 95%')
-  assert.equal(
-    tipLine(openrouter, 'used'),
-    'Spent $7.50/$20.00 · Cap used $8.00/$10.00 (~1h)'
-  )
-  assert.equal(providerWarn(anthropic), true)
-  assert.equal(providerWarn(openrouter), true)
+  assert.equal(barValue(barModel, anthropic, 'used'), '95%')
+  assert.equal(barValue(barModel, anthropic, 'remaining'), '5%')
+  assert.equal(barValue(barModel, openrouter, 'used'), '$8.00')
+  assert.equal(barValue(barModel, openrouter, 'remaining'), '$2.00')
 })
 
 test('the default export registers one status item', async () => {
@@ -2538,7 +2467,7 @@ test('visibleQuotas orders windows by length, then money', async () => {
 })
 
 test('barQuotaKey defaults to the highest used row and honours a choice', async () => {
-  const { barQuotaKey, summary } = await loadPlugin()
+  const { barQuotaKey, barModel } = await loadPlugin()
   const money = {
     id: 'or',
     status: 'ok',
@@ -2548,9 +2477,9 @@ test('barQuotaKey defaults to the highest used row and honours a choice', async 
     ]
   }
   assert.equal(barQuotaKey(money), 'money:key_cap:usd')
-  assert.equal(summary(money, 'used'), '$8.00')
+  assert.equal(barValue(barModel, money, 'used'), '$8.00')
   assert.equal(barQuotaKey(money, { or: 'money:balance:usd' }), 'money:balance:usd')
-  assert.equal(summary(money, 'used', { or: 'money:balance:usd' }), '$1.00')
+  assert.equal(barValue(barModel, money, 'used', { or: 'money:balance:usd' }), '$1.00')
   const windows = {
     id: 'zai',
     status: 'ok',
@@ -2561,9 +2490,9 @@ test('barQuotaKey defaults to the highest used row and honours a choice', async 
     ]
   }
   assert.equal(barQuotaKey(windows), 'opus')
-  assert.equal(summary(windows, 'used'), '99%')
+  assert.equal(barValue(barModel, windows, 'used'), '99%')
   assert.equal(barQuotaKey(windows, { zai: '5h' }), '5h')
-  assert.equal(summary(windows, 'used', { zai: '5h' }), '20%')
+  assert.equal(barValue(barModel, windows, 'used', { zai: '5h' }), '20%')
   assert.equal(barQuotaKey(windows, { zai: 'gone' }), 'opus')
   assert.equal(barQuotaKey(windows, { other: '5h' }), 'opus')
   const plain = { status: 'ok', windows: [{ key: 'weekly', scope: 'account', used_pct: 10 }] }
