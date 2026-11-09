@@ -1171,6 +1171,26 @@ test('a warned quota value is amber and a quiet one is not', async () => {
   assert.equal(quietValue[0].props.style.color, undefined)
 })
 
+test('an actionable eta alone colours the quota value and bar amber', async () => {
+  const { providerRowElement } = await loadPlugin()
+  const p = {
+    id: 'zai',
+    name: 'Zai',
+    tag: 'Pro',
+    status: 'ok',
+    windows: [{ key: '5h', label: '5h', kind: 'window', used_pct: 20, warn: false, actionable_eta: 0 }]
+  }
+  const node = providerRowElement(p, { mode: 'used', pins: [], barIds: [], expanded: false })
+  const values = findNodes(node, n => n.props && nodeText(n) === '20%' && n.props.style && n.props.style.fontSize === 11)
+  assert.equal(values.length, 1)
+  assert.equal(values[0].props.style.color, WARN_COLOR)
+  const bars = findNodes(
+    node,
+    n => n.type === 'span' && n.props && n.props.style && n.props.style.background === WARN_COLOR
+  )
+  assert.equal(bars.length, 1)
+})
+
 test('a money row with no used_pct draws no track and no fill', async () => {
   const { providerRowElement } = await loadPlugin()
   const p = {
@@ -2303,6 +2323,23 @@ test('projectedFull flags a fast window only after the ten percent guard', async
   assert.equal(projectedFull({ ...base, used_pct: 100 }, now), null)
   assert.equal(projectedFull({ ...base, kind: 'money' }, now), null)
   assert.equal(projectedFull({ ...base, eta_seconds: 3600 }, now), null)
+})
+
+test('rowAttention uses one rule for warn, actionable eta and projection', async () => {
+  const { rowAttention, projectedFull } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  assert.equal(rowAttention(null, now), false)
+  assert.equal(rowAttention({ warn: false, actionable_eta: null }, now), false)
+  assert.equal(rowAttention({ warn: true, actionable_eta: null }, now), true)
+  assert.equal(rowAttention({ warn: false, actionable_eta: 0 }, now), true)
+  const projected = {
+    kind: 'window',
+    used_pct: 78,
+    duration_seconds: 5 * 3600,
+    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+  }
+  assert.ok(projectedFull(projected, now) > 0)
+  assert.equal(rowAttention(projected, now), true)
 })
 
 test('providerAttention and attentionNote see a projected run-out', async () => {
