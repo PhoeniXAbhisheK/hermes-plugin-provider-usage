@@ -5,6 +5,10 @@ repository; the date is the release date.
 
 ## 0.4.2 (unreleased)
 
+### Added
+
+- [behaviour] Usage history covers the whole current window and survives restarts in `<HERMES_HOME>/plugin-data/provider-usage/history.json`.
+
 ### Fixed
 
 - [behaviour] Weekly and monthly windows are judged by the window average, not a six-hour trailing burst, so low use no longer lands in Needs attention before the reset.

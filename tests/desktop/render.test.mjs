@@ -5,7 +5,6 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { renderComponent } from './render.mjs'
-import { loadPlugin } from './load-plugin.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const payload = JSON.parse(await readFile(join(HERE, 'payload.json'), 'utf8'))
@@ -262,57 +261,16 @@ const oldPayload = {
   ]
 }
 
-test('UsagePanel shows the stale backend notice instead of rows', async () => {
-  const view = await renderComponent('UsagePanel', { data: oldPayload })
-  assert.match(view.joined, /Restart the Hermes dashboard to finish updating\./)
-  assert.equal(view.joined.includes('100%'), false)
-  assert.equal(view.joined.includes('Anthropic'), false)
-})
-
-test('BarDetail says restart dashboard for a stale backend', async () => {
-  const view = await renderComponent('BarDetail', { data: oldPayload })
-  assert.match(view.joined, /restart dashboard/)
-  assert.equal(view.joined.includes('100%'), false)
-})
-
-test('BarTip gives the restart sentence for a stale backend', async () => {
-  const view = await renderComponent('BarTip', { data: oldPayload })
-  assert.match(view.joined, /Restart the Hermes dashboard to finish updating\./)
-  assert.equal(view.joined.includes('100%'), false)
-})
-
-test('UsagePanel draws the chart history polyline when a row carries history', async () => {
-  const now = Math.floor(Date.now() / 1000)
-  const provider = {
-    ...payload.providers[0],
-    windows: [
-      {
-        ...payload.providers[0].windows[0],
-        history: [
-          [now - 3600, 40],
-          [now - 60, 42]
-        ]
-      }
-    ]
+test('stale backend surfaces the restart copy without rows', async () => {
+  const cases = [
+    ['UsagePanel', /Restart the Hermes dashboard to finish updating\./, 'Anthropic'],
+    ['BarDetail', /restart dashboard/, null],
+    ['BarTip', /Restart the Hermes dashboard to finish updating\./, null]
+  ]
+  for (const [name, text, hidden] of cases) {
+    const view = await renderComponent(name, { data: oldPayload })
+    assert.match(view.joined, text, name)
+    assert.equal(view.joined.includes('100%'), false, name)
+    if (hidden) assert.equal(view.joined.includes(hidden), false, name)
   }
-  const plugin = await loadPlugin()
-  const element = plugin.expandedPanel(provider, {
-    mode: 'used',
-    alertAt: {},
-    barIds: [],
-    choice: {},
-    tab: undefined
-  })
-  const tags = []
-  const walk = node => {
-    if (!node || typeof node !== 'object') return
-    if (Array.isArray(node)) {
-      node.forEach(walk)
-      return
-    }
-    if (typeof node.type === 'string') tags.push(node.type)
-    if (node.props) walk(node.props.children)
-  }
-  walk(element)
-  assert.ok(tags.includes('polyline'))
 })

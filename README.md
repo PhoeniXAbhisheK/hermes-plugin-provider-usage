@@ -170,11 +170,14 @@ tools/lint/              ESLint setup for the desktop half
   a snapshot `fetched_at`; rows carry `eta_seconds` and `depletes_in_seconds`
   when a projection is available. Every window and money row also carries
   `key`, `kind`, `used_pct`, `warn` and `actionable_eta`, plus `history` when
-  recent samples exist: `[epoch seconds, value]` pairs, oldest first, at most 36
-  points over 6 hours. History is kept in memory only, so it resets when Hermes
-  restarts. Window rows carry `scope` and, when the provider gives a length,
-  `duration_seconds`; known lengths use the labels 5h, Weekly and Monthly. The
-  full contract, including which fields are required, is in
+  recent samples exist: `[epoch seconds, value]` pairs, oldest first. Window rows
+  carry `scope` and, when the provider gives a length, `duration_seconds`; known
+  lengths use the labels 5h, Weekly and Monthly. A window with a reset and
+  duration carries at most 120 history points over the current window,
+  downsampled by even time buckets; money rows and rows without a duration carry
+  at most 36 points over 6 hours. History is persisted at
+  `<HERMES_HOME>/plugin-data/provider-usage/history.json` and survives a
+  restart. The full contract, including which fields are required, is in
   `schema/usage.schema.json`.
 
 ## License

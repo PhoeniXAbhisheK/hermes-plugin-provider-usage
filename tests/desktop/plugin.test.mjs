@@ -1550,89 +1550,64 @@ test('chartModel plots the average, alert and now label in remaining terms', asy
   if (left < alertWidth && right > 0) assert.ok(Math.abs(remaining.nowLabel.y - alertY) >= 10)
 })
 
-test('chartModel leads into a monthly window from its start', async () => {
+test('chartModel leads into a monthly or weekly window from its first sample', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
-  const duration = 30 * 86400
-  const row = {
-    kind: 'window',
-    used_pct: 50,
-    duration_seconds: duration,
-    resets_at: new Date(now + 86400 * 1000).toISOString()
-  }
-  const start = Date.parse(row.resets_at) - duration * 1000
-  const first = start / 1000 + 29 * 86400 - 6 * 3600
-  const m = chartModel(
+  const cases = [
     {
-      ...row,
-      history: [
-        [first, 40],
-        [now / 1000, 50]
-      ]
+      label: 'monthly',
+      duration: 30 * 86400,
+      used: 50,
+      reset: now + 86400 * 1000,
+      first: 29 * 86400 - 6 * 3600,
+      x: 322
     },
-    now
-  )
-  assert.equal(m.leadIn.length, 2)
-  assert.equal(m.leadIn[0][0], 0)
-  assert.equal(m.leadIn[0][1], 66)
-  assert.ok(Math.abs(m.leadIn[1][0] - 322) < 0.01)
-  assert.equal(m.leadIn[1][1], m.series[0][1])
-})
-
-test('chartModel leads into a weekly window from day three', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const duration = 7 * 86400
-  const row = {
-    kind: 'window',
-    used_pct: 40,
-    duration_seconds: duration,
-    resets_at: new Date(now + 3 * 86400 * 1000).toISOString()
-  }
-  const start = Date.parse(row.resets_at) - duration * 1000
-  const m = chartModel(
     {
-      ...row,
-      history: [
-        [start / 1000 + 3 * 86400, 20],
-        [now / 1000, 40]
-      ]
-    },
-    now
-  )
-  assert.ok(Math.abs(m.series[0][0] - 144) < 0.01)
-  assert.ok(Math.abs(m.leadIn[1][0] - 144) < 0.01)
-  assert.equal(m.leadIn[1][1], m.series[0][1])
-})
-
-test('chartModel adds no lead-in when history starts at the window start', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const duration = 7 * 86400
-  const row = {
-    kind: 'window',
-    used_pct: 40,
-    duration_seconds: duration,
-    resets_at: new Date(now + 3 * 86400 * 1000).toISOString()
+      label: 'weekly',
+      duration: 7 * 86400,
+      used: 40,
+      reset: now + 3 * 86400 * 1000,
+      first: 3 * 86400,
+      x: 144
+    }
+  ]
+  for (const c of cases) {
+    const start = c.reset - c.duration * 1000
+    const m = chartModel(
+      {
+        kind: 'window',
+        used_pct: c.used,
+        duration_seconds: c.duration,
+        resets_at: new Date(c.reset).toISOString(),
+        history: [[start / 1000 + c.first, c.used - 10], [now / 1000, c.used]]
+      },
+      now
+    )
+    assert.equal(m.leadIn.length, 2, c.label)
+    assert.equal(m.leadIn[0][0], 0, c.label)
+    assert.equal(m.leadIn[0][1], 66, c.label)
+    assert.ok(Math.abs(m.leadIn[1][0] - c.x) < 0.01, c.label)
+    assert.equal(m.leadIn[1][1], m.series[0][1], c.label)
   }
-  const start = Date.parse(row.resets_at) - duration * 1000
-  const m = chartModel(
-    {
-      ...row,
-      history: [
-        [start / 1000 + 300, 20],
-        [now / 1000, 40]
-      ]
-    },
-    now
-  )
-  assert.ok(Math.abs(m.series[0][0] - 0.16666666666666666) < 0.01)
-  assert.equal(m.leadIn, null)
 })
 
 test('chartModel has no lead-in for sparse history, money or the fallback', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
+  const startStart = chartModel(
+    {
+      kind: 'window',
+      used_pct: 40,
+      duration_seconds: 7 * 86400,
+      resets_at: new Date(now + 3 * 86400 * 1000).toISOString(),
+      history: [
+        [Date.parse(new Date(now + 3 * 86400 * 1000).toISOString()) / 1000 - 7 * 86400 + 300, 20],
+        [now / 1000, 40]
+      ]
+    },
+    now
+  )
+  assert.equal(startStart.leadIn, null)
   const avg = chartModel(
     {
       kind: 'window',
@@ -1695,6 +1670,44 @@ test('chartModel starts the remaining lead-in at the top', async () => {
   assert.equal(used.leadIn[0][1], 66)
   assert.equal(remaining.leadIn[0][1], 2)
   assert.equal(remaining.leadIn[1][1], remaining.series[0][1])
+})
+
+test('chartModel and chartElement mark inferred lead-in and gap bridges', async () => {
+  const { chartModel, expandedPanel } = await loadPlugin()
+  const now = Date.parse('2026-11-08T00:00:00Z')
+  const duration = 7 * 86400
+  const row = {
+    key: 'weekly',
+    label: 'Weekly',
+    kind: 'window',
+    used_pct: 40,
+    duration_seconds: duration,
+    resets_at: new Date(now + 3 * 86400 * 1000).toISOString()
+  }
+  const start = Date.parse(row.resets_at) - duration * 1000
+  const history = [
+    [start / 1000 + 86400, 20],
+    [start / 1000 + 86400 + 600, 22],
+    [now / 1000, 40]
+  ]
+  const model = chartModel({ ...row, history: history }, now)
+  assert.equal(model.series.length, 3)
+  assert.equal(model.segments.length, 2)
+  assert.equal(model.segments[0].length, 2)
+  assert.equal(model.segments[1].length, 1)
+  assert.equal(model.bridges.length, 1)
+  assert.equal(model.leadInInferred, true)
+  assert.equal(model.leadIn[0][0], 0)
+  const element = expandedPanel(
+    { id: 'x', name: 'X', status: 'ok', windows: [{ ...row, history: history }] },
+    { mode: 'used', alertAt: {}, barIds: [], choice: {}, tab: undefined }
+  )
+  const lead = findNodes(element, n => n.type === 'polyline' && n.props.key === 'leadIn')
+  assert.equal(lead[0].props.strokeDasharray, '3 3')
+  const bridge = findNodes(element, n => n.type === 'polyline' && n.props.key === 'bridge-1')
+  assert.equal(bridge[0].props.strokeDasharray, '3 3')
+  const measured = findNodes(element, n => n.type === 'polyline' && n.props.key === 'history')
+  assert.equal(measured[0].props.strokeDasharray, undefined)
 })
 
 test('chartModel stops the projection where it reaches 100', async () => {

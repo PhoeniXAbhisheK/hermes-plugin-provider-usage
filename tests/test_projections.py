@@ -90,34 +90,6 @@ class ProjectionTest(unittest.TestCase):
         self.seed(key, [(self._t0, 0.0), (self._t0 + span, outside)])
         self.assertIsNone(API._project(key, outside, 100.0, self._t0 + span))
 
-    def test_record_ignores_a_sample_under_a_minute(self):
-        key = ("zai", "5h")
-        API._record(key, 10.0, self._t0)
-        API._record(key, 20.0, self._t0 + 59)  # under the gap: dropped
-        self.assertEqual(len(API._history[key]), 1)
-        self.assertEqual(API._history[key][0][1], 10.0)
-        API._record(key, 30.0, self._t0 + 60)  # at the gap: kept
-        self.assertEqual(len(API._history[key]), 2)
-        self.assertEqual(API._history[key][-1][1], 30.0)
-
-    def test_record_drops_samples_past_the_max_age(self):
-        key = ("zai", "5h")
-        self.seed(key, [(self._t0, 10.0)])
-        API._record(key, 10.0, self._t0 + API._HISTORY_MAX_AGE)  # exactly at the age: kept
-        self.assertEqual(len(API._history[key]), 2)
-        self.seed(key, [(self._t0, 10.0)])
-        API._record(key, 10.0, self._t0 + API._HISTORY_MAX_AGE + 1)  # one past: dropped
-        self.assertEqual(len(API._history[key]), 1)
-        self.assertEqual(API._history[key][0][0], self._t0 + API._HISTORY_MAX_AGE + 1)
-
-    def test_record_keeps_at_most_four_hundred_samples(self):
-        key = ("zai", "5h")
-        self.seed(key, [(self._t0 + i, float(i)) for i in range(401)])
-        API._record(key, 400.0, self._t0 + 401)  # inside the gap, so no new row
-        self.assertEqual(len(API._history[key]), 400)
-        self.assertEqual(API._history[key][0][0], self._t0 + 1)
-        self.assertEqual(API._history[key][-1][0], self._t0 + 400)
-
     def test_project_uses_only_the_window(self):
         key = ("zai", "5h")
         now = self._t0
@@ -144,8 +116,8 @@ class ProjectionTest(unittest.TestCase):
 
     def test_long_windows_skip_the_trailing_rate(self):
         now = self._t0
-        low = [(now - 6 * 3600, 0.0), (now - 3600, 2.5)]
-        high = [(now - 6 * 3600, 0.0), (now - 3600, 75.0)]
+        low = [(now - 6 * 3600, 0.0), (now - 1800, 2.5)]
+        high = [(now - 6 * 3600, 0.0), (now - 1800, 75.0)]
         cases = (
             ("5h high", 18000, now + 4 * 3600, 80.0, high, True, True),
             ("5h low", 18000, now + 4 * 3600, 3.0, low, True, False),

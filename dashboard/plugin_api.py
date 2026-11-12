@@ -62,7 +62,9 @@ import contextvars
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 import threading
 import time
 import unicodedata
@@ -1726,34 +1728,220 @@ FETCHERS = {pid: p["fetch"] for pid, p in PROVIDERS.items()}
 # --------------------------------------------------------------------------- #
 
 _history = {}  # (provider id, row key) -> [[t, value], ...]
+_history_meta = {}  # (provider id, row key) -> {"resets_at": str|None, "duration_seconds": float|None}
 _history_lock = threading.Lock()
 _HISTORY_WINDOW = 6 * 3600
 _HISTORY_MIN_SPAN = 1800
 _HISTORY_MAX_AGE = 24 * 3600
+_HISTORY_MAX_POINTS = 700
+_HISTORY_PANEL_POINTS = 120
+_HISTORY_SAVE_S = 60.0
+_HISTORY_LOADED = False
+_HISTORY_DIRTY = False
+_HISTORY_WRITTEN_AT = 0.0
 
 
-def _record(key, value, now):
+def _history_path():
+    """The documented plugin data file, or None outside a Hermes host.
+
+    Hermes gives every plugin a profile-scoped data directory that survives
+    plugin updates and removals. Tests replace this function with a temp path.
+    """
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+
+        return plugin_data_dir("provider-usage") / "history.json"
+    except Exception:
+        pass
+    try:
+        from hermes_constants import get_hermes_home
+
+        return get_hermes_home() / "plugin-data" / "provider-usage" / "history.json"
+    except Exception:
+        return None
+
+
+def _history_start(meta, now):
+    """The current window start, or the 24 h fallback when there is no window."""
+    reset = _epoch_from_iso((meta or {}).get("resets_at"))
+    duration = _num((meta or {}).get("duration_seconds"))
+    if reset is not None and duration is not None and duration > 0:
+        return reset - duration
+    return now - _HISTORY_MAX_AGE
+
+
+def _history_sample(value):
+    """One stored sample as ``[epoch, value]``, or None when it is not one."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    stamp, amount = value[0], value[1]
+    if isinstance(stamp, bool) or isinstance(amount, bool):
+        return None
+    try:
+        stamp = float(stamp)
+        amount = float(amount)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(stamp) or not math.isfinite(amount):
+        return None
+    return [stamp, amount]
+
+
+def _ensure_history_loaded():
+    """Load the persistent history once; any file problem means empty history."""
+    global _HISTORY_LOADED
+    with _history_lock:
+        if _HISTORY_LOADED:
+            return
+        _HISTORY_LOADED = True
+        path = _history_path()
+        if path is None:
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            logging.getLogger(__name__).debug("history file is unreadable; starting empty")
+            return
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            logging.getLogger(__name__).debug("history file is malformed; starting empty")
+            return
+        if not isinstance(data, dict):
+            return
+        now = time.time()
+        for pid, rows in data.items():
+            if not isinstance(pid, str) or not isinstance(rows, dict):
+                continue
+            for key, entry in rows.items():
+                if not isinstance(key, str) or not isinstance(entry, dict):
+                    continue
+                samples = [
+                    sample
+                    for sample in (_history_sample(item) for item in entry.get("samples") or [])
+                    if sample is not None
+                ]
+                reset = entry.get("resets_at")
+                reset = reset if isinstance(reset, str) and reset else None
+                duration = _num(entry.get("duration_seconds"))
+                duration = duration if duration is not None and duration > 0 else None
+                meta = {"resets_at": reset, "duration_seconds": duration}
+                cutoff = _history_start(meta, now)
+                samples = [sample for sample in samples if sample[0] >= cutoff][
+                    -_HISTORY_MAX_POINTS:
+                ]
+                if samples:
+                    row_key = (pid, key)
+                    _history[row_key] = samples
+                    _history_meta[row_key] = meta
+
+
+def _save_history(now=None, force=False):
+    """Atomically persist changed history, at most once per minute."""
+    global _HISTORY_DIRTY, _HISTORY_WRITTEN_AT
+    now = time.time() if now is None else now
+    _ensure_history_loaded()
+    with _history_lock:
+        if not _HISTORY_DIRTY:
+            return False
+        if not force and now - _HISTORY_WRITTEN_AT < _HISTORY_SAVE_S:
+            return False
+        path = _history_path()
+        if path is None:
+            return False
+        data = {}
+        for (pid, key), samples in _history.items():
+            if not samples:
+                continue
+            meta = _history_meta.get((pid, key)) or {}
+            data.setdefault(pid, {})[key] = {
+                "samples": samples,
+                "resets_at": meta.get("resets_at"),
+                "duration_seconds": meta.get("duration_seconds"),
+            }
+        temp = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(path.parent, 0o700)
+            except OSError:
+                pass
+            handle, temp = tempfile.mkstemp(prefix=".history.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, separators=(",", ":"), sort_keys=True)
+            os.chmod(temp, 0o600)
+            os.replace(temp, path)
+            _HISTORY_DIRTY = False
+            _HISTORY_WRITTEN_AT = now
+            return True
+        except OSError:
+            logging.getLogger(__name__).debug("history file is not writable; keeping memory only")
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+            return False
+
+
+def _record(key, value, now, resets_at=None, duration_seconds=None):
+    _ensure_history_loaded()
     with _history_lock:
         samples = _history.setdefault(key, [])
-        if samples and value < samples[-1][1] - 0.001:
+        previous = _history_meta.get(key) or {}
+        if not samples:
+            previous = {}
+        reset = resets_at if isinstance(resets_at, str) and resets_at else None
+        duration = _num(duration_seconds)
+        duration = duration if duration is not None and duration > 0 else None
+        reset_epoch = _epoch_from_iso(reset)
+        start = reset_epoch - duration if reset_epoch is not None and duration is not None else None
+        previous_reset = _epoch_from_iso(previous.get("resets_at"))
+        moved = start is not None and previous_reset is not None and start >= previous_reset - 60
+        changed = False
+        if samples and (value < samples[-1][1] - 0.001 or moved):
             samples.clear()  # the window reset: start a fresh cycle
-        if not samples or now - samples[-1][0] >= 60:
+            changed = True
+        spacing = max(60.0, duration / 600.0) if duration is not None else 60.0
+        if not samples or now - samples[-1][0] >= spacing:
             samples.append([now, value])
-        while samples and now - samples[0][0] > _HISTORY_MAX_AGE:
-            del samples[0]
-        del samples[:-400]
+            changed = True
+        cutoff = start if start is not None else now - _HISTORY_MAX_AGE
+        kept = [sample for sample in samples if sample[0] >= cutoff][-_HISTORY_MAX_POINTS:]
+        if len(kept) != len(samples):
+            samples[:] = kept
+            changed = True
+        meta = {"resets_at": reset, "duration_seconds": duration}
+        if meta != previous:
+            _history_meta[key] = meta
+            changed = True
+        if changed:
+            global _HISTORY_DIRTY
+            _HISTORY_DIRTY = True
 
 
 def _prune_history(now):
-    """Drop keys that have no samples or whose newest sample is past the max age."""
+    """Drop keys whose newest sample is outside the current window or 24 h."""
+    _ensure_history_loaded()
+    global _HISTORY_DIRTY
     with _history_lock:
-        stale = [
-            key
-            for key, samples in _history.items()
-            if not samples or now - samples[-1][0] > _HISTORY_MAX_AGE
-        ]
-        for key in stale:
-            del _history[key]
+        for key, samples in list(_history.items()):
+            if not samples:
+                del _history[key]
+                _history_meta.pop(key, None)
+                _HISTORY_DIRTY = True
+                continue
+            cutoff = _history_start(_history_meta.get(key), now)
+            kept = [sample for sample in samples if sample[0] >= cutoff]
+            if not kept:
+                del _history[key]
+                _history_meta.pop(key, None)
+                _HISTORY_DIRTY = True
+            elif len(kept) != len(samples):
+                samples[:] = kept
+                _HISTORY_DIRTY = True
 
 
 def _project(key, current, target, now):
@@ -1799,7 +1987,13 @@ def _decorate(pid, p, now):
         if v is None:
             continue
         key = _history_key(pid, w)
-        _record(key, v, now)
+        _record(
+            key,
+            v,
+            now,
+            resets_at=w.get("resets_at"),
+            duration_seconds=w.get("duration_seconds"),
+        )
         if _long_window(w, now):
             # Keep the sample for the chart, but let the panel judge a long
             # window by its average pace instead of a short burst.
@@ -1875,11 +2069,35 @@ def _money_actionable(row):
     return int(value)
 
 
+def _history_buckets(samples, start, end, limit):
+    """At most ``limit`` points, one per even time bucket, newest kept."""
+    if len(samples) <= limit:
+        return [[int(t), round(v, 2)] for t, v in samples]
+    width = max((end - start) / limit, 1.0)
+    buckets = {}
+    for stamp, value in samples:
+        if stamp < start or stamp > end:
+            continue
+        buckets[int((stamp - start) // width)] = [int(stamp), round(value, 2)]
+    return [buckets[index] for index in sorted(buckets)]
+
+
 def _row_history(pid, row, now):
-    """Bucketed recent samples for one row: [epoch seconds, value], oldest first."""
+    """History for the chart: the whole current window, or the last six hours."""
+    _ensure_history_loaded()
     key = _history_key(pid, row)
     with _history_lock:
         samples = list(_history.get(key) or ())
+    if not samples:
+        return None
+    duration = _num(row.get("duration_seconds"))
+    reset = _epoch_from_iso(row.get("resets_at"))
+    if duration is not None and duration > 0 and reset is not None:
+        start = reset - duration
+        inside = [sample for sample in samples if start <= sample[0] <= now]
+        if not inside:
+            return None
+        return _history_buckets(inside, start, reset, _HISTORY_PANEL_POINTS)
     buckets = {}
     for t, v in samples:
         if now - t <= _HISTORY_WINDOW:
@@ -2061,6 +2279,7 @@ def _collect(deadline=None):
         _contract_rows(p, now)
         providers.append(p)
     _prune_history(now)
+    _save_history(now)
     return {
         "fetched_at": _iso_epoch(time.time()),
         "providers": providers,

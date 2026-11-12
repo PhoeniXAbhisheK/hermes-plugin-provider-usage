@@ -26,75 +26,38 @@ API = load_api()
 
 
 class EnvLineTest(unittest.TestCase):
-    def test_plain_line(self):
-        self.assertEqual(API._env_line_value("NAME=abc", "NAME"), "abc")
-
-    def test_export_with_a_space(self):
-        self.assertEqual(API._env_line_value("export NAME=abc", "NAME"), "abc")
-
-    def test_export_with_a_tab(self):
-        self.assertEqual(API._env_line_value("export\tNAME=abc", "NAME"), "abc")
-
-    def test_export_needs_a_separator(self):
-        self.assertIsNone(API._env_line_value("exportNAME=abc", "NAME"))
-
-    def test_spaces_and_tabs_around_equals(self):
-        self.assertEqual(API._env_line_value("NAME \t= \tabc", "NAME"), "abc")
-
-    def test_double_quotes(self):
-        self.assertEqual(API._env_line_value('NAME="abc"', "NAME"), "abc")
-
-    def test_single_quotes(self):
-        self.assertEqual(API._env_line_value("NAME='abc'", "NAME"), "abc")
-
-    def test_hash_inside_quotes_is_kept(self):
-        self.assertEqual(API._env_line_value('NAME="a # b"', "NAME"), "a # b")
-
-    def test_text_after_a_closing_quote_is_ignored(self):
-        self.assertEqual(API._env_line_value('NAME="abc"tail', "NAME"), "abc")
-
-    def test_inline_comment_after_a_space(self):
-        self.assertEqual(API._env_line_value("NAME=abc # note", "NAME"), "abc")
-
-    def test_inline_comment_after_a_tab(self):
-        self.assertEqual(API._env_line_value("NAME=abc\t# note", "NAME"), "abc")
-
-    def test_hash_without_a_space_is_kept(self):
-        self.assertEqual(API._env_line_value("NAME=ab#cd", "NAME"), "ab#cd")
-        self.assertEqual(API._env_line_value("NAME=#abc", "NAME"), "#abc")
-
-    def test_a_hash_with_a_leading_space_is_a_comment(self):
-        self.assertEqual(API._env_line_value("NAME= #abc", "NAME"), "")
-
-    def test_a_bare_export_line_gives_none(self):
-        self.assertIsNone(API._env_line_value("export", "NAME"))
-        self.assertIsNone(API._env_line_value("export\n", "NAME"))
-
-    def test_an_indented_export_line_is_read(self):
-        self.assertEqual(API._env_line_value("  export NAME=abc", "NAME"), "abc")
-
-    def test_unmatched_quote_gives_the_text(self):
-        self.assertEqual(API._env_line_value('NAME="abc', "NAME"), "abc")
-
-    def test_a_commented_out_line_is_ignored(self):
-        self.assertIsNone(API._env_line_value("# NAME=abc", "NAME"))
-
-    def test_an_indented_line_is_read(self):
-        self.assertEqual(API._env_line_value("   NAME=abc", "NAME"), "abc")
-
-    def test_similar_names_do_not_match(self):
-        self.assertIsNone(API._env_line_value("NAME2=abc", "NAME"))
-        self.assertIsNone(API._env_line_value("XNAME=abc", "NAME"))
-
-    def test_an_empty_value(self):
-        self.assertEqual(API._env_line_value("NAME=", "NAME"), "")
-        self.assertEqual(API._env_line_value("NAME= # note", "NAME"), "")
-
-    def test_a_crlf_line(self):
-        self.assertEqual(API._env_line_value("NAME=abc\r\n", "NAME"), "abc")
-
-    def test_a_line_without_equals(self):
-        self.assertIsNone(API._env_line_value("NAME", "NAME"))
+    def test_env_line_parsing(self):
+        cases = (
+            ("NAME=abc", "abc"),
+            ("export NAME=abc", "abc"),
+            ("export\tNAME=abc", "abc"),
+            ("exportNAME=abc", None),
+            ("NAME \t= \tabc", "abc"),
+            ('NAME="abc"', "abc"),
+            ("NAME='abc'", "abc"),
+            ('NAME="a # b"', "a # b"),
+            ('NAME="abc"tail', "abc"),
+            ("NAME=abc # note", "abc"),
+            ("NAME=abc\t# note", "abc"),
+            ("NAME=ab#cd", "ab#cd"),
+            ("NAME=#abc", "#abc"),
+            ("NAME= #abc", ""),
+            ("export", None),
+            ("export\n", None),
+            ("  export NAME=abc", "abc"),
+            ('NAME="abc', "abc"),
+            ("# NAME=abc", None),
+            ("   NAME=abc", "abc"),
+            ("NAME2=abc", None),
+            ("XNAME=abc", None),
+            ("NAME=", ""),
+            ("NAME= # note", ""),
+            ("NAME=abc\r\n", "abc"),
+            ("NAME", None),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(API._env_line_value(line, "NAME"), expected)
 
 
 class EnvFileTest(unittest.TestCase):
@@ -128,40 +91,25 @@ class EnvFileTest(unittest.TestCase):
         else:
             sys.modules[name] = module
 
-    def test_first_match_wins(self):
-        self.path.write_text("NAME=first\nNAME=second\n", encoding="utf-8")
-        self.install_home()
-        self.assertEqual(API._hermes_env_value("NAME"), "first")
-
-    def test_an_empty_first_match_still_wins(self):
-        self.path.write_text("NAME=\nNAME=second\n", encoding="utf-8")
-        self.install_home()
-        self.install_scope(None)
-        self.assertEqual(API._hermes_env_value("NAME"), "")
-        self.assertIsNone(API._secret("NAME"))
-
-    def test_a_bare_export_line_does_not_stop_the_file(self):
-        self.path.write_text("export\nNAME=abc\n", encoding="utf-8")
-        self.install_home()
-        self.assertEqual(API._hermes_env_value("NAME"), "abc")
-
-    def test_an_empty_value_is_no_credential(self):
-        self.path.write_text("NAME=\n", encoding="utf-8")
-        self.install_home()
-        self.install_scope(None)
-        self.assertIsNone(API._secret("NAME"))
-
-    def test_secret_reads_an_exported_quoted_line(self):
-        self.path.write_text('export DEEPSEEK_API_KEY = "abc" # note\n', encoding="utf-8")
-        self.install_home()
-        self.install_scope(None)
-        self.assertEqual(API._secret("DEEPSEEK_API_KEY"), "abc")
-
-    def test_secret_scope_wins_over_the_file(self):
-        self.path.write_text("DEEPSEEK_API_KEY=from-file\n", encoding="utf-8")
-        self.install_home()
-        self.install_scope("from-scope")
-        self.assertEqual(API._secret("DEEPSEEK_API_KEY"), "from-scope")
+    def test_file_and_secret_cases(self):
+        cases = (
+            ("first", "NAME=first\nNAME=second\n", False, False, "first"),
+            ("bare export", "export\nNAME=abc\n", False, False, "abc"),
+            ("empty first", "NAME=\nNAME=second\n", None, False, ""),
+            ("empty first is no secret", "NAME=\nNAME=second\n", None, True, None),
+            ("exported quoted", 'export DEEPSEEK_API_KEY = "abc" # note\n', None, True, "abc"),
+            ("scope wins", "DEEPSEEK_API_KEY=from-file\n", "from-scope", True, "from-scope"),
+            ("empty value is no secret", "NAME=\n", None, True, None),
+        )
+        for label, text, scope, secret, expected in cases:
+            with self.subTest(label=label):
+                self.path.write_text(text, encoding="utf-8")
+                self.install_home()
+                if scope is not False:
+                    self.install_scope(scope)
+                name = "DEEPSEEK_API_KEY" if "DEEPSEEK" in text else "NAME"
+                value = API._secret(name) if secret else API._hermes_env_value(name)
+                self.assertEqual(value, expected)
 
     def test_undecodable_bytes_are_tolerated(self):
         self.path.write_bytes(b"NAME=abc\xff\xfe\n")
@@ -180,46 +128,45 @@ class PruneTest(unittest.TestCase):
         API._history.clear()
         API._history.update(self.saved)
 
-    def test_an_old_key_is_deleted(self):
+    def test_prune_cases(self):
         now = 1_000_000.0
-        API._history[("zai", "old")] = [[now - API._HISTORY_MAX_AGE - 1, 5.0]]
-        API._prune_history(now)
-        self.assertNotIn(("zai", "old"), API._history)
-
-    def test_a_fresh_key_keeps_every_sample(self):
-        now = 1_000_000.0
-        samples = [[now - 3000, 5.0], [now - 1000, 6.0]]
-        API._history[("zai", "5h")] = copy.deepcopy(samples)
-        API._prune_history(now)
-        self.assertEqual(API._history[("zai", "5h")], samples)
-
-    def test_the_age_boundary(self):
-        now = 1_000_000.0
-        API._history[("a", "at")] = [[now - API._HISTORY_MAX_AGE, 1.0]]
-        API._history[("b", "past")] = [[now - API._HISTORY_MAX_AGE - 1, 1.0]]
-        API._prune_history(now)
-        self.assertIn(("a", "at"), API._history)
-        self.assertNotIn(("b", "past"), API._history)
-
-    def test_a_fresh_newest_sample_keeps_the_key(self):
-        now = 1_000_000.0
-        samples = [[now - API._HISTORY_MAX_AGE - 100, 1.0], [now - 10, 2.0]]
-        API._history[("zai", "mixed")] = copy.deepcopy(samples)
-        API._prune_history(now)
-        self.assertEqual(API._history[("zai", "mixed")], samples)
-
-    def test_an_empty_key_is_deleted(self):
-        API._history[("zai", "empty")] = []
-        API._prune_history(1_000_000.0)
-        self.assertNotIn(("zai", "empty"), API._history)
-
-    def test_several_keys_at_once(self):
-        now = 1_000_000.0
-        API._history[("a", "old")] = [[now - API._HISTORY_MAX_AGE - 5, 1.0]]
-        API._history[("b", "old")] = [[now - API._HISTORY_MAX_AGE - 9, 1.0]]
-        API._history[("c", "fresh")] = [[now - 10, 1.0]]
-        API._prune_history(now)
-        self.assertEqual(list(API._history), [("c", "fresh")])
+        cases = (
+            ("old key", {("zai", "old"): [[now - API._HISTORY_MAX_AGE - 1, 5.0]]}, {}),
+            (
+                "fresh key",
+                {("zai", "5h"): [[now - 3000, 5.0], [now - 1000, 6.0]]},
+                {("zai", "5h"): [[now - 3000, 5.0], [now - 1000, 6.0]]},
+            ),
+            (
+                "age boundary",
+                {
+                    ("a", "at"): [[now - API._HISTORY_MAX_AGE, 1.0]],
+                    ("b", "past"): [[now - API._HISTORY_MAX_AGE - 1, 1.0]],
+                },
+                {("a", "at"): [[now - API._HISTORY_MAX_AGE, 1.0]]},
+            ),
+            (
+                "old sample in a fresh key",
+                {("zai", "mixed"): [[now - API._HISTORY_MAX_AGE - 100, 1.0], [now - 10, 2.0]]},
+                {("zai", "mixed"): [[now - 10, 2.0]]},
+            ),
+            ("empty key", {("zai", "empty"): []}, {}),
+            (
+                "several keys",
+                {
+                    ("a", "old"): [[now - API._HISTORY_MAX_AGE - 5, 1.0]],
+                    ("b", "old"): [[now - API._HISTORY_MAX_AGE - 9, 1.0]],
+                    ("c", "fresh"): [[now - 10, 1.0]],
+                },
+                {("c", "fresh"): [[now - 10, 1.0]]},
+            ),
+        )
+        for label, history, expected in cases:
+            with self.subTest(label=label):
+                API._history.clear()
+                API._history.update(copy.deepcopy(history))
+                API._prune_history(now)
+                self.assertEqual(API._history, expected)
 
 
 class CollectPruneTest(unittest.TestCase):

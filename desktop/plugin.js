@@ -688,7 +688,7 @@ export function chartModel(row, nowMs, alertAt, mode) {
     : CHART_HISTORY_W
   const total = Number(row.total) || 0
   const history = Array.isArray(row.history) ? row.history : []
-  const points = []
+  const timed = []
   for (const sample of history) {
     if (!Array.isArray(sample) || sample.length < 2) continue
     const t = Number(sample[0])
@@ -705,9 +705,25 @@ export function chartModel(row, nowMs, alertAt, mode) {
     const x = windowAxis
       ? Math.max(0, Math.min(1, (t * 1000 - start) / durationMs)) * CHART_W
       : CHART_HISTORY_W - ((now / 1000 - t) / CHART_HISTORY_S) * CHART_HISTORY_W
-    points.push([x, plotY(pct)])
+    timed.push({ t: t, point: [x, plotY(pct)] })
   }
-  points.sort((a, b) => a[0] - b[0])
+  timed.sort((a, b) => a.t - b.t)
+  const points = timed.map(item => item.point)
+  const gap = Math.max(20 * 60, windowAxis ? duration / 50 : 0)
+  const segments = []
+  const bridges = []
+  let segment = []
+  let previous = null
+  for (const item of timed) {
+    if (segment.length && previous && item.t - previous.t > gap) {
+      segments.push(segment)
+      bridges.push([previous.point, item.point])
+      segment = []
+    }
+    segment.push(item.point)
+    previous = item
+  }
+  if (segment.length) segments.push(segment)
   const derived = isMoney ? null : derivedRate(row, now)
   const average = points.length < 2 && derived !== null
   const series =
@@ -717,7 +733,7 @@ export function chartModel(row, nowMs, alertAt, mode) {
         ? [[0, plotY(0)], [nowX, plotY(used)]]
         : [[nowX, plotY(used)]]
   const leadIn =
-    windowAxis && points.length >= 2 && points[0][0] > 2
+    windowAxis && points.length >= 1 && points[0][0] > 2
       ? [[0, plotY(0)], [points[0][0], points[0][1]]]
       : null
   const measured = isMoney ? null : windowRate(row)
@@ -773,7 +789,10 @@ export function chartModel(row, nowMs, alertAt, mode) {
   const amber = rowAttention(row, now)
   return {
     series: series,
+    segments: segments,
+    bridges: bridges,
     leadIn: leadIn,
+    leadInInferred: leadIn !== null,
     current: [nowX, plotY(used)],
     nowX: nowX,
     nowLabel: nowLabel,
@@ -1278,8 +1297,13 @@ function chartElement(p, row, model) {
     })
   }
   const amber = model.colour === 'amber'
-  const series = model.series.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' ')
+  const segments = model.segments && model.segments.length
+    ? model.segments
+    : model.series.length >= 2
+      ? [model.series]
+      : []
   const proj = model.projection
+  const pointsText = points => points.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' ')
   return jsxs('svg', {
     viewBox: '0 0 ' + CHART_W + ' ' + CHART_H,
     width: '100%',
@@ -1314,26 +1338,45 @@ function chartElement(p, row, model) {
       model.leadIn
         ? jsx('polyline', {
             key: 'leadIn',
-            points: model.leadIn.map(pt => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join(' '),
+            points: pointsText(model.leadIn),
             fill: 'none',
             stroke: 'currentColor',
             strokeWidth: 2,
             strokeLinejoin: 'round',
             strokeLinecap: 'round',
-            opacity: 0.55
+            strokeDasharray: '3 3',
+            opacity: 0.35
           })
         : null,
-      model.series.length >= 2
-        ? jsx('polyline', {
-            key: 'history',
-            points: series,
-            fill: 'none',
-            stroke: 'currentColor',
-            strokeWidth: 2,
-            strokeLinejoin: 'round',
-            strokeLinecap: 'round',
-            opacity: model.average ? 0.55 : undefined
-          })
+      segments.map((part, index) =>
+        part.length >= 2
+          ? jsx('polyline', {
+              key: index === 0 ? 'history' : 'history-' + (index + 1),
+              points: pointsText(part),
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinejoin: 'round',
+              strokeLinecap: 'round',
+              opacity: model.average ? 0.55 : undefined
+            })
+          : null
+      ),
+      (model.bridges || []).map((bridge, index) =>
+        jsx('polyline', {
+          key: 'bridge-' + (index + 1),
+          points: pointsText(bridge),
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinejoin: 'round',
+          strokeLinecap: 'round',
+          strokeDasharray: '3 3',
+          opacity: 0.35
+        })
+      ),
+      segments.some(part => part.length >= 2)
+        ? null
         : jsx('circle', { key: 'current', cx: model.current[0], cy: model.current[1], r: 3, fill: 'currentColor' }),
       proj
         ? jsx('line', {
