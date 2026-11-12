@@ -49,6 +49,7 @@ CASES = {
     ],
     "anthropic": [
         ("ok.json", "http", "ok"),
+        ("ok_limits.json", "http", "ok"),
         ("skip_no_token.json", "no_key", "skip"),
     ],
     "copilot": [
@@ -239,6 +240,7 @@ class FixtureCaseTest(unittest.TestCase):
                     self.assertEqual(outcome, expect, "%s %s" % (pid, names[0]))
                     if expect == "ok":
                         self.assertIsNotNone(payload)
+                        assert payload is not None
                         self.assertEqual(payload["id"], pid)
                         self.assertTrue(
                             payload.get("windows") or payload.get("money"),
@@ -250,6 +252,46 @@ class FixtureCaseTest(unittest.TestCase):
                         if pid == "deepseek" and names[0] == "ok_multi_currency.json":
                             curs = sorted(row["cur"] for row in payload["money"])
                             self.assertEqual(curs, ["CNY", "USD"])
+                        if pid == "anthropic" and names[0] == "ok_limits.json":
+                            keys = (
+                                "label",
+                                "percent",
+                                "resets_at",
+                                "duration_seconds",
+                                "scope",
+                                "key",
+                            )
+                            rows = [tuple(row[k] for k in keys) for row in payload["windows"]]
+                            self.assertEqual(
+                                rows,
+                                [
+                                    ("5h", 12.5, "2026-11-13T07:00:00Z", 18000, "account", "5h"),
+                                    (
+                                        "Weekly",
+                                        20.0,
+                                        "2026-11-13T07:00:00Z",
+                                        604800,
+                                        "account",
+                                        "weekly",
+                                    ),
+                                    (
+                                        "Sonnet",
+                                        42.0,
+                                        "2025-11-13T02:13:20Z",
+                                        604800,
+                                        "model",
+                                        "sonnet:weekly",
+                                    ),
+                                    (
+                                        "Fable",
+                                        15.0,
+                                        "2026-11-13T07:00:00.016532+00:00",
+                                        604800,
+                                        "model",
+                                        "fable:weekly",
+                                    ),
+                                ],
+                            )
                         if pid == "kimi-coding":
                             if names[0] == "ok_usages.json":
                                 rows = [

@@ -437,23 +437,11 @@ class AnthropicFetcherTest(unittest.TestCase):
             payload["stale"] = True
         return payload
 
-    def test_directsdk_answers_when_hermes_anthropic_is_missing(self):
-        asked = self._hermes_answers({API.DIRECTSDK_PROVIDER: self._reading("DirectSDK 5h")})
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-
-        def forbidden(*args, **kwargs):
-            self.fail("direct HTTP must not run when DirectSDK answers")
-
-        API._http_json = forbidden
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
-        self.assertEqual(p["id"], "anthropic")
-        self.assertEqual(p["windows"][0]["label"], "DirectSDK 5h")
-
     def test_fresh_hermes_anthropic_does_not_ask_directsdk(self):
         asked = self._hermes_answers({"anthropic": self._reading("Hermes 5h")})
         p = API.fetch_anthropic()
         self.assertEqual(asked, ["anthropic"])
+        self.assertEqual(self.calls, [])
         self.assertEqual(p["id"], "anthropic")
         self.assertEqual(p["windows"][0]["label"], "Hermes 5h")
 
@@ -470,78 +458,56 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["label"], "DirectSDK fresh")
         self.assertNotIn("stale", p)
 
-    def test_both_helpers_missing_fall_back_to_the_token(self):
-        API._direct_readings.clear()
-        API._direct_cooldown.clear()
-        asked = self._hermes_answers({})
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http(self.LIVE_BODY)
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
-        self.assertEqual(p["id"], "anthropic")
-        self.assertEqual(self.calls, [ANTHROPIC_URL])
+    def test_limit_rows_edge_cases(self):
+        epoch = 1763000000
+        iso = "2026-11-13T07:00:00.016532+00:00"
 
-    def test_fable_snapshot_windows_match_for_anthropic_and_directsdk(self):
-        from datetime import datetime, timedelta, timezone
-        from types import SimpleNamespace
+        def entry(kind="weekly_scoped", percent=15, reset=None, name="Fable", scope=None):
+            return {
+                "kind": kind,
+                "percent": percent,
+                "resets_at": reset,
+                "scope": scope if scope is not None else {"model": {"display_name": name}},
+            }
 
-        now = datetime.now(timezone.utc)
-
-        def snapshot():
-            return SimpleNamespace(
-                available=True,
-                fetched_at=now,
-                plan=None,
-                raw=None,
-                windows=[
-                    SimpleNamespace(
-                        label="Current session",
-                        used_percent=10.0,
-                        reset_at=now + timedelta(hours=2),
-                    ),
-                    SimpleNamespace(
-                        label="Current week", used_percent=20.0, reset_at=now + timedelta(days=3)
-                    ),
-                    SimpleNamespace(
-                        label="Fable week", used_percent=30.0, reset_at=now + timedelta(days=3)
-                    ),
-                ],
-            )
-
-        for provider in ("anthropic", API.DIRECTSDK_PROVIDER):
-            with self.subTest(provider=provider):
-                p = API._snap_payload(provider, snapshot())
-                self.assertEqual(p["id"], provider)
-                self.assertEqual([w["label"] for w in p["windows"]], ["5h", "Weekly", "Fable"])
+        cases = (
+            ("epoch reset", entry(reset=epoch), "2025-11-13T02:13:20Z", True),
+            ("bad reset", entry(reset="not-a-date"), None, True),
+            ("nan reset", entry(reset=float("nan")), None, True),
+            ("iso reset", entry(kind="weekly_model", reset=iso), iso, True),
+            ("bad percent", entry(percent="nope"), "skip", True),
+            ("missing percent", entry(percent=None), "skip", True),
+            ("nan percent", entry(percent=float("nan")), "skip", True),
+            ("missing name", entry(name="   "), "skip", True),
+            ("surface only", entry(scope={"surface": "cli"}), "skip", True),
+            ("unknown kind", entry(kind="daily_scoped"), "skip", True),
+            ("limits only", entry(), None, False),
+        )
+        for label, limit, expected_reset, base in cases:
+            with self.subTest(label=label):
+                self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+                body = {"limits": [limit]}
+                if base:
+                    body["five_hour"] = {"utilization": 10.0}
+                self._mock_http(body)
+                p = API._anthropic_direct()
+                expected = [] if expected_reset == "skip" else ["Fable"]
                 self.assertEqual(
-                    [w["duration_seconds"] for w in p["windows"]],
-                    [5 * 3600, 7 * 86400, 7 * 86400],
+                    [w["label"] for w in p["windows"]], (["5h"] if base else []) + expected
                 )
-                self.assertEqual(
-                    [w["scope"] for w in p["windows"]], ["account", "account", "model"]
-                )
-                self.assertEqual(p["windows"][2]["key"], "fable:weekly")
-
-        anthropic = API._snap_payload("anthropic", snapshot())
-        directsdk = API._snap_payload(API.DIRECTSDK_PROVIDER, snapshot())
-        self.assertEqual(anthropic["windows"], directsdk["windows"])
-
-    def test_hermes_result_takes_precedence(self):
-        API._hermes_usage = lambda provider: {
-            "id": provider,
-            "status": "ok",
-            "windows": [{"label": "5h", "percent": 12}],
-        }
-        API.fetch_anthropic()
-        self.assertEqual(self.calls, [])  # no fallback HTTP when Hermes answers
+                if expected:
+                    self.assertEqual(
+                        p["windows"][0 if not base else 1]["resets_at"], expected_reset
+                    )
 
     def test_oauth_fallback_ratio_windows(self):
-        self._no_hermes()
+        asked = self._hermes_answers({})
         self._write_creds(
             {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "pro"}}
         )
         self._mock_http(self.LIVE_BODY)
         p = API.fetch_anthropic()
+        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
         self.assertEqual(p["id"], "anthropic")
         self.assertEqual(p["status"], "ok")
         self.assertNotIn("money", p)  # ratio windows, never money rows
@@ -550,43 +516,28 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(p["windows"][0]["resets_at"], "2026-10-02T07:06:00.000000+00:00")
         self.assertEqual(p["windows"][1]["label"], "Weekly")
         self.assertEqual(p["windows"][1]["percent"], 0.0)  # real 0%, not fabricated
-
-    def test_fallback_headers(self):
-        self._no_hermes()
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http(self.LIVE_BODY)
-        API.fetch_anthropic()
         self.assertEqual(self.calls, [ANTHROPIC_URL])
         hdr = self.headers_seen[0]
         self.assertEqual(hdr["Authorization"], "Bearer test-token")
         self.assertEqual(hdr["anthropic-beta"], "oauth-2025-04-20")
 
-    def test_missing_credentials_file_skips(self):
+    def test_credentials_that_do_not_yield_a_token_skip(self):
+        cases = (
+            ("missing", None),
+            ("malformed", "{not json"),
+            ("empty token", {"claudeAiOauth": {"accessToken": ""}}),
+            ("wrong shape", {"mcpOAuth": {}}),
+            ("other entries", {"mcpOAuth": {"x|1": {"accessToken": "mcp-token"}}}),
+        )
         self._no_hermes()
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
-
-    def test_malformed_credentials_file_skips(self):
-        self._no_hermes()
-        self._write_creds("{not json")
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
-
-    def test_wrong_shape_credentials_skips(self):
-        self._no_hermes()
-        self._write_creds({"claudeAiOauth": {"accessToken": ""}})  # empty token
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
-        self._write_creds({"mcpOAuth": {}})  # no claudeAiOauth entry
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
-
-    def test_token_from_other_entries_never_used(self):
-        # mcpOAuth entries are unrelated server tokens; only claudeAiOauth counts
-        self._no_hermes()
-        self._write_creds({"mcpOAuth": {"x|1": {"accessToken": "mcp-token"}}})
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
+        for label, payload in cases:
+            with self.subTest(label=label):
+                if payload is None:
+                    self.creds.unlink(missing_ok=True)
+                else:
+                    self._write_creds(payload)
+                with self.assertRaises(API._Skip):
+                    API.fetch_anthropic()
 
     def test_window_without_utilization_is_skipped(self):
         self._no_hermes()

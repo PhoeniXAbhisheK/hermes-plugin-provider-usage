@@ -394,6 +394,24 @@ def _num(value):
     return number if math.isfinite(number) else None
 
 
+def _limit_reset(value):
+    """A reset from an ISO string or epoch seconds, or None when unusable."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or _epoch_from_iso(text) is None:
+            return None
+        return text
+    if isinstance(value, bool):
+        return None
+    number = _num(value)
+    if number is None:
+        return None
+    try:
+        return _iso_epoch(number)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 _DURATION_TOLERANCE = 0.1
 _DURATION_LABELS = (
     (5 * 3600, "5h", "5h"),
@@ -797,9 +815,17 @@ def _snap_window(provider, w):
     scope = str(getattr(w, "scope", None) or "account")
     duration = None
     model = None
-    known = _SNAP_WINDOWS.get(provider, {}).get(label.strip().lower())
+    raw_label = str(getattr(w, "label", None) or "").strip()
+    known = _SNAP_WINDOWS.get(provider, {}).get(raw_label.lower())
     if known is not None:
         label, duration, scope, model = known
+    else:
+        match = re.match(r"^(?P<name>.+?)\s+week$", raw_label, re.IGNORECASE)
+        if match is not None and match.group("name").strip():
+            label = match.group("name").strip()
+            duration = 7 * 86400
+            scope = "model"
+            model = _slug(label)
     reset_at = _iso_dt(getattr(w, "reset_at", None))
     if known is not None and duration:
         remaining = _seconds_until(getattr(w, "reset_at", None))
@@ -1065,6 +1091,41 @@ def fetch_anthropic():
     return _helper_or_direct("anthropic", _anthropic_direct, helper=_anthropic_helper)
 
 
+def _anthropic_limit_rows(limits):
+    """Per-model weekly rows from Anthropic's plan limits, keyed by model slug."""
+    rows = {}
+    if not isinstance(limits, list):
+        return rows
+    for entry in limits:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") not in ("weekly_scoped", "weekly_model"):
+            continue
+        scope = entry.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            continue
+        percent = _num(entry.get("percent"))
+        if percent is None:
+            continue
+        label = name.strip()
+        slug = _slug(label)
+        if slug in rows:
+            continue
+        row = _window(
+            label,
+            percent,
+            _limit_reset(entry.get("resets_at")),
+            duration=7 * 86400,
+            scope="model",
+            model=slug,
+        )
+        if row is not None:
+            rows[slug] = row
+    return rows
+
+
 def _anthropic_direct():
     """One direct Anthropic read with the Claude Code OAuth token."""
     token = _claude_code_oauth_token()
@@ -1078,6 +1139,8 @@ def _anthropic_direct():
             "Accept": "application/json",
         },
     )
+    limit_rows = _anthropic_limit_rows(d.get("limits"))
+    used_limits = set()
     windows = []
     for key, label, duration, scope, model in (
         ("five_hour", "5h", 5 * 3600, "account", None),
@@ -1097,7 +1160,17 @@ def _anthropic_direct():
             scope=scope,
             model=model,
         )
-        if row is not None:
+        if row is None:
+            continue
+        if scope == "model" and model in limit_rows:
+            # The plan limits carry the current value; the seven_day_* object
+            # is the older shape of the same per-model weekly window.
+            windows.append(limit_rows[model])
+            used_limits.add(model)
+            continue
+        windows.append(row)
+    for slug, row in limit_rows.items():
+        if slug not in used_limits:
             windows.append(row)
     if not windows:
         raise _Skip("anthropic")
