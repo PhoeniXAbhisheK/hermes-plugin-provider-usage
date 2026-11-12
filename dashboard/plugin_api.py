@@ -92,6 +92,9 @@ HELPER_COOLDOWN_S = 300.0  # wait after an empty helper read before trying the h
 HELPER_TIMEOUT_S = 10.0  # one account-usage helper read, wall clock
 DEADLINE_S = 30.0  # one collection, wall clock
 PROVIDER_BUDGET_S = 12.0  # one provider inside that collection, wall clock
+ANTHROPIC_LIMITS_READ_S = 900.0  # extra per-model limits read, at most once per 15 min
+ANTHROPIC_LIMITS_CACHE_S = 3600.0  # keep parsed limit rows for one hour without a success
+ANTHROPIC_LIMITS_MIN_LEFT_S = 0.5  # do not start the extra read with less budget than this
 HOME = Path.home()
 
 # Wall-clock budget for the provider currently running. Workers copy the caller's
@@ -197,6 +200,12 @@ _cache = {"at": 0.0, "payload": None}
 _holds = {}  # provider id -> epoch when a 429 hold expires
 _last_good = {}  # provider id -> last ok payload (served while held)
 _helper_cooldown = {}  # provider id -> epoch when the account-usage helper may be tried again
+_anthropic_limits = {  # extra per-model limits read state
+    "at": 0.0,  # last successful read
+    "rows": {},  # parsed model rows, keyed by model slug
+    "attempt": 0.0,  # last attempt, successful or not
+    "hold": 0.0,  # a 429 reset_at for the extra read only
+}
 _running = {"run": None}  # the collection in flight, if any (guarded by _lock)
 _inflight = {}  # provider id -> Event set when its last worker returned
 _HOST_WINNERS = {}  # family -> last host that answered, tried first next time
@@ -874,6 +883,20 @@ def _snap_payload(provider, snap):
     if not windows:
         return None
     payload = {"id": provider, "status": "ok", "windows": windows}
+    if provider in ("anthropic", DIRECTSDK_PROVIDER) and isinstance(raw, dict):
+        raw_limits = raw.get("limits")
+        if isinstance(raw_limits, list):
+            # A future core snapshot may carry the same limits[] body. Parse it
+            # here so the helper path needs no extra request.
+            limit_rows = _anthropic_limit_rows(raw_limits)
+            existing = {
+                str(w.get("model")) for w in windows if w.get("scope") == "model" and w.get("model")
+            }
+            for slug, row in limit_rows.items():
+                if slug not in existing:
+                    windows.append(row)
+                    existing.add(slug)
+            payload["_anthropic_limits_raw"] = True
     plan = getattr(snap, "plan", None)
     if isinstance(plan, str) and plan.strip():
         # The plan the reading belongs to, title-cased like the direct path.
@@ -1065,6 +1088,23 @@ def _claude_code_oauth_token():
     return token
 
 
+def _anthropic_headers(token):
+    """The Claude Code OAuth request headers, shared by both Anthropic reads."""
+    return {
+        "Authorization": "Bearer " + token,
+        "anthropic-beta": "oauth-2025-04-20",
+        "Accept": "application/json",
+    }
+
+
+def _anthropic_request(token):
+    """One Anthropic usage request with the Claude Code OAuth token."""
+    return _http_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        _anthropic_headers(token),
+    )
+
+
 def _anthropic_helper():
     """Hermes anthropic reading, then the DirectSDK provider.
 
@@ -1087,8 +1127,88 @@ def _anthropic_helper():
 
 
 def fetch_anthropic():
-    """Anthropic quota windows: Hermes sign-in, DirectSDK, then the token on disk."""
-    return _helper_or_direct("anthropic", _anthropic_direct, helper=_anthropic_helper)
+    """Anthropic quota windows: Hermes sign-in, DirectSDK, then the token on disk.
+
+    A helper payload does not carry the per-model limits[] rows. Read them
+    separately at a throttled pace, or use the raw body when a helper snapshot
+    starts carrying one.
+    """
+    direct_ok = [False]
+
+    def direct():
+        result = _anthropic_direct()
+        direct_ok[0] = True
+        return result
+
+    payload = _helper_or_direct("anthropic", direct, helper=_anthropic_helper)
+    if not isinstance(payload, dict):
+        return payload
+    if payload.pop("_anthropic_limits_raw", False):
+        return payload
+    if direct_ok[0]:
+        return payload
+    _merge_anthropic_limit_rows(payload, _anthropic_limits_cached())
+    return payload
+
+
+def _merge_anthropic_limit_rows(payload, rows):
+    """Append limit rows whose model key is not already in the helper payload."""
+    if not isinstance(payload, dict) or not rows:
+        return
+    windows = payload.setdefault("windows", [])
+    existing = {str(row.get("key")) for row in windows if isinstance(row, dict) and row.get("key")}
+    existing.update(
+        str(row.get("model")) + ":weekly"
+        for row in windows
+        if isinstance(row, dict) and row.get("scope") == "model" and row.get("model")
+    )
+    for slug, row in rows.items():
+        key = slug + ":weekly"
+        if key in existing:
+            continue
+        windows.append(copy.deepcopy(row))
+        existing.add(key)
+
+
+def _anthropic_limits_cached():
+    """Parsed per-model limit rows, refreshed at most once per 15 minutes.
+
+    A failed read keeps the last rows for an hour unless a 429 held the extra
+    read. No failure reaches the provider card or marks the main payload stale.
+    """
+    state = _anthropic_limits
+    now = time.time()
+    if state["at"] and now - state["at"] > ANTHROPIC_LIMITS_CACHE_S:
+        state["at"] = 0.0
+        state["rows"] = {}
+    cached = copy.deepcopy(state["rows"])
+    if now < state["hold"]:
+        return cached
+    if state["attempt"] and now - state["attempt"] < ANTHROPIC_LIMITS_READ_S:
+        return cached
+    if _run_closed():
+        return cached
+    left = _time_left()
+    if left is not None and left <= ANTHROPIC_LIMITS_MIN_LEFT_S:
+        return cached
+    token = _claude_code_oauth_token()
+    if not token:
+        return cached
+    state["attempt"] = now
+    try:
+        d = _anthropic_request(token)
+        rows = _anthropic_limit_rows(d.get("limits"))
+    except _RateLimited as exc:
+        state["hold"] = max(state["hold"], exc.reset_at)
+        return cached
+    except Exception as exc:  # noqa: BLE001 - a side read never breaks the card
+        logging.getLogger(__name__).debug(
+            "anthropic limits read failed (%s): %s", type(exc).__name__, _error_message(exc)
+        )
+        return cached
+    state["at"] = now
+    state["rows"] = rows
+    return copy.deepcopy(rows)
 
 
 def _anthropic_limit_rows(limits):
@@ -1131,14 +1251,7 @@ def _anthropic_direct():
     token = _claude_code_oauth_token()
     if not token:
         raise _Skip("anthropic")
-    d = _http_json(
-        "https://api.anthropic.com/api/oauth/usage",
-        {
-            "Authorization": "Bearer " + token,
-            "anthropic-beta": "oauth-2025-04-20",
-            "Accept": "application/json",
-        },
-    )
+    d = _anthropic_request(token)
     limit_rows = _anthropic_limit_rows(d.get("limits"))
     used_limits = set()
     windows = []
