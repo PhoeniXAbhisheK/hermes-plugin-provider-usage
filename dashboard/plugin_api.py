@@ -1784,6 +1784,15 @@ def _history_key(pid, row):
     return (pid, str(row["key"]))
 
 
+def _long_window(row, now):
+    """True when a window is longer than a day, by duration or by reset."""
+    duration = _num(row.get("duration_seconds"))
+    if duration is not None and duration > 0:
+        return duration > 86400
+    reset = _epoch_from_iso(row.get("resets_at"))
+    return reset is not None and reset - now > 86400
+
+
 def _decorate(pid, p, now):
     for w in p.get("windows") or []:
         v = _num(w.get("percent"))
@@ -1791,6 +1800,11 @@ def _decorate(pid, p, now):
             continue
         key = _history_key(pid, w)
         _record(key, v, now)
+        if _long_window(w, now):
+            # Keep the sample for the chart, but let the panel judge a long
+            # window by its average pace instead of a short burst.
+            w.pop("eta_seconds", None)
+            continue
         eta = _project(key, v, 100.0, now)
         if eta is not None:
             w["eta_seconds"] = eta

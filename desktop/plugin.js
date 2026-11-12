@@ -499,7 +499,7 @@ export function providerAttention(p, nowMs) {
 }
 
 /* The earliest actionable ETA in the provider, worded for its kind. A window
- * also considers its derived run-out projection when measured history is absent. */
+ * also considers its derived run-out when eta_seconds is absent. */
 export function attentionNote(p, nowMs) {
   if (!p || p.status !== 'ok') return ''
   const now = nowOf(nowMs)
@@ -645,8 +645,8 @@ export function derivedRate(row, nowMs) {
 }
 
 /* Seconds until a window reaches 100% at its derived pace, when that happens
- * before the reset. Measured rows defer to the backend's actionable_eta; the
- * first tenth of a window is too noisy to project. */
+ * before the reset. Rows with eta_seconds defer to the backend's actionable_eta;
+ * the first tenth of a window is too noisy to project. */
 export function projectedFull(row, nowMs) {
   if (!row || row.kind === 'money') return null
   const raw = row.used_pct

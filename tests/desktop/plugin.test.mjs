@@ -2056,99 +2056,59 @@ test('a zero eta yields no rate and a dash for burn', async () => {
   ])
 })
 
-test('chartModel clamps history values to the chart height', async () => {
+test('chartModel filters and orders history samples', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
-  const m = chartModel(
+  const cases = [
     {
-      kind: 'window',
-      used_pct: 40,
-      history: [
-        [now / 1000 - 3600, 150],
-        [now / 1000 - 1800, -20],
-        [now / 1000, 40]
-      ]
+      label: 'clamps out-of-range values',
+      history: [[now / 1000 - 3600, 150], [now / 1000 - 1800, -20], [now / 1000, 40]],
+      length: 3,
+      firstY: 2,
+      secondY: 66
     },
-    now
-  )
-  assert.equal(m.series.length, 3)
-  assert.equal(m.series[0][1], 2)
-  assert.equal(m.series[1][1], 66)
-})
-
-test('chartModel drops a sample stamped in the future', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const m = chartModel(
     {
-      kind: 'window',
-      used_pct: 40,
-      history: [
-        [now / 1000 + 600, 90],
-        [now / 1000, 40]
-      ]
+      label: 'drops a future sample',
+      history: [[now / 1000 + 600, 90], [now / 1000, 40]],
+      length: 1,
+      firstX: 220,
+      firstY: 40.4
     },
-    now
-  )
-  assert.equal(m.series.length, 1)
-  assert.equal(m.series[0][0], 220)
-  assert.ok(Math.abs(m.series[0][1] - 40.4) < 0.01)
-})
-
-test('chartModel drops a sample older than six hours', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const m = chartModel(
     {
-      kind: 'window',
-      used_pct: 40,
-      history: [
-        [now / 1000 - 7 * 3600, 10],
-        [now / 1000, 40]
-      ]
+      label: 'drops a sample older than six hours',
+      history: [[now / 1000 - 7 * 3600, 10], [now / 1000, 40]],
+      length: 1,
+      firstX: 220
     },
-    now
-  )
-  assert.equal(m.series.length, 1)
-  assert.equal(m.series[0][0], 220)
-})
-
-test('chartModel maps money history through the row total', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const m = chartModel(
     {
-      kind: 'money',
-      total: 20,
-      left: 15,
-      cur: 'USD',
-      used_pct: 25,
-      history: [
-        [now / 1000 - 3600, 5],
-        [now / 1000, 5]
-      ]
+      label: 'sorts newest first',
+      history: [[now / 1000, 40], [now / 1000 - 3600, 20]],
+      length: 2,
+      firstX: 220 - 220 / 6,
+      secondX: 220
     },
-    now
-  )
-  assert.equal(m.series[0][1], 50)
-})
-
-test('chartModel sorts samples given newest first', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const m = chartModel(
     {
-      kind: 'window',
-      used_pct: 40,
-      history: [
-        [now / 1000, 40],
-        [now / 1000 - 3600, 20]
-      ]
-    },
-    now
-  )
-  assert.ok(Math.abs(m.series[0][0] - (220 - 220 / 6)) < 0.01)
-  assert.equal(m.series[1][0], 220)
+      label: 'maps money through the row total',
+      row: {
+        kind: 'money',
+        total: 20,
+        left: 15,
+        cur: 'USD',
+        used_pct: 25,
+        history: [[now / 1000 - 3600, 5], [now / 1000, 5]]
+      },
+      length: 2,
+      firstY: 50
+    }
+  ]
+  for (const c of cases) {
+    const m = chartModel(c.row || { kind: 'window', used_pct: 40, history: c.history }, now)
+    assert.equal(m.series.length, c.length, c.label)
+    if (c.firstX !== undefined) assert.ok(Math.abs(m.series[0][0] - c.firstX) < 0.01, c.label)
+    if (c.firstY !== undefined) assert.ok(Math.abs(m.series[0][1] - c.firstY) < 0.01, c.label)
+    if (c.secondX !== undefined) assert.ok(Math.abs(m.series[1][0] - c.secondX) < 0.01, c.label)
+    if (c.secondY !== undefined) assert.equal(m.series[1][1], c.secondY, c.label)
+  }
 })
 
 test('chartModel ignores a reset that already passed', async () => {
@@ -2763,6 +2723,30 @@ test('providerAttention and attentionNote see a projected run-out', async () => 
     windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 3600 }]
   }
   assert.equal(attentionNote(laterActionable, now), 'full ~34m')
+})
+
+test('a long low-use window is not in Needs attention and has no note', async () => {
+  const { providerAttention, attentionNote, groupProviders } = await loadPlugin()
+  const now = Date.parse('2026-11-01T00:00:00Z')
+  const p = {
+    id: 'x',
+    status: 'ok',
+    windows: [
+      {
+        key: 'monthly',
+        label: 'Monthly',
+        kind: 'window',
+        used_pct: 2,
+        warn: false,
+        actionable_eta: null,
+        duration_seconds: 30 * 86400,
+        resets_at: new Date(now + 20 * 86400 * 1000).toISOString()
+      }
+    ]
+  }
+  assert.equal(providerAttention(p, now), false)
+  assert.equal(attentionNote(p, now), '')
+  assert.equal(groupProviders([p], 'all', [], now)[0].title, 'Providers')
 })
 
 test('a projected quota and the bar use the warn colour', async () => {
@@ -3496,28 +3480,6 @@ test('derivedRate rejects money rows and a window with no elapsed time', async (
   assert.deepEqual(statsFor(noElapsed, now).map(s => s.value), ['-', '-', '-'])
 })
 
-test('chartModel starts a no-history window at zero and ends at now', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-01T00:00:00Z')
-  const row = {
-    kind: 'window',
-    used_pct: 10,
-    duration_seconds: 5 * 3600,
-    resets_at: new Date(now + 4 * 3600 * 1000).toISOString()
-  }
-  const model = chartModel(row, now)
-  const zero = chartModel(
-    { kind: 'window', used_pct: 0, duration_seconds: 5 * 3600, resets_at: row.resets_at },
-    now
-  )
-  assert.equal(model.series[0][0], 0)
-  assert.equal(model.series[0][1], zero.current[1])
-  assert.equal(model.series[1][0], 67.2)
-  assert.equal(model.current[0], 67.2)
-  assert.equal(model.nowX, 67.2)
-  assert.equal(model.series[1][1], model.current[1])
-})
-
 test('chartModel draws a no-history window line and leaves money without one', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
@@ -3536,6 +3498,22 @@ test('chartModel draws a no-history window line and leaves money without one', a
   assert.ok(model.series[0][1] > model.series[1][1])
   assert.ok(model.projection !== null)
   assert.equal(model.rate, 35 / (2 * 86400))
+  const zero = chartModel({ ...row, used_pct: 0 }, now)
+  const fiveHour = chartModel(
+    {
+      kind: 'window',
+      used_pct: 10,
+      duration_seconds: 5 * 3600,
+      resets_at: new Date(now + 4 * 3600 * 1000).toISOString()
+    },
+    now
+  )
+  assert.equal(fiveHour.series[0][0], 0)
+  assert.equal(fiveHour.series[0][1], zero.current[1])
+  assert.equal(fiveHour.series[1][0], 67.2)
+  assert.equal(fiveHour.current[0], 67.2)
+  assert.equal(fiveHour.nowX, 67.2)
+  assert.equal(fiveHour.series[1][1], fiveHour.current[1])
   const { expandedPanel } = await loadPlugin()
   const windowPanel = expandedPanel(
     { id: 'z', name: 'Z', status: 'ok', windows: [{ ...row, key: 'monthly', label: 'Monthly' }] },

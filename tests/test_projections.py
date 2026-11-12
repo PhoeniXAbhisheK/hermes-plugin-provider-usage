@@ -61,22 +61,22 @@ class ProjectionTest(unittest.TestCase):
         self.assertIsNotNone(eta)
         self.assertGreater(eta, 0)
 
-    def test_flat_trend_returns_none(self):
+    def test_project_handles_flat_negative_and_target(self):
         key = ("zai", "5h")
-        self.seed(key, [(self._t0, 50.0), (self._t0 + 1800, 50.0)])
-        self.assertIsNone(API._project(key, 50.0, 100.0, self._t0 + 1800))
-
-    def test_negative_trend_returns_none(self):
-        key = ("zai", "5h")
-        # _record would clear on a drop; _project is the unit under test here.
-        self.seed(key, [(self._t0, 50.0), (self._t0 + 1800, 40.0)])
-        self.assertIsNone(API._project(key, 40.0, 100.0, self._t0 + 1800))
-
-    def test_at_or_past_target_returns_zero(self):
-        key = ("zai", "5h")
-        self.seed(key, [(self._t0, 0.0), (self._t0 + 1800, 50.0)])
-        self.assertEqual(API._project(key, 100.0, 100.0, self._t0 + 1800), 0)
-        self.assertEqual(API._project(key, 120.0, 100.0, self._t0 + 1800), 0)
+        cases = (
+            ("flat", [(self._t0, 50.0), (self._t0 + 1800, 50.0)], 50.0, None),
+            # _record would clear on a drop; _project is the unit under test here.
+            ("negative", [(self._t0, 50.0), (self._t0 + 1800, 40.0)], 40.0, None),
+            ("at target", [(self._t0, 0.0), (self._t0 + 1800, 50.0)], 100.0, 0),
+            ("past target", [(self._t0, 0.0), (self._t0 + 1800, 50.0)], 120.0, 0),
+        )
+        for label, samples, current, expected in cases:
+            with self.subTest(label=label):
+                self.seed(key, samples)
+                self.assertEqual(
+                    API._project(key, current, 100.0, self._t0 + 1800),
+                    expected,
+                )
 
     def test_sixty_day_cap_boundary(self):
         key = ("zai", "5h")
@@ -141,6 +141,35 @@ class ProjectionTest(unittest.TestCase):
         API._assign_keys(payload)
         API._decorate("zai", payload, self._t0)
         self.assertEqual(row["eta_seconds"], 14400)
+
+    def test_long_windows_skip_the_trailing_rate(self):
+        now = self._t0
+        low = [(now - 6 * 3600, 0.0), (now - 3600, 2.5)]
+        high = [(now - 6 * 3600, 0.0), (now - 3600, 75.0)]
+        cases = (
+            ("5h high", 18000, now + 4 * 3600, 80.0, high, True, True),
+            ("5h low", 18000, now + 4 * 3600, 3.0, low, True, False),
+            ("Monthly", 2592000, now + 20 * 86400, 3.0, low, False, False),
+            ("Monthly reset", None, now + 20 * 86400, 3.0, low, False, False),
+        )
+        for label, duration, reset, percent, samples, has_eta, actionable in cases:
+            with self.subTest(label=label):
+                API._history.clear()
+                row = {
+                    "label": label,
+                    "percent": percent,
+                    "resets_at": API._iso_from_epoch(reset),
+                }
+                if duration is not None:
+                    row["duration_seconds"] = duration
+                payload = {"id": "zai", "status": "ok", "windows": [row]}
+                API._assign_keys(payload)
+                self.seed(API._history_key("zai", row), samples)
+                API._decorate("zai", payload, now)
+                API._contract_rows(payload, now)
+                self.assertEqual("eta_seconds" in row, has_eta)
+                self.assertEqual(row["actionable_eta"] is not None, actionable)
+                self.assertIn("history", row)
 
     def test_money_depletion_time(self):
         key = ("deepseek", "money:balance:usd")

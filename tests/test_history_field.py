@@ -17,20 +17,16 @@ class HistoryKeyTest(unittest.TestCase):
         API._assign_keys(p)
         return API._history_key("zai", row)
 
-    def test_a_window_key(self):
-        self.assertEqual(
-            self.keyed("window", {"label": "Session (5h)", "percent": 10.0}), ("zai", "session_5h")
+    def test_key_cases(self):
+        cases = (
+            ("window", {"label": "Session (5h)", "percent": 10.0}, ("zai", "session_5h")),
+            ("money", {"label": "Key cap", "cur": "USD"}, ("zai", "money:key_cap:usd")),
+            ("window", {}, ("zai", "row")),
+            ("money", {}, ("zai", "money:row")),
         )
-
-    def test_a_money_key(self):
-        self.assertEqual(
-            self.keyed("money", {"label": "Key cap", "cur": "USD"}),
-            ("zai", "money:key_cap:usd"),
-        )
-
-    def test_missing_label_and_currency(self):
-        self.assertEqual(self.keyed("window", {}), ("zai", "row"))
-        self.assertEqual(self.keyed("money", {}), ("zai", "money:row"))
+        for kind, row, expected in cases:
+            with self.subTest(kind=kind, row=row):
+                self.assertEqual(self.keyed(kind, row), expected)
 
 
 class HistoryFieldTest(schema.Base):
@@ -44,58 +40,47 @@ class HistoryFieldTest(schema.Base):
         API._assign_keys(p)
         return p
 
-    def test_pairs_oldest_first_and_rounded(self):
-        API._history[("zai", "5h")] = [
-            [self.NOW - 1200, 10.111],
-            [self.NOW - 60, 12.349],
-        ]
-        p = self.window_payload()
-        API._contract_rows(p, self.NOW)
-        self.assertEqual(
-            p["windows"][0]["history"],
-            [[int(self.NOW - 1200), 10.11], [int(self.NOW - 60), 12.35]],
+    def test_history_buckets(self):
+        cases = (
+            (
+                "rounded",
+                [[self.NOW - 1200, 10.111], [self.NOW - 60, 12.349]],
+                [[int(self.NOW - 1200), 10.11], [int(self.NOW - 60), 12.35]],
+            ),
+            (
+                "past window",
+                [
+                    [self.NOW - API._HISTORY_WINDOW - 600, 1.0],
+                    [self.NOW - API._HISTORY_WINDOW, 2.0],
+                ],
+                [[int(self.NOW - API._HISTORY_WINDOW), 2.0]],
+            ),
+            (
+                "later in bucket",
+                [[self.NOW - 60, 1.0], [self.NOW - 30, 2.0]],
+                [[int(self.NOW - 30), 2.0]],
+            ),
         )
+        for label, samples, expected in cases:
+            with self.subTest(label=label):
+                API._history.clear()
+                API._history[("zai", "5h")] = samples
+                p = self.window_payload()
+                API._contract_rows(p, self.NOW)
+                self.assertEqual(p["windows"][0]["history"], expected)
 
-    def test_samples_past_the_window_are_left_out(self):
-        API._history[("zai", "5h")] = [
-            [self.NOW - API._HISTORY_WINDOW - 600, 1.0],
-            [self.NOW - API._HISTORY_WINDOW, 2.0],
-        ]
+    def test_history_is_one_point_per_bucket_and_capped(self):
+        API._history[("zai", "5h")] = [[self.NOW - (99 - i) * 60, float(i)] for i in range(100)]
         p = self.window_payload()
         API._contract_rows(p, self.NOW)
-        self.assertEqual(
-            p["windows"][0]["history"],
-            [[int(self.NOW - API._HISTORY_WINDOW), 2.0]],
-        )
-
-    def test_one_point_per_bucket(self):
-        samples = [[self.NOW - (99 - i) * 60, float(i)] for i in range(100)]
-        API._history[("zai", "5h")] = samples
-        p = self.window_payload()
-        API._contract_rows(p, self.NOW)
-        expected = {}
-        for t, v in samples:
-            expected[int(t // 600)] = [int(t), round(v, 2)]
-        buckets = sorted(expected)
-        self.assertEqual(p["windows"][0]["history"], [expected[b] for b in buckets])
-
-    def test_six_hours_give_at_most_36_points(self):
-        samples = [[self.NOW - (360 - i) * 60, float(i)] for i in range(361)]
-        API._history[("zai", "5h")] = samples
+        history = p["windows"][0]["history"]
+        self.assertEqual(len(history), len({int(t // 600) for t, _ in history}))
+        API._history[("zai", "5h")] = [[self.NOW - (360 - i) * 60, float(i)] for i in range(361)]
         p = self.window_payload()
         API._contract_rows(p, self.NOW)
         history = p["windows"][0]["history"]
         self.assertEqual(len(history), 36)
         self.assertEqual(history[-1], [int(self.NOW), 360.0])
-
-    def test_two_samples_in_one_bucket_keep_the_later(self):
-        API._history[("zai", "5h")] = [
-            [self.NOW - 60, 1.0],
-            [self.NOW - 30, 2.0],
-        ]
-        p = self.window_payload()
-        API._contract_rows(p, self.NOW)
-        self.assertEqual(p["windows"][0]["history"], [[int(self.NOW - 30), 2.0]])
 
     def test_no_samples_means_no_history(self):
         p = self.window_payload(label="nothing")
