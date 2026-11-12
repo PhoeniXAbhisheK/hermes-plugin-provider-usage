@@ -1529,6 +1529,18 @@ def fetch_kimi():
                 )
                 if row is not None:
                     windows.append(row)
+        wallet = payload.get("booster_wallet")
+        balance = wallet.get("balance") if isinstance(wallet, dict) else None
+        if isinstance(balance, dict):
+            amount = _num(balance.get("amount"))
+            left = _num(balance.get("amountLeft"))
+            if amount is not None and amount > 0 and left is not None:
+                used = max(0.0, min(100.0, 100.0 - left / amount * 100.0))
+                row = _window("Booster", used, None)
+                if row is not None:
+                    row["key"] = "booster"
+                    row["indicative"] = True
+                    windows.append(row)
         if windows:
             return {"id": "kimi-coding", "status": "ok", "windows": windows}
     available, balance_url = _fetch_moonshot_balance(headers)
@@ -2067,6 +2079,11 @@ def _decorate(pid, p, now):
             resets_at=w.get("resets_at"),
             duration_seconds=w.get("duration_seconds"),
         )
+        if w.get("indicative") is True:
+            # Indicative rows are shown for information only. Keep the history
+            # sample for the chart, but never project them to a run-out.
+            w.pop("eta_seconds", None)
+            continue
         if _long_window(w, now):
             # Keep the sample for the chart, but let the panel judge a long
             # window by its average pace instead of a short burst.
@@ -2223,9 +2240,10 @@ def _contract_rows(p, now):
             row["kind"] = kind
             if kind == "window":
                 used = _num(row.get("percent"))
+                indicative = row.get("indicative") is True
                 row["used_pct"] = used
-                row["warn"] = used is not None and used >= WARN_PCT
-                row["actionable_eta"] = _window_actionable(row, now)
+                row["warn"] = False if indicative else used is not None and used >= WARN_PCT
+                row["actionable_eta"] = None if indicative else _window_actionable(row, now)
             else:
                 total = _num(row.get("total"))
                 left = _num(row.get("left"))
