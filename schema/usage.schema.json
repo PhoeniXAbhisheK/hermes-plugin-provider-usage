@@ -115,7 +115,7 @@
         },
         "history": {
           "type": "array",
-          "description": "[epoch seconds, value] pairs, oldest first: percent used per 10 minute bucket, at most 36 points over 6 hours. In memory only, so it resets when Hermes restarts.",
+          "description": "[epoch seconds, value] pairs, oldest first. A window with a reset and duration carries at most 120 points over the current window, downsampled by even time buckets. Money rows and rows without a duration carry at most 36 points over 6 hours. Persisted under the Hermes plugin data directory and survives a restart.",
           "items": {
             "type": "array",
             "items": {
@@ -178,7 +178,7 @@
         },
         "history": {
           "type": "array",
-          "description": "[epoch seconds, value] pairs, oldest first: amount used per 10 minute bucket, at most 36 points over 6 hours. In memory only, so it resets when Hermes restarts.",
+          "description": "[epoch seconds, value] pairs, oldest first: amount used per 10 minute bucket, at most 36 points over 6 hours. Persisted under the Hermes plugin data directory and survives a restart.",
           "items": {
             "type": "array",
             "items": {
