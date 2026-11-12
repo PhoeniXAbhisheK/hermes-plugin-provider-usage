@@ -299,7 +299,7 @@ class FixtureCaseTest(unittest.TestCase):
                                         row["label"],
                                         row["percent"],
                                         row["resets_at"],
-                                        row["duration_seconds"],
+                                        row.get("duration_seconds"),
                                         row["scope"],
                                         row["key"],
                                     )
@@ -332,6 +332,7 @@ class FixtureCaseTest(unittest.TestCase):
                                             "model",
                                             "code:monthly",
                                         ),
+                                        ("Booster", 48.3, None, None, "account", "booster"),
                                     ],
                                 )
                                 self.assertNotIn("money", payload)

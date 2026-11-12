@@ -62,7 +62,7 @@ providers are omitted from the panel entirely.
 | GitHub Copilot | Hermes' Copilot token resolver, on Hermes 0.22.5 or older only. Hermes 0.22.6 moved Copilot out of core into the `github-copilot` plugin, which does not report usage, so the card stays hidden there | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | `https://portal.nousresearch.com/api/oauth/account` (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
-| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (falls back to the Moonshot balance at `https://api.moonshot.ai/v1/users/me/balance`, then `https://api.moonshot.cn/v1/users/me/balance`) |
+| Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (the booster balance is an indicative row and never flags or alerts; falls back to the Moonshot balance at `https://api.moonshot.ai/v1/users/me/balance`, then `https://api.moonshot.cn/v1/users/me/balance`) |
 | MiniMax | `MINIMAX_CN_API_KEY` (mainland) or `MINIMAX_API_KEY` (global); the CN key is tried first and both are probed when both are set, since M Plan subscription keys are region-bound | `https://api.minimaxi.com/v1/token_plan/remains` then `https://www.minimax.cn/v1/token_plan/remains` for mainland, `https://api.minimax.io/v1/token_plan/remains` then `https://www.minimax.io/v1/token_plan/remains` for global |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
 

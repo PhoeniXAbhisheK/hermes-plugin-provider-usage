@@ -28,8 +28,13 @@
   },
   "booster_wallet": {
     "balance": {
+      "feature": "FEATURE_OMNI",
+      "type": "BOOSTER",
+      "unit": "UNIT_CURRENCY",
       "amount": "10000000000",
-      "amountLeft": "5173478600"
+      "amountLeft": "5173478600",
+      "periodStart": "2026-09-13T11:23:14Z",
+      "periodEnd": "2126-09-13T11:23:15Z"
     }
   }
 }

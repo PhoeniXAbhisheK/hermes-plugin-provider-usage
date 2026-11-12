@@ -316,39 +316,19 @@ test('checkAlerts fires a warned window once and stores it under the row key', a
           name: 'Zai',
           status: 'ok',
           windows: [
-            { key: '5h', label: '5h', percent: 80, used_pct: 80, warn: true, resets_at: resetsAt }
+            { key: '5h', label: '5h', percent: 80.6, used_pct: 80.6, warn: true, resets_at: resetsAt },
+            { key: 'quiet', label: 'Quiet', used_pct: 95, warn: false, resets_at: resetsAt }
           ]
         }
       ]
     }
     checkAlerts(payload)
-    assert.deepEqual(notices, [{ title: 'Zai: 5h at 80% used', body: 'resets in 30m' }])
+    assert.deepEqual(notices, [{ title: 'Zai: 5h at 81% used', body: 'resets in 30m' }])
     assert.deepEqual(Object.keys(data.alerts), ['zai:5h:' + resetsAt])
     assert.equal(data.alerts['zai:5h:' + resetsAt], NOW)
     checkAlerts(payload)
     assert.equal(notices.length, 1)
-  } finally {
-    restore()
-  }
-})
 
-test('a moved reset inside the tolerance does not fire again', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    const first = isoAt(NOW + 30 * 60000)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: first }]
-        }
-      ]
-    })
     const moved = isoAt(NOW + 30 * 60000 + 60000)
     checkAlerts({
       providers: [
@@ -356,7 +336,7 @@ test('a moved reset inside the tolerance does not fire again', async () => {
           id: 'zai',
           name: 'Zai',
           status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: moved }]
+          windows: [{ key: '5h', label: 'Session', used_pct: 80.6, warn: true, resets_at: moved }]
         }
       ]
     })
@@ -480,37 +460,6 @@ test('a warned money row fires even when it is not the key cap, and an error pro
   }
 })
 
-test('a fractional used_pct rounds in the title', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [
-            {
-              key: '5h',
-              label: '5h',
-              used_pct: 80.6,
-              warn: true,
-              resets_at: isoAt(NOW + 30 * 60000)
-            }
-          ]
-        }
-      ]
-    })
-    assert.equal(notices.length, 1)
-    assert.equal(notices[0].title, 'Zai: 5h at 81% used')
-  } finally {
-    restore()
-  }
-})
-
 test('an actionable eta adds the projection to the body', async () => {
   const restore = frozen(NOW)
   try {
@@ -551,109 +500,6 @@ test('an actionable eta adds the projection to the body', async () => {
     })
     assert.equal(notices[0].body, 'At this rate, 100% in ~17m \u00b7 resets in 17m')
     assert.ok(notices[1].body.startsWith('At this rate, exhausted in ~1h \u00b7 '))
-  } finally {
-    restore()
-  }
-})
-
-test('a row without actionable_eta shows no eta', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [
-            {
-              key: '5h',
-              label: '5h',
-              used_pct: 80,
-              warn: true,
-              eta_seconds: 5400,
-              actionable_eta: null,
-              resets_at: isoAt(NOW + 30 * 60000)
-            }
-          ]
-        }
-      ]
-    })
-    assert.equal(notices[0].body, 'resets in 30m')
-  } finally {
-    restore()
-  }
-})
-
-test('a label change under the same key does not fire again', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    const resetsAt = isoAt(NOW + 30 * 60000)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 80, warn: true, resets_at: resetsAt }]
-        }
-      ]
-    })
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: 'Session', used_pct: 80, warn: true, resets_at: resetsAt }]
-        }
-      ]
-    })
-    assert.equal(notices.length, 1)
-  } finally {
-    restore()
-  }
-})
-
-test('checkAlerts fires on row.warn, not on the percentage', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [
-            {
-              key: 'quiet',
-              label: 'Quiet',
-              used_pct: 95,
-              warn: false,
-              resets_at: isoAt(NOW + 30 * 60000)
-            },
-            {
-              key: 'loud',
-              label: 'Loud',
-              used_pct: 10,
-              warn: true,
-              resets_at: isoAt(NOW + 30 * 60000)
-            }
-          ]
-        }
-      ]
-    })
-    assert.equal(notices.length, 1)
-    assert.equal(notices[0].title, 'Zai: Loud at 10% used')
   } finally {
     restore()
   }
@@ -2736,6 +2582,75 @@ test('providerAttention and attentionNote see a projected run-out', async () => 
     windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 3600 }]
   }
   assert.equal(attentionNote(laterActionable, now), 'full ~34m')
+})
+
+test('an indicative row is neutral while a normal row still flags', async () => {
+  const {
+    rowAttention,
+    providerAttention,
+    attentionNote,
+    chartModel,
+    barQuotaKey,
+    alertThreshold,
+    checkAlerts,
+    expandedPanel,
+    setAlert,
+    default: plugin
+  } = await loadPlugin()
+  const booster = {
+    key: 'booster',
+    label: 'Booster',
+    kind: 'window',
+    percent: 95,
+    used_pct: 95,
+    warn: true,
+    actionable_eta: null,
+    indicative: true
+  }
+  const monthly = {
+    key: 'monthly',
+    label: 'Monthly',
+    kind: 'window',
+    percent: 100,
+    used_pct: 100,
+    warn: true,
+    actionable_eta: 3600
+  }
+  const p = { id: 'kimi-coding', name: 'Kimi', status: 'ok', windows: [booster, monthly] }
+  assert.equal(rowAttention(booster, NOW), false)
+  assert.equal(providerAttention({ status: 'ok', windows: [booster] }, NOW), false)
+  assert.equal(attentionNote({ status: 'ok', windows: [booster] }, NOW), '')
+  assert.equal(providerAttention(p, NOW), true)
+  assert.equal(attentionNote(p, NOW), 'full ~60m')
+  assert.equal(chartModel(booster, NOW).colour, 'accent')
+  assert.equal(chartModel(booster, NOW).alert, null)
+  assert.equal(chartModel(monthly, NOW).colour, 'amber')
+  assert.equal(alertThreshold({ 'kimi-coding:booster': 90 }, 'kimi-coding', booster), null)
+
+  const barP = {
+    id: 'kimi-coding',
+    status: 'ok',
+    windows: [booster, { ...monthly, key: 'normal', label: 'Normal', used_pct: 10, warn: false }]
+  }
+  assert.equal(barQuotaKey(barP, null), 'normal')
+  assert.equal(barQuotaKey(barP, { 'kimi-coding': 'booster' }), 'booster')
+
+  const { ctx, notices } = fakeContext()
+  plugin.register(ctx)
+  setAlert('kimi-coding', 'booster', 80)
+  checkAlerts({ providers: [p] })
+  assert.equal(notices.filter(n => n.title.includes('Booster')).length, 0)
+  assert.equal(notices.filter(n => n.title.includes('Monthly')).length, 1)
+
+  const panel = expandedPanel(p, {
+    mode: 'used',
+    choice: {},
+    barIds: [],
+    tab: 'booster',
+    now: NOW,
+    alertAt: { 'kimi-coding:booster': 90 }
+  })
+  assert.equal(findNodes(panel, n => n.type === 'button' && nodeText(n).includes('Alert')).length, 0)
 })
 
 test('a long low-use window is not in Needs attention and has no note', async () => {

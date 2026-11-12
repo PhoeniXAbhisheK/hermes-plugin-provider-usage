@@ -131,6 +131,10 @@
         "warn": {
           "type": "boolean"
         },
+        "indicative": {
+          "type": "boolean",
+          "description": "Shown for information only. Never flagged, alerted, or auto-selected for the status bar."
+        },
         "actionable_eta": {
           "type": ["integer", "null"]
         }
