@@ -149,6 +149,27 @@ test('UsagePanel follows the Remaining mode in its values', async () => {
   assert.match(view.joined, /Remaining/)
 })
 
+test('UsagePanel shows an idle note and no chart for a not-started window', async () => {
+  const row = {
+    key: '5h',
+    label: '5h',
+    kind: 'window',
+    used_pct: 0,
+    duration_seconds: 18000,
+    warn: false,
+    history: [[Date.now() / 1000 - 60, 0]]
+  }
+  const view = await renderComponent('UsagePanel', {
+    data: { providers: [{ id: 'zai', name: 'Zai', status: 'ok', windows: [row] }] },
+    state: { 1: 'zai' }
+  })
+  assert.match(view.joined, /No active 5h window\. It starts with your next request\./)
+  assert.match(view.joined, /Show 5h in status bar/)
+  assert.match(view.joined, /Alert at 80%/)
+  assert.equal(view.joined.includes('Burn'), false)
+  assert.equal(findNodes(view.rendered, n => n.type === 'svg' && n.props.viewBox === '0 0 336 70').length, 0)
+})
+
 test('UsagePanel shows the At reset card as left in Remaining mode', async () => {
   const now = Date.now()
   const row = {

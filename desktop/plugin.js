@@ -667,6 +667,20 @@ export function projectedFull(row, nowMs) {
   return seconds < untilReset ? seconds : null
 }
 
+/* A window with a known length, no usable reset and no measured use has not
+ * started. The provider sends the row before the first request, so there is no
+ * window to chart or project yet. Indicative rows are always neutral. */
+export function windowNotStarted(row) {
+  if (!row || row.kind !== 'window' || row.indicative === true) return false
+  const duration = Number(row.duration_seconds)
+  if (!isFinite(duration) || duration <= 0) return false
+  if (isFinite(Date.parse(row.resets_at))) return false
+  const raw = row.used_pct
+  if (raw === null || raw === undefined) return false
+  const used = Number(raw)
+  return isFinite(used) && used < 0.5
+}
+
 /* History is [epoch seconds, value]; windows store the used percent, money
  * rows store the used amount in the row's currency (see _row_history in
  * dashboard/plugin_api.py). Money values are divided by the row total so the
@@ -1485,7 +1499,8 @@ export function expandedPanel(p, ctx) {
       : etaText(tabRow.resets_at)
   const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
   const alertable = tabRow.kind !== 'money' && tabRow.indicative !== true
-  const model = chartModel(tabRow, ctx.now, threshold, ctx.mode)
+  const notStarted = windowNotStarted(tabRow)
+  const model = notStarted ? null : chartModel(tabRow, ctx.now, threshold, ctx.mode)
   const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
     style: {
@@ -1524,8 +1539,14 @@ export function expandedPanel(p, ctx) {
           })
         ]
       }),
-      chartElement(p, tabRow, model),
-      statsElement(tabRow, ctx.now, ctx.mode),
+      notStarted
+        ? jsx('div', {
+            key: 'idle',
+            style: { fontSize: 10.5, color: 'var(--ui-text-tertiary)' },
+            children: 'No active ' + tabRow.label + ' window. It starts with your next request.'
+          })
+        : chartElement(p, tabRow, model),
+      notStarted ? null : statsElement(tabRow, ctx.now, ctx.mode),
       jsxs('div', {
         key: 'controls',
         style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },

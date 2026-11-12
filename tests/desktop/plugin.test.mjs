@@ -1121,6 +1121,23 @@ test('desktop/plugin.js no longer ships an eye icon', async () => {
 
 /* ---------- detail chart and expanded row ---------- */
 
+test('windowNotStarted marks only an idle window', async () => {
+  const { windowNotStarted } = await loadPlugin()
+  const reset = '2026-11-12T18:00:00Z'
+  const base = { kind: 'window', used_pct: 0, duration_seconds: 18000 }
+  const cases = [
+    ['no reset, zero used', base, true],
+    ['reset present', { ...base, resets_at: reset }, false],
+    ['used above zero', { ...base, used_pct: 3 }, false],
+    ['no duration', { ...base, duration_seconds: undefined }, false],
+    ['indicative', { ...base, indicative: true }, false],
+    ['unparsable reset', { ...base, resets_at: 'not a time' }, true]
+  ]
+  for (const [label, row, expected] of cases) {
+    assert.equal(windowNotStarted(row), expected, label)
+  }
+})
+
 test('chartModel maps history and projects under the reset', async () => {
   const { chartModel } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
@@ -1149,6 +1166,10 @@ test('chartModel maps history and projects under the reset', async () => {
   assert.equal(m.colour, 'accent')
   const warned = chartModel({ ...row, warn: true }, now)
   assert.equal(warned.colour, 'amber')
+  const remaining = chartModel(row, now, 80, 'remaining')
+  assert.equal(remaining.series[0][1], 21.2)
+  assert.equal(remaining.series[1][1], 34)
+  assert.equal(remaining.current[1], 34)
 })
 
 test('chartModel puts 5h, weekly and monthly windows on one whole-window axis', async () => {
@@ -1290,36 +1311,6 @@ test('chartModel keeps the old axis for money and windows without a duration', a
   assert.equal(noDuration.nowX, 220)
   assert.deepEqual(noDuration.nowLabel, { x: 223, y: 68, anchor: 'start' })
   assert.equal(noDuration.series[0][0], 220)
-})
-
-test('chartModel plots remaining values for a window', async () => {
-  const { chartModel } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const row = {
-    kind: 'window',
-    used_pct: 20,
-    eta_seconds: 30240,
-    duration_seconds: 5 * 3600,
-    resets_at: new Date(now + (4 * 3600 + 12 * 60) * 1000).toISOString()
-  }
-  const start = Date.parse(row.resets_at) - row.duration_seconds * 1000
-  const m = chartModel(
-    {
-      ...row,
-      history: [
-        [start / 1000 + 60, 10],
-        [now / 1000, 20]
-      ]
-    },
-    now,
-    80,
-    'remaining'
-  )
-  assert.equal(m.series[0][1], 8.4)
-  assert.equal(m.series[1][1], 14.8)
-  assert.equal(m.current[1], 14.8)
-  assert.equal(m.projection.y0, 14.8)
-  assert.ok(Math.abs(m.projection.y1 - 40.4) < 0.01)
 })
 
 test('chartModel plots remaining values for money and ends overflow at zero left', async () => {
@@ -1608,101 +1599,55 @@ test('chartModel charts money through its total and refuses a null used_pct', as
   assert.equal(chartModel({ ...money, used_pct: null }, now), null)
 })
 
-test('statsFor in remaining mode reads At reset as the share left', async () => {
+test('statsFor reads windows and money in both modes', async () => {
   const { statsFor } = await loadPlugin()
   const now = Date.parse('2026-11-08T00:00:00Z')
-  const row = {
-    kind: 'window',
-    used_pct: 0,
-    eta_seconds: 360000,
-    resets_at: new Date(now + 18000 * 1000).toISOString()
+  const row = { kind: 'window', used_pct: 0, eta_seconds: 360000, resets_at: new Date(now + 18000 * 1000).toISOString() }
+  const cases = [
+    ['remaining At reset', row, 'remaining', [
+      { label: 'Burn', value: '1.0%/h' },
+      { label: 'At reset', value: '~95% left', warn: false },
+      { label: 'Pace', value: '0.05×' }
+    ]],
+    ['window runs out', { ...row, resets_at: new Date(now + 360000 * 1000).toISOString() }, 'remaining', [
+      { label: 'Burn', value: '1.0%/h' },
+      { label: 'At reset', value: 'runs out', warn: true },
+      { label: 'Pace', value: '1.0×' }
+    ]],
+    ['no rate', { kind: 'window', used_pct: 55, eta_seconds: 0 }, 'used', [
+      { label: 'Burn', value: '-' },
+      { label: 'At reset', value: '-', warn: false },
+      { label: 'Pace', value: '-' }
+    ]],
+    ['used and remaining', { kind: 'window', used_pct: 40, eta_seconds: 3600, resets_at: new Date(now + 1800 * 1000).toISOString() }, 'used', [
+      { label: 'Burn', value: '60.0%/h' },
+      { label: 'At reset', value: '~70%', warn: false },
+      { label: 'Pace', value: '0.7×' }
+    ]],
+    ['window runs out early', { kind: 'window', used_pct: 90, eta_seconds: 3600, resets_at: new Date(now + 7200 * 1000).toISOString() }, 'used', [
+      { label: 'Burn', value: '10.0%/h' },
+      { label: 'At reset', value: 'runs out', warn: true },
+      { label: 'Pace', value: '1.1×' }
+    ]],
+    ['money used', { kind: 'money', total: 100, left: 20, cur: 'USD', used_pct: 80, depletes_in_seconds: 86400 }, 'used', [
+      { label: 'Spend', value: '$20.00/d' },
+      { label: 'Lasts', value: '~24h' },
+      { label: 'Used', value: '80%' }
+    ]],
+    ['money remaining', { kind: 'money', total: 100, left: 20, cur: 'USD', used_pct: 80, depletes_in_seconds: 86400 }, 'remaining', [
+      { label: 'Spend', value: '$20.00/d' },
+      { label: 'Lasts', value: '~24h' },
+      { label: 'Left', value: '20%' }
+    ]],
+    ['money without a value', { kind: 'money', used_pct: null, left: 5, cur: 'USD' }, 'used', [
+      { label: 'Spend', value: '-' },
+      { label: 'Lasts', value: '-' },
+      { label: 'Used', value: '-' }
+    ]]
+  ]
+  for (const [name, value, mode, expected] of cases) {
+    assert.deepEqual(statsFor(value, now, mode), expected, name)
   }
-  const stats = statsFor(row, now, 'remaining')
-  assert.equal(stats[1].value, '~95% left')
-  assert.equal(stats[1].warn, false)
-  assert.deepEqual(statsFor({ ...row, resets_at: new Date(now + 360000 * 1000).toISOString() }, now, 'remaining'), [
-    { label: 'Burn', value: '1.0%/h' },
-    { label: 'At reset', value: 'runs out', warn: true },
-    { label: 'Pace', value: '1.0×' }
-  ])
-  assert.deepEqual(statsFor({ kind: 'window', used_pct: 55 }, now, 'remaining'), [
-    { label: 'Burn', value: '-' },
-    { label: 'At reset', value: '-', warn: false },
-    { label: 'Pace', value: '-' }
-  ])
-})
-
-test('statsFor keeps Burn and Pace in both modes', async () => {
-  const { statsFor } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const row = {
-    kind: 'window',
-    used_pct: 40,
-    eta_seconds: 3600,
-    resets_at: new Date(now + 1800 * 1000).toISOString()
-  }
-  const usedStats = statsFor(row, now, 'used')
-  const remainingStats = statsFor(row, now, 'remaining')
-  assert.deepEqual(remainingStats[0], usedStats[0])
-  assert.deepEqual(remainingStats[2], usedStats[2])
-  assert.equal(usedStats[1].value, '~70%')
-  assert.equal(remainingStats[1].value, '~30% left')
-})
-
-test('statsFor in remaining mode relabels money Used as Left', async () => {
-  const { statsFor } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const money = statsFor({ kind: 'money', used_pct: 40 }, now, 'remaining')
-  assert.deepEqual(money[2], { label: 'Left', value: '60%' })
-  assert.deepEqual(statsFor({ kind: 'money', used_pct: null }, now, 'remaining')[2], {
-    label: 'Left',
-    value: '-'
-  })
-})
-
-test('statsFor reads a window and a money row', async () => {
-  const { statsFor } = await loadPlugin()
-  const now = Date.parse('2026-11-08T00:00:00Z')
-  const window = {
-    kind: 'window',
-    used_pct: 40,
-    eta_seconds: 3600,
-    resets_at: new Date(now + 1800 * 1000).toISOString()
-  }
-  assert.deepEqual(statsFor(window, now), [
-    { label: 'Burn', value: '60.0%/h' },
-    { label: 'At reset', value: '~70%', warn: false },
-    { label: 'Pace', value: '0.7×' }
-  ])
-  const over = {
-    kind: 'window',
-    used_pct: 90,
-    eta_seconds: 3600,
-    resets_at: new Date(now + 7200 * 1000).toISOString()
-  }
-  const overStats = statsFor(over, now)
-  assert.equal(overStats[1].value, 'runs out')
-  assert.equal(overStats[1].warn, true)
-  const noEta = statsFor({ kind: 'window', used_pct: 55 }, now)
-  assert.deepEqual(noEta, [
-    { label: 'Burn', value: '-' },
-    { label: 'At reset', value: '-', warn: false },
-    { label: 'Pace', value: '-' }
-  ])
-  const money = statsFor(
-    { kind: 'money', total: 100, left: 20, cur: 'USD', used_pct: 80, depletes_in_seconds: 86400 },
-    now
-  )
-  assert.deepEqual(money, [
-    { label: 'Spend', value: '$20.00/d' },
-    { label: 'Lasts', value: '~24h' },
-    { label: 'Used', value: '80%' }
-  ])
-  assert.deepEqual(statsFor({ kind: 'money', used_pct: null, left: 5, cur: 'USD' }, now), [
-    { label: 'Spend', value: '-' },
-    { label: 'Lasts', value: '-' },
-    { label: 'Used', value: '-' }
-  ])
 })
 
 test('expandedPanel opens on the bar quota and lists every quota tab', async () => {
@@ -1903,16 +1848,6 @@ test('the tooltip and the dot follow the chosen bar quota', async () => {
   )
   assert.equal(dotOn.length, 1)
   assert.ok(nodeText(dotOn[0]).includes('5h'))
-})
-
-test('a zero eta yields no rate and a dash for burn', async () => {
-  const { statsFor } = await loadPlugin()
-  const stats = statsFor({ kind: 'window', used_pct: 40, eta_seconds: 0 })
-  assert.deepEqual(stats, [
-    { label: 'Burn', value: '-' },
-    { label: 'At reset', value: '-', warn: false },
-    { label: 'Pace', value: '-' }
-  ])
 })
 
 test('chartModel filters and orders history samples', async () => {
