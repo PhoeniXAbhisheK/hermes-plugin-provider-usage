@@ -383,6 +383,11 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.HOME = self.home
         self._orig_http = API._http_json
         self._orig_hermes = API._hermes_usage
+        self._limits_saved = {
+            key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in API._anthropic_limits.items()
+        }
+        API._anthropic_limits.update(at=0.0, rows={}, attempt=0.0, hold=0.0)
         self.calls = []
         self.headers_seen = []
 
@@ -390,6 +395,8 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.HOME = self._orig_home
         API._http_json = self._orig_http
         API._hermes_usage = self._orig_hermes
+        API._anthropic_limits.clear()
+        API._anthropic_limits.update(self._limits_saved)
         self._tmp.cleanup()
 
     def _no_hermes(self):
@@ -417,6 +424,11 @@ class AnthropicFetcherTest(unittest.TestCase):
 
         API._hermes_usage = fake
         return asked
+
+    def _fresh_helper(self):
+        API._hermes_usage = lambda provider: (
+            self._reading("Hermes 5h") if provider == "anthropic" else None
+        )
 
     @staticmethod
     def _reading(label, stale=False):
@@ -457,6 +469,117 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(p["id"], "anthropic")
         self.assertEqual(p["windows"][0]["label"], "DirectSDK fresh")
         self.assertNotIn("stale", p)
+
+    @staticmethod
+    def _limit(name="Fable", percent=15):
+        return {
+            "kind": "weekly_scoped",
+            "percent": percent,
+            "resets_at": None,
+            "scope": {"model": {"display_name": name}},
+        }
+
+    def test_extra_read_is_throttled_and_reuses_cached_rows(self):
+        self._fresh_helper()
+        no_token = API.fetch_anthropic()
+        self.assertEqual(no_token["status"], "ok")
+        self.assertEqual(self.calls, [])
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"limits": [self._limit()]})
+        for _ in range(3):
+            p = API.fetch_anthropic()
+            self.assertEqual(p["status"], "ok")
+            self.assertEqual([w["label"] for w in p["windows"] if w["label"] == "Fable"], ["Fable"])
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+
+    def test_cached_limits_survive_a_failure_and_drop_after_an_hour(self):
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"limits": [self._limit()]})
+        self._fresh_helper()
+        first = API.fetch_anthropic()
+        self.assertEqual([w["label"] for w in first["windows"] if w["label"] == "Fable"], ["Fable"])
+        self.calls.clear()
+
+        def fail(url, headers, **kw):
+            self.calls.append(url)
+            raise RuntimeError("limit read failed")
+
+        API._http_json = fail
+        API._anthropic_limits["attempt"] = 0.0
+        second = API.fetch_anthropic()
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(
+            [w["label"] for w in second["windows"] if w["label"] == "Fable"], ["Fable"]
+        )
+        self.assertNotIn("stale", second)
+
+        API._anthropic_limits["at"] = API.time.time() - API.ANTHROPIC_LIMITS_CACHE_S - 1
+        API._anthropic_limits["attempt"] = 0.0
+        third = API.fetch_anthropic()
+        self.assertEqual(third["status"], "ok")
+        self.assertNotIn("Fable", [w["label"] for w in third["windows"]])
+        self.assertEqual(self.calls, [ANTHROPIC_URL, ANTHROPIC_URL])
+
+    def test_a_429_holds_the_extra_read(self):
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+
+        def limited(url, headers, **kw):
+            self.calls.append(url)
+            raise API._RateLimited(API.time.time() + 900)
+
+        API._http_json = limited
+        self._fresh_helper()
+        p = API.fetch_anthropic()
+        self.assertEqual(p["status"], "ok")
+        self.assertGreater(API._anthropic_limits["hold"], API.time.time() + 800)
+        API._anthropic_limits["attempt"] = 0.0
+        API.fetch_anthropic()
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+
+    def test_merge_keeps_an_existing_model_key(self):
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http({"limits": [self._limit(percent=15)]})
+        API._hermes_usage = lambda provider: (
+            {
+                "id": "anthropic",
+                "status": "ok",
+                "windows": [
+                    {
+                        "label": "Fable",
+                        "percent": 5.0,
+                        "scope": "model",
+                        "model": "fable",
+                        "key": "fable:weekly",
+                    }
+                ],
+            }
+            if provider == "anthropic"
+            else None
+        )
+        p = API.fetch_anthropic()
+        fable = [w for w in p["windows"] if w["label"] == "Fable"]
+        self.assertEqual(len(fable), 1)
+        self.assertEqual(fable[0]["percent"], 5.0)
+        self.assertEqual(self.calls, [ANTHROPIC_URL])
+
+    def test_raw_limits_skip_the_extra_read(self):
+        from types import SimpleNamespace
+
+        snap = SimpleNamespace(
+            available=True,
+            windows=[SimpleNamespace(label="Current session", used_percent=10.0, reset_at=None)],
+            fetched_at=None,
+            raw={"limits": [self._limit()]},
+        )
+        payload = API._snap_payload("anthropic", snap)
+        self.assertIn("_anthropic_limits_raw", payload)
+        API._hermes_usage = lambda provider: payload if provider == "anthropic" else None
+        self.calls.clear()
+        API._http_json = lambda *args, **kwargs: self.calls.append(ANTHROPIC_URL) or {}
+        p = API.fetch_anthropic()
+        self.assertEqual([w["label"] for w in p["windows"]], ["5h", "Fable"])
+        self.assertNotIn("_anthropic_limits_raw", p)
+        self.assertEqual(self.calls, [])
 
     def test_limit_rows_edge_cases(self):
         epoch = 1763000000
