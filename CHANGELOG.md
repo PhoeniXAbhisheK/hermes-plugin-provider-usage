@@ -3,6 +3,12 @@
 Notable changes to the Provider Usage plugin. Versions follow the tags in this
 repository; the date is the release date.
 
+## 0.4.2 (unreleased)
+
+### Fixed
+
+- [behaviour] Weekly and monthly windows are judged by the window average, not a six-hour trailing burst, so low use no longer lands in Needs attention before the reset.
+
 ## 0.4.1 (2026-11-09)
 
 Panel:
