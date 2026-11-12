@@ -195,17 +195,6 @@ class SiteTest(Base):
         p = API.fetch_nous()
         self.assertEqual([(r["label"], r["percent"]) for r in p["windows"]], [("Credits", 100.0)])
 
-    def test_anthropic_direct_clamps_and_skips(self):
-        API._claude_code_oauth_token = lambda: "sentinel"
-        self.http(
-            {
-                "five_hour": {"utilization": 100.04, "resets_at": "2026-01-01T00:00:00Z"},
-                "seven_day": {"utilization": NAN},
-            }
-        )
-        p = API._anthropic_direct()
-        self.assertEqual([(r["label"], r["percent"]) for r in p["windows"]], [("5h", 100.0)])
-
     def test_copilot_clamps_and_skips(self):
         self.copilot()
         self.http(

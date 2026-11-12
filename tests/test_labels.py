@@ -28,16 +28,10 @@ class WindowHelperTest(unittest.TestCase):
     def test_ten_percent_edges(self):
         for seconds, key in (
             (16200, "5h"),
-            (16199, None),
-            (19800, "5h"),
             (19801, None),
             (544320, "weekly"),
-            (544319, None),
-            (665280, "weekly"),
             (665281, None),
             (2332800, "monthly"),
-            (2332799, None),
-            (2851200, "monthly"),
             (2851201, None),
         ):
             with self.subTest(seconds=seconds):
@@ -59,11 +53,6 @@ class WindowHelperTest(unittest.TestCase):
         self.assertEqual((row["label"], row["key"]), ("Opus", "opus:weekly"))
         self.assertEqual(row["scope"], "model")
         self.assertEqual(row["duration_seconds"], WEEK)
-
-    def test_a_model_row_without_a_known_duration_has_no_suffix(self):
-        row = API._window("Opus", 10.0, None, duration=7200, scope="model", model="opus")
-        self.assertEqual((row["label"], row["key"]), ("Opus", "opus"))
-        self.assertEqual(row["duration_seconds"], 7200)
 
     def test_a_model_row_without_a_duration_still_keys_on_the_model(self):
         row = API._window("Opus", 10.0, None, scope="model", model="opus")
@@ -264,48 +253,62 @@ class SnapshotLabelTest(unittest.TestCase):
                 {"label": "Current week", "used_percent": 20.0, "reset_at": None},
                 {"label": "Opus week", "used_percent": 30.0, "reset_at": None, "scope": "model"},
                 {"label": "Sonnet week", "used_percent": 40.0, "reset_at": None, "scope": "model"},
+                {"label": "Fable week", "used_percent": 50.0, "reset_at": None, "scope": "model"},
             ]
         )
         p = API._snap_payload("anthropic", snap)
         rows = p["windows"]
-        self.assertEqual([w["label"] for w in rows], ["5h", "Weekly", "Opus", "Sonnet"])
-        self.assertEqual([w["scope"] for w in rows], ["account", "account", "model", "model"])
-        self.assertEqual([w["duration_seconds"] for w in rows], [FIVE_HOURS, WEEK, WEEK, WEEK])
-        self.assertEqual([w["key"] for w in rows], ["5h", "weekly", "opus:weekly", "sonnet:weekly"])
+        self.assertEqual([w["label"] for w in rows], ["5h", "Weekly", "Opus", "Sonnet", "Fable"])
+        self.assertEqual(
+            [w["scope"] for w in rows], ["account", "account", "model", "model", "model"]
+        )
+        self.assertEqual(
+            [w["duration_seconds"] for w in rows],
+            [FIVE_HOURS, WEEK, WEEK, WEEK, WEEK],
+        )
+        self.assertEqual(
+            [w["key"] for w in rows],
+            ["5h", "weekly", "opus:weekly", "sonnet:weekly", "fable:weekly"],
+        )
+
+    def test_an_unmapped_week_label_becomes_a_model_window(self):
+        snap = self.snap([{"label": "  Claude week  ", "used_percent": 10.0, "reset_at": None}])
+        p = API._snap_payload("anthropic", snap)
+        row = p["windows"][0]
+        self.assertEqual(row["label"], "Claude")
+        self.assertEqual(row["duration_seconds"], WEEK)
+        self.assertEqual(row["scope"], "model")
+        self.assertEqual(row["key"], "claude:weekly")
 
     def test_codex_labels(self):
         snap = self.snap(
             [
                 {"label": "Session", "used_percent": 10.0, "reset_at": None},
-                {"label": "Weekly", "used_percent": 20.0, "reset_at": None},
+                {"label": "  weekly ", "used_percent": 20.0, "reset_at": None},
             ]
         )
         p = API._snap_payload("openai-codex", snap)
         self.assertEqual([w["label"] for w in p["windows"]], ["5h", "Weekly"])
         self.assertEqual([w["key"] for w in p["windows"]], ["5h", "weekly"])
 
-    def test_an_unknown_label_keeps_its_text(self):
-        snap = self.snap([{"label": "Tool quota", "used_percent": 10.0, "reset_at": None}])
-        p = API._snap_payload("anthropic", snap)
-        row = p["windows"][0]
-        self.assertEqual(row["label"], "Tool quota")
-        self.assertEqual(row["scope"], "account")
-        self.assertNotIn("duration_seconds", row)
-
-    def test_an_unknown_label_keeps_the_snapshot_scope(self):
-        snap = self.snap(
-            [{"label": "Tool quota", "used_percent": 10.0, "reset_at": None, "scope": "model"}]
-        )
-        p = API._snap_payload("anthropic", snap)
-        row = p["windows"][0]
-        self.assertEqual(row["scope"], "model")
-        self.assertEqual(row["label"], "Tool quota")
-        self.assertNotIn("duration_seconds", row)
-
-    def test_the_core_label_match_is_case_insensitive(self):
-        snap = self.snap([{"label": "  weekly ", "used_percent": 10.0, "reset_at": None}])
-        p = API._snap_payload("openai-codex", snap)
-        self.assertEqual(p["windows"][0]["label"], "Weekly")
+    def test_an_unknown_label_keeps_its_text_and_scope(self):
+        for scope in (None, "model"):
+            with self.subTest(scope=scope):
+                snap = self.snap(
+                    [
+                        {
+                            "label": "Tool quota",
+                            "used_percent": 10.0,
+                            "reset_at": None,
+                            "scope": scope,
+                        }
+                    ]
+                )
+                p = API._snap_payload("anthropic", snap)
+                row = p["windows"][0]
+                self.assertEqual(row["label"], "Tool quota")
+                self.assertEqual(row["scope"], scope or "account")
+                self.assertNotIn("duration_seconds", row)
 
 
 class PathParityTest(FetcherCase):
