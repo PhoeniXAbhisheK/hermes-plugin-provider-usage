@@ -14,6 +14,7 @@ repository; the date is the release date.
 ### Fixed
 
 - [behaviour] Weekly and monthly windows are judged by the window average, not a six-hour trailing burst, so low use no longer lands in Needs attention before the reset.
+- [behaviour] A window with a known length, no reset and no use yet shows an idle note instead of an empty chart and dash stats.
 
 ## 0.4.1 (2026-11-09)
 
