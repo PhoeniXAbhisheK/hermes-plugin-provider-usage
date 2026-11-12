@@ -206,6 +206,58 @@ class KimiUsageTest(Base):
         self.route({CODING_URL: payload})
         return API.fetch_kimi()
 
+    def test_booster_balance_rows(self):
+        cases = (
+            ("string amounts", {"amount": "100", "amountLeft": "15"}, 85.0),
+            ("zero left", {"amount": "100", "amountLeft": "0"}, 100.0),
+            ("left over amount", {"amount": "100", "amountLeft": "150"}, 0.0),
+            ("zero amount", {"amount": "0", "amountLeft": "5"}, None),
+            ("negative amount", {"amount": "-1", "amountLeft": "5"}, None),
+            ("nan amount", {"amount": float("nan"), "amountLeft": "5"}, None),
+            ("missing amount", {"amountLeft": "5"}, None),
+            ("missing left", {"amount": "100"}, None),
+            ("non-finite left", {"amount": "100", "amountLeft": float("inf")}, None),
+        )
+        for label, balance, expected in cases:
+            with self.subTest(label=label):
+                p = self._run(
+                    {
+                        "usage": {
+                            "limit": "100",
+                            "used": "26",
+                            "resetTime": "2026-02-11T17:32:50Z",
+                        },
+                        "booster_wallet": {"balance": balance},
+                    }
+                )
+                rows = [row for row in p["windows"] if row.get("key") == "booster"]
+                if expected is None:
+                    self.assertEqual(rows, [])
+                    continue
+                self.assertEqual(len(rows), 1)
+                row = rows[0]
+                self.assertEqual((row["label"], row["percent"]), ("Booster", expected))
+                self.assertIs(row["indicative"], True)
+                self.assertIsNone(row.get("resets_at"))
+                self.assertNotIn("duration_seconds", row)
+
+    def test_an_indicative_row_never_warns_or_projects(self):
+        p = self._run(
+            {
+                "usage": {"limit": "100", "used": "95", "resetTime": "2026-02-11T17:32:50Z"},
+                "booster_wallet": {"balance": {"amount": "100", "amountLeft": "5"}},
+            }
+        )
+        now = time.time()
+        API._assign_keys(p)
+        API._decorate("kimi-coding", p, now)
+        API._contract_rows(p, now)
+        rows = {row["key"]: row for row in p["windows"]}
+        self.assertEqual(rows["weekly"]["warn"], True)
+        self.assertEqual(rows["booster"]["warn"], False)
+        self.assertIsNone(rows["booster"]["actionable_eta"])
+        self.assertNotIn("eta_seconds", rows["booster"])
+
     def test_string_numbers_are_read(self):
         p = self._run(
             {

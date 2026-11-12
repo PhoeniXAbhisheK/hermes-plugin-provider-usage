@@ -9,6 +9,7 @@ repository; the date is the release date.
 
 - [behaviour] Usage history covers the whole current window and survives restarts in `<HERMES_HOME>/plugin-data/provider-usage/history.json`.
 - [behaviour] Anthropic weekly plan limits render per model, such as Fable, when the OAuth reply carries them.
+- [behaviour] Kimi booster balance renders as an indicative row that never flags or alerts (#58).
 
 ### Fixed
 

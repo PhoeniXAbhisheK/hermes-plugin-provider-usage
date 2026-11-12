@@ -213,9 +213,10 @@ function cleanAlertMap(raw) {
 }
 
 /* The saved threshold for one window row: a step, 'off', or null for the
- * default (the backend's warn flag). Money rows have no threshold. */
+ * default (the backend's warn flag). Money and indicative rows have no
+ * threshold. */
 export function alertThreshold(choice, providerId, row) {
-  if (!row || row.kind === 'money' || !providerId) return null
+  if (!row || row.kind === 'money' || !providerId || row.indicative === true) return null
   const map = choice && typeof choice === 'object' ? choice : {}
   const key = providerId + ':' + row.key
   if (!Object.prototype.hasOwnProperty.call(map, key)) return null
@@ -271,6 +272,7 @@ export function checkAlerts(data) {
     for (const p of data.providers) {
       if (p.status !== 'ok') continue
       for (const w of p.windows || []) {
+        if (!w || w.indicative === true) continue
         const at = alertThreshold($alertAt.get(), p.id, w)
         if (at === 'off') continue
         if (at === null) {
@@ -481,7 +483,7 @@ const ACCENT_COLOR = 'var(--ui-accent)'
 
 /* One attention rule for the provider group, the chart colour and a quota cell. */
 export function rowAttention(row, nowMs) {
-  if (!row) return false
+  if (!row || row.indicative === true) return false
   if (row.warn === true) return true
   if (row.actionable_eta !== null && row.actionable_eta !== undefined) return true
   return projectedFull(row, nowMs) !== null
@@ -510,7 +512,7 @@ export function attentionNote(p, nowMs) {
     if (best === null || value < best.value) best = { value: value, money: money }
   }
   for (const w of p.windows || []) {
-    if (!w) continue
+    if (!w || w.indicative === true) continue
     consider(w.actionable_eta, false)
     consider(projectedFull(w, now), false)
   }
@@ -558,7 +560,8 @@ function quotaUsed(row) {
 
 /* The quota the bar shows: the user's choice when it still names one of this
  * provider's current rows, else the highest used_pct across windows and money
- * (null lowest, ties in payload order, no usable value at all = first row). */
+ * (null lowest, ties in payload order, no usable value at all = first row).
+ * Indicative rows never win the automatic pick. */
 export function barQuotaKey(p, choice) {
   if (!p) return null
   const rows = rowsOf(p)
@@ -568,7 +571,7 @@ export function barQuotaKey(p, choice) {
   let best = null
   let bestUsed = -Infinity
   for (const row of rows) {
-    if (!row) continue
+    if (!row || row.indicative === true) continue
     const score = quotaUsed(row)
     if (best === null || score > bestUsed) {
       best = row
@@ -675,12 +678,19 @@ export function chartModel(row, nowMs, alertAt, mode) {
   if (raw === null || raw === undefined) return null
   const remaining = mode === 'remaining'
   const plotY = pct => chartY(remaining ? 100 - pct : pct)
-  const threshold = alertAt === 'off' ? null : alertAt === null || alertAt === undefined ? 80 : Number(alertAt)
+  const threshold =
+    row.indicative === true
+      ? null
+      : alertAt === 'off'
+        ? null
+        : alertAt === null || alertAt === undefined
+          ? 80
+          : Number(alertAt)
   const used = clampPct(raw)
   const now = nowOf(nowMs)
   const duration = Number(row.duration_seconds)
   const reset = Date.parse(row.resets_at)
-  const windowAxis = !isMoney && isFinite(duration) && duration > 0 && isFinite(reset)
+  const windowAxis = !isMoney && row.indicative !== true && isFinite(duration) && duration > 0 && isFinite(reset)
   const durationMs = windowAxis ? duration * 1000 : 0
   const start = windowAxis ? reset - durationMs : 0
   const nowX = windowAxis
@@ -1474,6 +1484,7 @@ export function expandedPanel(p, ctx) {
         : money(tabRow.left, tabRow.cur) + ' left'
       : etaText(tabRow.resets_at)
   const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
+  const alertable = tabRow.kind !== 'money' && tabRow.indicative !== true
   const model = chartModel(tabRow, ctx.now, threshold, ctx.mode)
   const alertLabel = threshold === 'off' ? 'Alert off' : 'Alert at ' + (threshold === null ? 80 : threshold) + '%'
   return jsxs('div', {
@@ -1527,19 +1538,22 @@ export function expandedPanel(p, ctx) {
           }),
           tabRow.kind === 'money'
             ? null
-            : jsx('button', {
-                type: 'button',
-                onClick: ctx.onAlertToggle,
-                'aria-expanded': ctx.alertOpen === true,
-                style: actionButtonStyle(false),
-                children: alertLabel
-              })
+            : alertable
+              ? jsx('button', {
+                  type: 'button',
+                  onClick: ctx.onAlertToggle,
+                  'aria-expanded': ctx.alertOpen === true,
+                  style: actionButtonStyle(false),
+                  children: alertLabel
+                })
+              : null
         ]
       }),
       tabRow.kind === 'money'
         ? null
-        : ctx.alertOpen
-          ? jsxs('div', {
+        : alertable
+          ? ctx.alertOpen
+            ? jsxs('div', {
               key: 'alert',
               style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5 },
               children: [
@@ -1560,6 +1574,7 @@ export function expandedPanel(p, ctx) {
               ]
             })
           : null
+        : null
     ]
   })
 }
