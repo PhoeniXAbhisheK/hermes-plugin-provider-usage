@@ -138,9 +138,11 @@ rate limited, the older reading is kept instead of an error card.
 Projections need at least 30 minutes of observed history inside the last 6
 hours. The backend samples history in memory whenever it refreshes; a restart
 pauses projections until samples reaccumulate. The payload carries
-`eta_seconds` on windows and `depletes_in_seconds` on money rows, and the UI
-only surfaces them when they are actionable (window hits 100% before its
-reset; cap depletes within 14 days).
+`eta_seconds` on short windows and `depletes_in_seconds` on money rows, and the
+UI only surfaces them when they are actionable (window hits 100% before its
+reset; cap depletes within 14 days). Windows longer than a day are judged by
+the window average instead of the 6-hour rate, because a short burst is not a
+trend across a week or a month.
 
 ## Layout
 
