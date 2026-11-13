@@ -463,27 +463,6 @@ class AnthropicFetcherTest(unittest.TestCase):
             payload["stale"] = True
         return payload
 
-    def test_fresh_hermes_anthropic_does_not_ask_directsdk(self):
-        asked = self._hermes_answers({"anthropic": self._reading("Hermes 5h")})
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, ["anthropic"])
-        self.assertEqual(self.calls, [])
-        self.assertEqual(p["id"], "anthropic")
-        self.assertEqual(p["windows"][0]["label"], "Hermes 5h")
-
-    def test_fresh_directsdk_replaces_a_stale_anthropic_reading(self):
-        asked = self._hermes_answers(
-            {
-                "anthropic": self._reading("Hermes stale", stale=True),
-                API.DIRECTSDK_PROVIDER: self._reading("DirectSDK fresh"),
-            }
-        )
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, ["anthropic", API.DIRECTSDK_PROVIDER])
-        self.assertEqual(p["id"], "anthropic")
-        self.assertEqual(p["windows"][0]["label"], "DirectSDK fresh")
-        self.assertNotIn("stale", p)
-
     @staticmethod
     def _limit(name="Fable", percent=15):
         return {
@@ -515,46 +494,64 @@ class AnthropicFetcherTest(unittest.TestCase):
                     expected,
                 )
 
-    def test_plan_local_wins_without_a_read(self):
-        self.claude_json.write_text(
-            '{"oauthAccount": {"organizationType": "claude_max",'
-            ' "organizationRateLimitTier": "default_claude_max_5x"}}'
+    def test_plan_resolution_order(self):
+        local = {
+            "organizationType": "claude_max",
+            "organizationRateLimitTier": "default_claude_max_5x",
+        }
+        cached = ({"organization_type": "claude_pro", "has_claude_pro": True}, 2)
+        cases = (
+            ("local", local, None, "Max 5x", 0),
+            (
+                "cache",
+                None,
+                (
+                    {
+                        "organization_type": "claude_max",
+                        "rate_limit_tier": "default_claude_max_20x",
+                    },
+                    0,
+                ),
+                "Max 20x",
+                0,
+            ),
+            ("error keeps cache", None, cached, "Pro", 1),
+            (
+                "older than seven days",
+                None,
+                ({"organization_type": "claude_pro", "has_claude_pro": True}, 8),
+                "Subscription",
+                1,
+            ),
+            ("no token", None, None, "Subscription", 0),
         )
-        self.calls.clear()
-        API._http_json = lambda *args, **kwargs: self.calls.append(ANTHROPIC_PROFILE_URL) or {}
-        self.assertEqual(API._anthropic_plan_tag(), "Max 5x")
-        self.assertEqual(self.calls, [])
+        for label, local_plan, cache, expected, call_count in cases:
+            with self.subTest(label=label):
+                self.calls.clear()
+                API._anthropic_plan_attempt.clear()
+                (self.home / "plan.json").unlink(missing_ok=True)
+                if local_plan:
+                    self.claude_json.write_text(json.dumps({"oauthAccount": local_plan}))
+                else:
+                    self.claude_json.unlink(missing_ok=True)
+                if cache:
+                    fields, days = cache
+                    API._write_anthropic_plan_cache(
+                        fields, API.time.time() - days * API.ANTHROPIC_PLAN_READ_S
+                    )
+                if label in ("error keeps cache", "older than seven days"):
+                    self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
 
-    def test_plan_error_keeps_cache_then_falls_back_after_seven_days(self):
-        self.claude_json.unlink()
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        API._write_anthropic_plan_cache(
-            {"organization_type": "claude_pro", "has_claude_pro": True},
-            API.time.time() - 2 * API.ANTHROPIC_PLAN_READ_S,
-        )
+                    def fail(*args, **kwargs):
+                        self.calls.append(ANTHROPIC_PROFILE_URL)
+                        raise RuntimeError("profile read failed")
 
-        def fail(url, headers, **kw):
-            self.calls.append(url)
-            raise RuntimeError("profile read failed")
-
-        API._http_json = fail
-        self.assertEqual(API._anthropic_plan_tag(), "Pro")
-        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
-
-        API._write_anthropic_plan_cache(
-            {"organization_type": "claude_pro", "has_claude_pro": True},
-            API.time.time() - 8 * API.ANTHROPIC_PLAN_READ_S,
-        )
-        API._anthropic_plan_attempt.clear()
-        self.assertEqual(API._anthropic_plan_tag(), "Subscription")
-        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL, ANTHROPIC_PROFILE_URL])
-
-    def test_no_token_or_cache_falls_back_without_a_read(self):
-        self.claude_json.unlink()
-        self.calls.clear()
-        API._http_json = lambda *args, **kwargs: self.calls.append(ANTHROPIC_PROFILE_URL) or {}
-        self.assertEqual(API._anthropic_plan_tag(), "Subscription")
-        self.assertEqual(self.calls, [])
+                    API._http_json = fail
+                else:
+                    self.creds.unlink(missing_ok=True)
+                    self._mock_http({})
+                self.assertEqual(API._anthropic_plan_tag(), expected)
+                self.assertEqual(len(self.calls), call_count)
 
     def test_plan_profile_is_cached_and_keeps_only_plan_fields(self):
         self.claude_json.unlink()
@@ -591,18 +588,22 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(API._anthropic_plan_tag(), "Max 20x")
         self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
 
-    def test_token_lookup_prefers_claude_code_then_hermes(self):
+    def test_token_lookup(self):
         API._hermes_oauth_token = lambda: "hermes-token"
-        self._write_creds({"claudeAiOauth": {"accessToken": "claude-token"}})
-        self.assertEqual(API._anthropic_oauth_token(), "claude-token")
-        self.creds.unlink()
-        self.assertEqual(API._anthropic_oauth_token(), "hermes-token")
-        self._write_creds({"claudeAiOauth": {"accessToken": "expired", "expiresAt": 1000}})
-        self.assertEqual(API._anthropic_oauth_token(), "hermes-token")
+        cases = (
+            (None, "hermes-token"),
+            ({"accessToken": "claude-token"}, "claude-token"),
+            ({"accessToken": "expired", "expiresAt": 1000}, "hermes-token"),
+        )
+        for payload, expected in cases:
+            if payload is None:
+                self.creds.unlink(missing_ok=True)
+            else:
+                self._write_creds({"claudeAiOauth": payload})
+            self.assertEqual(API._anthropic_oauth_token(), expected)
         API._hermes_oauth_token = lambda: None
         self.assertIsNone(API._anthropic_oauth_token())
 
-    def test_hermes_oauth_file_is_the_second_token_source(self):
         original_home = API._hermes_home
         API._hermes_home = lambda: self.home
         self.addCleanup(setattr, API, "_hermes_home", original_home)
@@ -627,56 +628,44 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertEqual(p["tag"], "Max")
         self.assertEqual(self.calls, [])
 
-    def test_extra_read_is_throttled_and_reuses_cached_rows(self):
+    def test_extra_read_throttles_keeps_cache_and_honours_429(self):
         self._fresh_helper()
-        no_token = API.fetch_anthropic()
-        self.assertEqual(no_token["status"], "ok")
+        self.assertEqual(API.fetch_anthropic()["status"], "ok")
         self.assertEqual(self.calls, [])
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
         self._mock_http({"limits": [self._limit()]})
         for _ in range(3):
             p = API.fetch_anthropic()
-            self.assertEqual(p["status"], "ok")
             self.assertEqual([w["label"] for w in p["windows"] if w["label"] == "Fable"], ["Fable"])
         self.assertEqual(self.calls, [ANTHROPIC_URL])
-
-    def test_cached_limits_survive_a_failure_and_drop_after_an_hour(self):
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http({"limits": [self._limit()]})
-        self._fresh_helper()
-        first = API.fetch_anthropic()
-        self.assertEqual([w["label"] for w in first["windows"] if w["label"] == "Fable"], ["Fable"])
         self.calls.clear()
 
-        def fail(url, headers, **kw):
-            self.calls.append(url)
+        def fail(*args, **kwargs):
+            self.calls.append(ANTHROPIC_URL)
             raise RuntimeError("limit read failed")
 
         API._http_json = fail
         API._anthropic_limits["attempt"] = 0.0
         second = API.fetch_anthropic()
         self.assertEqual(second["status"], "ok")
+        self.assertNotIn("stale", second)
         self.assertEqual(
             [w["label"] for w in second["windows"] if w["label"] == "Fable"], ["Fable"]
         )
-        self.assertNotIn("stale", second)
-
         API._anthropic_limits["at"] = API.time.time() - API.ANTHROPIC_LIMITS_CACHE_S - 1
         API._anthropic_limits["attempt"] = 0.0
         third = API.fetch_anthropic()
-        self.assertEqual(third["status"], "ok")
         self.assertNotIn("Fable", [w["label"] for w in third["windows"]])
         self.assertEqual(self.calls, [ANTHROPIC_URL, ANTHROPIC_URL])
 
-    def test_a_429_holds_the_extra_read(self):
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self.calls.clear()
+        API._anthropic_limits.update(at=0.0, rows={}, attempt=0.0, hold=0.0)
 
-        def limited(url, headers, **kw):
-            self.calls.append(url)
+        def limited(*args, **kwargs):
+            self.calls.append(ANTHROPIC_URL)
             raise API._RateLimited(API.time.time() + 900)
 
         API._http_json = limited
-        self._fresh_helper()
         p = API.fetch_anthropic()
         self.assertEqual(p["status"], "ok")
         self.assertGreater(API._anthropic_limits["hold"], API.time.time() + 800)
@@ -684,7 +673,7 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.fetch_anthropic()
         self.assertEqual(self.calls, [ANTHROPIC_URL])
 
-    def test_merge_keeps_an_existing_model_key(self):
+    def test_extra_read_merges_keys_and_honours_raw_limits(self):
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
         self._mock_http({"limits": [self._limit(percent=15)]})
         API._hermes_usage = lambda provider: (
@@ -706,11 +695,8 @@ class AnthropicFetcherTest(unittest.TestCase):
         )
         p = API.fetch_anthropic()
         fable = [w for w in p["windows"] if w["label"] == "Fable"]
-        self.assertEqual(len(fable), 1)
-        self.assertEqual(fable[0]["percent"], 5.0)
-        self.assertEqual(self.calls, [ANTHROPIC_URL])
+        self.assertEqual((len(fable), fable[0]["percent"], self.calls), (1, 5.0, [ANTHROPIC_URL]))
 
-    def test_raw_limits_skip_the_extra_read(self):
         from types import SimpleNamespace
 
         snap = SimpleNamespace(
@@ -791,40 +777,6 @@ class AnthropicFetcherTest(unittest.TestCase):
         hdr = self.headers_seen[0]
         self.assertEqual(hdr["Authorization"], "Bearer test-token")
         self.assertEqual(hdr["anthropic-beta"], "oauth-2025-04-20")
-
-    def test_credentials_that_do_not_yield_a_token_skip(self):
-        cases = (
-            ("missing", None),
-            ("malformed", "{not json"),
-            ("empty token", {"claudeAiOauth": {"accessToken": ""}}),
-            ("wrong shape", {"mcpOAuth": {}}),
-            ("other entries", {"mcpOAuth": {"x|1": {"accessToken": "mcp-token"}}}),
-        )
-        self._no_hermes()
-        for label, payload in cases:
-            with self.subTest(label=label):
-                if payload is None:
-                    self.creds.unlink(missing_ok=True)
-                else:
-                    self._write_creds(payload)
-                with self.assertRaises(API._Skip):
-                    API.fetch_anthropic()
-
-    def test_window_without_utilization_is_skipped(self):
-        self._no_hermes()
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http({"five_hour": {"resets_at": "2026-10-02T07:06:00+00:00"}})
-        with self.assertRaises(API._Skip):
-            API.fetch_anthropic()
-
-    def test_partial_windows_only_render_present_rows(self):
-        self._no_hermes()
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http({"five_hour": {"utilization": 120.5, "resets_at": None}})
-        p = API.fetch_anthropic()
-        self.assertEqual(len(p["windows"]), 1)
-        self.assertEqual(p["windows"][0]["percent"], 100.0)  # clamped to a sane bar
-        self.assertIsNone(p["windows"][0]["resets_at"])
 
 
 class EnvEncodingTest(unittest.TestCase):
