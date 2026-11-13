@@ -586,17 +586,30 @@ test('barContent renders Usage when the session provider is unknown or unread', 
 
 test('barContent renders two pins in full text with the attention entry amber', async () => {
   const { barModel, barContent } = await loadPlugin()
-  const provs = [
-    okProvider('zai', 'Zai', 'zai', 20, false),
-    okProvider('anthropic', 'Anthropic', 'claude', 95, true)
+  const mixed = {
+    id: 'mixed',
+    name: 'Mixed',
+    code: 'mixed',
+    status: 'ok',
+    windows: [
+      { key: 'monthly', label: 'Monthly', used_pct: 70, warn: false, duration_seconds: 30 * 86400, actionable_eta: 10 * 86400 },
+      { key: '5h', label: '5h', used_pct: 95, warn: true }
+    ]
+  }
+  const cases = [
+    [[okProvider('zai', 'Zai', 'zai', 20, false), okProvider('anthropic', 'Anthropic', 'claude', 95, true)], ['zai', 'anthropic'], null, 'claude 95% · zai 20%', 'claude 95%'],
+    [[mixed], ['mixed'], { mixed: 'monthly' }, 'mixed 70%', 'mixed 70%']
   ]
-  const model = barModel(provs, ['zai', 'anthropic'], null, 'used', null)
-  assert.equal(model.following, false)
-  assert.equal(model.layout.mode, 'full')
-  assert.equal(nodeText(barContent(model)), 'claude 95% · zai 20%')
-  const amber = findNodes(barContent(model), n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
-  assert.equal(amber.length, 1)
-  assert.equal(nodeText(amber[0]), 'claude 95%')
+  for (const [provs, pins, choice, text, amberText] of cases) {
+    const model = barModel(provs, pins, null, 'used', null, choice)
+    assert.equal(model.following, false)
+    assert.equal(model.layout.mode, 'full')
+    assert.equal(nodeText(barContent(model)), text)
+    const amber = findNodes(barContent(model), n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
+    assert.equal(amber.length, 1)
+    assert.equal(nodeText(amber[0]), amberText)
+    assert.equal(findNodes(barContent(model), n => n.props && n.props.style && n.props.style.color === WATCH_COLOR).length, 0)
+  }
 })
 
 test('barContent renders meters and the pin count for seven pins', async () => {
@@ -788,15 +801,17 @@ test('tipBody lists one line per entry and the footer', async () => {
   const { tipBody } = await loadPlugin()
   const lines = [
     { name: 'Zai', label: '5h', value: '20%', attention: false },
-    { name: 'Claude', label: 'Weekly', value: '95%', attention: true }
+    { name: 'Claude', label: 'Weekly', value: '95%', attention: true },
+    { name: 'Mixed', label: 'Monthly', value: '70%', attention: true, watch: true }
   ]
   const node = tipBody(lines, '09:41')
   assert.ok(nodeText(node).includes('Zai'))
   assert.ok(nodeText(node).includes('Weekly'))
   assert.ok(nodeText(node).includes('Click to open · updated 09:41'))
   const amber = findNodes(node, n => n.props && n.props.style && n.props.style.color === WARN_COLOR)
-  assert.equal(amber.length, 1)
-  assert.equal(nodeText(amber[0]), '95%')
+  assert.equal(amber.length, 2)
+  assert.equal(nodeText(amber[1]), '70%')
+  assert.equal(findNodes(node, n => n.props && n.props.style && n.props.style.background === WATCH_COLOR).length, 0)
 })
 
 test('tipBody explains the empty bar', async () => {
@@ -2034,36 +2049,42 @@ test('the saved alert map drops junk on load and persists new picks', async () =
   assert.deepEqual(second.data.alertAt, { 'a:b': 90 })
 })
 
-test('a 90 threshold alarms at 92 and stays silent at 85', async () => {
+test('a saved threshold always fires, even on a watch row', async () => {
   const restore = frozen(NOW)
   try {
-    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    setAlert('zai', '5h', 90)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 85, warn: true, resets_at: isoAt(NOW + 1800000) }]
-        }
-      ]
+    const row = (used, warn, watch) => ({
+      key: 'monthly',
+      label: 'Monthly',
+      kind: 'window',
+      used_pct: used,
+      warn: warn,
+      duration_seconds: watch ? 30 * 86400 : 1800,
+      actionable_eta: watch ? 10 * 86400 : undefined,
+      resets_at: isoAt(NOW + 1800000)
     })
-    assert.equal(notices.length, 0)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 92, warn: false, resets_at: isoAt(NOW + 3600000) }]
-        }
-      ]
-    })
-    assert.equal(notices.length, 1)
-    assert.equal(notices[0].title, 'Zai: 5h at 92% used')
+    const cases = [
+      ['below saved', 90, 85, true, false, 0],
+      ['at saved', 90, 92, false, false, 1],
+      ['watch explicit', 50, 70, false, true, 1],
+      ['watch no threshold', null, 70, false, true, 0]
+    ]
+    for (const [name, threshold, used, warn, watch, expected] of cases) {
+      const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
+      const { ctx, notices } = fakeContext()
+      plugin.register(ctx)
+      if (threshold !== null) setAlert('zai', 'monthly', threshold)
+      checkAlerts({
+        providers: [
+          {
+            id: 'zai',
+            name: 'Zai',
+            status: 'ok',
+            windows: [row(used, warn, watch)]
+          }
+        ]
+      })
+      assert.equal(notices.length, expected, name)
+    }
   } finally {
     restore()
   }
@@ -2110,29 +2131,6 @@ test('an off threshold never fires', async () => {
       ]
     })
     assert.equal(notices.length, 0)
-  } finally {
-    restore()
-  }
-})
-
-test('a 50 threshold fires below the backend warn flag', async () => {
-  const restore = frozen(NOW)
-  try {
-    const { checkAlerts, default: plugin, setAlert } = await loadPlugin()
-    const { ctx, notices } = fakeContext()
-    plugin.register(ctx)
-    setAlert('zai', '5h', 50)
-    checkAlerts({
-      providers: [
-        {
-          id: 'zai',
-          name: 'Zai',
-          status: 'ok',
-          windows: [{ key: '5h', label: '5h', used_pct: 55, warn: false, resets_at: isoAt(NOW + 1800000) }]
-        }
-      ]
-    })
-    assert.equal(notices.length, 1)
   } finally {
     restore()
   }
@@ -2437,18 +2435,21 @@ test('providerAttention follows warn and actionable_eta', async () => {
 
 test('attentionNote names the earliest eta by kind', async () => {
   const { attentionNote } = await loadPlugin()
-  assert.equal(attentionNote({ status: 'ok', windows: [{ actionable_eta: 1800 }] }), 'full ~30m')
-  assert.equal(attentionNote({ status: 'ok', money: [{ actionable_eta: 3600 }] }), 'runs out ~60m')
-  assert.equal(
-    attentionNote({
-      status: 'ok',
-      windows: [{ actionable_eta: 7200 }],
-      money: [{ actionable_eta: 1800 }]
-    }),
-    'runs out ~30m'
-  )
-  assert.equal(attentionNote({ status: 'ok', windows: [{ actionable_eta: null }] }), '')
-  assert.equal(attentionNote({ status: 'error', windows: [{ actionable_eta: 60 }] }), '')
+  const quiet = {
+    kind: 'window',
+    used_pct: 70,
+    duration_seconds: 30 * 86400,
+    actionable_eta: 10 * 86400
+  }
+  const cases = [
+    [{ status: 'ok', windows: [{ actionable_eta: 1800 }] }, 'full ~30m'],
+    [{ status: 'ok', money: [{ actionable_eta: 3600 }] }, 'runs out ~60m'],
+    [{ status: 'ok', windows: [{ actionable_eta: 7200 }], money: [{ actionable_eta: 1800 }] }, 'runs out ~30m'],
+    [{ status: 'ok', windows: [{ actionable_eta: null }] }, ''],
+    [{ status: 'error', windows: [{ actionable_eta: 60 }] }, ''],
+    [{ status: 'ok', windows: [{ warn: true }, quiet] }, '']
+  ]
+  for (const [value, expected] of cases) assert.equal(attentionNote(value), expected)
 })
 
 test('projectedFull flags a fast window only after the ten percent guard', async () => {
@@ -2605,7 +2606,6 @@ test('a watch row is yellow and an attention row stays amber', async () => {
     barContent,
     expandedPanel,
     checkAlerts,
-    setAlert,
     default: plugin
   } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
@@ -2667,7 +2667,6 @@ test('a watch row is yellow and an attention row stays amber', async () => {
 
     const { ctx, notices } = fakeContext()
     plugin.register(ctx)
-    setAlert('watch', 'monthly', 80)
     checkAlerts({ providers: [watchP] })
     assert.equal(notices.length, 0)
   } finally {
