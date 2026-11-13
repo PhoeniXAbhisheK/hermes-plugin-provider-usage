@@ -506,6 +506,7 @@ class AnthropicFetcherTest(unittest.TestCase):
             (None, None, False, True, "Max"),
             (None, None, True, True, "Max"),
             ("other", None, False, False, "Subscription"),
+            ("other", None, True, True, "Subscription"),
         )
         for organization_type, rate_limit_tier, has_pro, has_max, expected in cases:
             with self.subTest(organization_type=organization_type):

@@ -1184,10 +1184,11 @@ def _plan_label(
         return "Enterprise"
     if kind.startswith("claude_") and len(kind) > len("claude_"):
         return kind[len("claude_") :].replace("_", " ").title()
-    if has_claude_max:
-        return "Max"
-    if has_claude_pro:
-        return "Pro"
+    if not kind:
+        if has_claude_max:
+            return "Max"
+        if has_claude_pro:
+            return "Pro"
     return "Subscription"
 
 
