@@ -273,6 +273,7 @@ export function checkAlerts(data) {
       if (p.status !== 'ok') continue
       for (const w of p.windows || []) {
         if (!w || w.indicative === true) continue
+        if (rowLevel(w, now) === 'watch') continue
         const at = alertThreshold($alertAt.get(), p.id, w)
         if (at === 'off') continue
         if (at === null) {
@@ -295,6 +296,7 @@ export function checkAlerts(data) {
         )
       }
       for (const m of p.money || []) {
+        if (rowLevel(m, now) === 'watch') continue
         if (m.warn !== true) continue
         const eta = Number(m.actionable_eta)
         const bits = []
@@ -478,24 +480,56 @@ export function staleBackend(data) {
 }
 
 const STALE_BACKEND_TEXT = 'Restart the Hermes dashboard to finish updating.'
+const WATCH_COLOR = 'var(--color-yellow-500, oklch(0.795 0.184 86.047))'
 const WARN_COLOR = 'var(--color-amber-600, oklch(0.666 0.179 58.318))'
 const ACCENT_COLOR = 'var(--ui-accent)'
+const WATCH_LEVEL_SHARE = 0.25
 
-/* One attention rule for the provider group, the chart colour and a quota cell. */
+/* The run-out that decides a row's level: the backend's actionable ETA wins,
+ * otherwise the window's own projection. */
+function rowRunOut(row, nowMs) {
+  const raw = row && row.actionable_eta
+  if (raw !== null && raw !== undefined) {
+    const eta = Number(raw)
+    if (isFinite(eta)) return eta
+  }
+  return projectedFull(row, nowMs)
+}
+
+/* One level rule for grouping, the note, the chart and the quota cell. */
+export function rowLevel(row, nowMs) {
+  if (!row || row.indicative === true || windowNotStarted(row)) return null
+  if (row.warn === true) return 'attention'
+  const eta = rowRunOut(row, nowMs)
+  if (eta === null || eta === undefined) return null
+  const duration = Number(row.duration_seconds)
+  if (!isFinite(duration) || duration <= 0) return 'attention'
+  return eta <= duration * WATCH_LEVEL_SHARE ? 'attention' : 'watch'
+}
+
+/* Every existing caller of rowAttention still means attention only. */
 export function rowAttention(row, nowMs) {
-  if (!row || row.indicative === true) return false
-  if (row.warn === true) return true
-  if (row.actionable_eta !== null && row.actionable_eta !== undefined) return true
-  return projectedFull(row, nowMs) !== null
+  return rowLevel(row, nowMs) === 'attention'
 }
 
 /* A provider needs attention when it is ok and one of its rows is warned,
- * already carries an actionable ETA, or projects to full before its reset. */
+ * already carries a close run-out, or projects to full before its reset. */
 export function providerAttention(p, nowMs) {
   if (!p || p.status !== 'ok') return false
   const now = nowOf(nowMs)
   for (const row of rowsOf(p)) {
     if (rowAttention(row, now)) return true
+  }
+  return false
+}
+
+/* Watch is for the provider note only: it never joins Needs attention and
+ * never fires a desktop alert. */
+export function providerWatch(p, nowMs) {
+  if (!p || p.status !== 'ok') return false
+  const now = nowOf(nowMs)
+  for (const row of rowsOf(p)) {
+    if (rowLevel(row, now) === 'watch') return true
   }
   return false
 }
@@ -519,6 +553,28 @@ export function attentionNote(p, nowMs) {
   for (const m of p.money || []) consider(m && m.actionable_eta, true)
   if (best === null) return ''
   return (best.money ? 'runs out ' : 'full ') + fmtEta(best.value)
+}
+
+/* Yellow note for a provider with a watch row and no attention row. */
+function watchNote(p, nowMs) {
+  if (!p || p.status !== 'ok' || providerAttention(p, nowMs)) return ''
+  const now = nowOf(nowMs)
+  let best = null
+  const consider = (eta, money) => {
+    const value = Number(eta)
+    if (!isFinite(value) || value <= 0) return
+    if (best === null || value < best.value) best = { value: value, money: money }
+  }
+  for (const w of p.windows || []) {
+    if (rowLevel(w, now) !== 'watch') continue
+    consider(rowRunOut(w, now), false)
+  }
+  for (const m of p.money || []) {
+    if (rowLevel(m, now) !== 'watch') continue
+    consider(rowRunOut(m, now), true)
+  }
+  if (best === null) return ''
+  return 'on pace, ' + (best.money ? 'runs out ' : 'full ') + fmtEta(best.value)
 }
 
 /* Attention first, backend order kept inside each group. */
@@ -810,7 +866,7 @@ export function chartModel(row, nowMs, alertAt, mode) {
     if (Math.abs(y - currentY) < 6) y = currentY < CHART_H / 2 ? 68 : 9
     nowLabel = { x: x, y: y, anchor: anchor }
   }
-  const amber = rowAttention(row, now)
+  const level = rowLevel(row, now)
   return {
     series: series,
     segments: segments,
@@ -826,7 +882,7 @@ export function chartModel(row, nowMs, alertAt, mode) {
     average: average,
     overflow: overflow,
     alert: alert,
-    colour: amber ? 'amber' : 'accent'
+    colour: level === 'attention' ? 'amber' : level === 'watch' ? 'watch' : 'accent'
   }
 }
 
@@ -873,7 +929,11 @@ export function statsFor(row, nowMs, mode) {
         ? '0×'
         : pace < 0.1
           ? pace.toFixed(2) + '×'
-          : pace.toFixed(1) + '×'
+          : pace >= 0.95 && pace <= 1.05
+            ? pace.toFixed(2) + '×'
+            : pace.toFixed(1) + '×'
+  const level = rowLevel(row, now)
+  const watch = atReset !== null && atReset >= 100 && level === 'watch'
   let atResetText = '-'
   if (atReset !== null) {
     if (atReset >= 100) {
@@ -889,7 +949,8 @@ export function statsFor(row, nowMs, mode) {
     {
       label: 'At reset',
       value: atResetText,
-      warn: atReset !== null && atReset >= 100
+      warn: atReset !== null && atReset >= 100 && level !== 'watch',
+      ...(watch ? { watch: true } : {})
     },
     { label: 'Pace', value: paceText }
   ]
@@ -949,7 +1010,8 @@ export function tipEntries(entries) {
     name: e.name,
     label: e.label,
     value: e.value,
-    attention: e.attention === true
+    attention: e.attention === true,
+    watch: e.watch === true
   }))
 }
 
@@ -963,16 +1025,19 @@ export function barModel(providers, set, sessionProvider, mode, availPx, choice)
   const following = !(Array.isArray(set) && set.length)
   const ids = barProviderIds(set, known, sessionProvider)
   const visible = rows.filter(p => ids.indexOf(p.id) !== -1)
+  const now = nowOf()
   const entries = visible.map(p => {
     const key = barQuotaKey(p, choice)
     const row = rowsOf(p).find(r => r && r.key === key) || null
     const value = row && p.status === 'ok' ? rowView(row, mode).value : '-'
+    const level = row ? rowLevel(row, now) : null
     return {
       id: p.id,
       code: p.code || p.id,
       value: value,
       used_pct: row ? row.used_pct : null,
       attention: providerAttention(p),
+      watch: level === 'watch',
       name: p.name,
       label: row ? row.label : ''
     }
@@ -1055,7 +1120,7 @@ export function barContent(model) {
             borderRadius: 2,
             display: 'inline-block',
             flex: 'none',
-            background: e.attention ? WARN_COLOR : ACCENT_COLOR
+            background: e.watch ? WATCH_COLOR : e.attention ? WARN_COLOR : ACCENT_COLOR
           }
         })),
         jsx('span', {
@@ -1074,7 +1139,7 @@ export function barContent(model) {
     if (i) parts.push(' · ')
     parts.push(jsx('span', {
       key: e.id,
-      style: { color: e.attention ? WARN_COLOR : undefined },
+      style: { color: e.watch ? WATCH_COLOR : e.attention ? WARN_COLOR : undefined },
       children: e.code + ' ' + barValue(e, layout.mode === 'bare')
     }))
   })
@@ -1095,13 +1160,13 @@ export function tipBody(lines, stamp) {
                 borderRadius: 2,
                 display: 'inline-block',
                 flex: 'none',
-                background: line.attention ? WARN_COLOR : ACCENT_COLOR
+                background: line.watch ? WATCH_COLOR : line.attention ? WARN_COLOR : ACCENT_COLOR
               }
             }),
             jsx('span', { style: { fontWeight: 500, whiteSpace: 'nowrap' }, children: line.name }),
             jsx('span', { style: { opacity: 0.6, whiteSpace: 'nowrap' }, children: line.label }),
             jsx('span', {
-              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap', color: line.attention ? WARN_COLOR : undefined },
+              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap', color: line.watch ? WATCH_COLOR : line.attention ? WARN_COLOR : undefined },
               children: line.value
             })
           ]
@@ -1244,7 +1309,8 @@ function pinButton(p, pinned, onPin) {
 function quotaCell(row, ctx) {
   const view = rowView(row, ctx.mode)
   const isMoney = row.kind === 'money'
-  const warn = rowAttention(row, ctx.now)
+  const level = rowLevel(row, ctx.now)
+  const levelColor = level === 'attention' ? WARN_COLOR : level === 'watch' ? WATCH_COLOR : undefined
   /* Reset text only when the provider shows one quota: at 2 or 3 columns the
    * row has no room for it, so the window keeps label and value only. */
   const extra = isMoney
@@ -1280,7 +1346,7 @@ function quotaCell(row, ctx) {
             children: row.label
           }),
           jsx('span', {
-            style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none', color: warn ? WARN_COLOR : undefined },
+            style: { fontSize: 11, fontWeight: 500, ...MONO, marginLeft: 'auto', flex: 'none', color: levelColor },
             children: view.value
           }),
           extra
@@ -1304,7 +1370,7 @@ function quotaCell(row, ctx) {
                 display: 'block',
                 height: '100%',
                 width: clampPct(view.shown) + '%',
-                background: warn ? WARN_COLOR : ACCENT_COLOR
+                background: levelColor || ACCENT_COLOR
               }
             })
           : null
@@ -1320,7 +1386,12 @@ function chartElement(p, row, model) {
       children: 'No cap, so no chart'
     })
   }
-  const amber = model.colour === 'amber'
+  const colour =
+    model.colour === 'amber'
+      ? WARN_COLOR
+      : model.colour === 'watch'
+        ? WATCH_COLOR
+        : ACCENT_COLOR
   const segments = model.segments && model.segments.length
     ? model.segments
     : model.series.length >= 2
@@ -1334,7 +1405,7 @@ function chartElement(p, row, model) {
     role: 'img',
     'aria-label':
       p.name + ' ' + row.label + ' ' + (model.overflow ? 'projected to run out before reset' : 'on track'),
-    style: { color: amber ? WARN_COLOR : ACCENT_COLOR },
+    style: { color: colour },
     children: [
       model.alert
         ? jsx('line', {
@@ -1458,7 +1529,7 @@ function statsElement(row, nowMs, mode) {
         children: [
           jsx('span', { style: { fontSize: 10, color: 'var(--ui-text-secondary)' }, children: s.label }),
           jsx('span', {
-            style: { fontSize: 12, fontWeight: 500, ...MONO, color: s.warn ? WARN_COLOR : undefined },
+            style: { fontSize: 12, fontWeight: 500, ...MONO, color: s.warn ? WARN_COLOR : s.watch ? WATCH_COLOR : undefined },
             children: s.value
           })
         ]
@@ -1608,7 +1679,9 @@ export function providerRowElement(p, ctx) {
   const barHere = (ctx.barIds || []).indexOf(p.id) !== -1
   const all = rowsOf(p)
   const toggle = pinButton(p, pinned, ctx.onPin)
-  const note = attentionNote(p, ctx.now)
+  const attended = providerAttention(p, ctx.now)
+  const note = attended ? attentionNote(p, ctx.now) : ''
+  const watch = !attended && providerWatch(p, ctx.now) ? watchNote(p, ctx.now) : ''
   const stale = staleText(p)
   const open = ctx.open === true
   const quotas = visibleQuotas(p, barKey)
@@ -1683,9 +1756,9 @@ export function providerRowElement(p, ctx) {
           fontWeight: 500,
           ...MONO,
           whiteSpace: 'nowrap',
-          color: note ? WARN_COLOR : 'var(--ui-text-tertiary)'
+          color: note ? WARN_COLOR : watch ? WATCH_COLOR : 'var(--ui-text-tertiary)'
         },
-        children: note || stale
+        children: note || watch || stale
       }),
       toggle
     ]

@@ -34,8 +34,7 @@ providers are omitted from the panel entirely.
 - **Expanded row**: click a provider for one tab per window, a usage chart over
   the whole window (now marker, projected path, alert line), and Burn, At reset
   and Pace figures.
-- **Near-limit tint**: a window or the OpenRouter key cap at 80% or more used
-  renders amber in the bar and in the popover.
+- **Near-limit tint**: yellow means on pace to run out before the reset but not close; amber means close to the run-out, at the alert level, or a row with no known duration. Yellow never enters Needs attention or fires an alert.
 - **Alerts**: one desktop notification when a window crosses its alert level,
   set per window with "Alert at" (50, 70, 80, 90, 95 or off; 80 by default).
   Deduped per window cycle (keyed by the reset time) and once a day for the key
