@@ -7,10 +7,13 @@ repository; the date is the release date.
 
 ### Added
 
+- [behaviour] OpenCode's tag reads Go instead of Plan; the provider name is OpenCode.
+- [behaviour] Anthropic's tag shows the real plan: Pro, Max, Max 5x, Max 20x, Team, Enterprise, Ultra or Subscription.
 - [behaviour] Usage history covers the whole current window and survives restarts in `<HERMES_HOME>/plugin-data/provider-usage/history.json`.
 - [behaviour] Anthropic weekly plan limits render per model, such as Fable, when the OAuth reply carries them.
 - [behaviour] Kimi booster balance renders as an indicative row that never flags or alerts (#58).
 - [behaviour] When Hermes answers for Anthropic, read the per-model weekly limits from the OAuth usage endpoint at most once every 15 minutes, so model rows do not depend on the DirectSDK fallback.
+- [behaviour] Read the Anthropic plan from the OAuth profile at most once a day when `~/.claude.json` has no plan, and cache only the plan fields.
 
 ### Fixed
 

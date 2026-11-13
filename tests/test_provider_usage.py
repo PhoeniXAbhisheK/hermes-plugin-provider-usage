@@ -97,7 +97,8 @@ class SmokeTest(unittest.TestCase):
     def test_go_fetcher_registered(self):
         self.assertIn("opencode-go", API.FETCHERS)
         self.assertNotIn("opencode-zen", API.FETCHERS)
-        self.assertEqual(API.PROVIDER_META["opencode-go"]["name"], "OpenCode Go")
+        self.assertEqual(API.PROVIDER_META["opencode-go"]["name"], "OpenCode")
+        self.assertEqual(API.PROVIDER_META["opencode-go"]["tag"], "Go")
 
 
 class GoFetcherTest(unittest.TestCase):
@@ -360,6 +361,7 @@ class KimiFetcherTest(unittest.TestCase):
 
 
 ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
+ANTHROPIC_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
 
 class AnthropicFetcherTest(unittest.TestCase):
@@ -379,10 +381,18 @@ class AnthropicFetcherTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
         self.creds = self.home / ".claude" / ".credentials.json"
+        self.claude_json = self.home / ".claude.json"
+        self.claude_json.write_text('{"oauthAccount": {"organizationType": "claude_pro"}}')
         self._orig_home = API.HOME
         API.HOME = self.home
         self._orig_http = API._http_json
         self._orig_hermes = API._hermes_usage
+        self._orig_hermes_token = API._hermes_oauth_token
+        API._hermes_oauth_token = lambda: None
+        self._orig_plan_path = API._anthropic_plan_path
+        API._anthropic_plan_path = lambda: self.home / "plan.json"
+        self._plan_attempts = dict(API._anthropic_plan_attempt)
+        API._anthropic_plan_attempt.clear()
         self._limits_saved = {
             key: (dict(value) if isinstance(value, dict) else value)
             for key, value in API._anthropic_limits.items()
@@ -395,6 +405,10 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.HOME = self._orig_home
         API._http_json = self._orig_http
         API._hermes_usage = self._orig_hermes
+        API._hermes_oauth_token = self._orig_hermes_token
+        API._anthropic_plan_path = self._orig_plan_path
+        API._anthropic_plan_attempt.clear()
+        API._anthropic_plan_attempt.update(self._plan_attempts)
         API._anthropic_limits.clear()
         API._anthropic_limits.update(self._limits_saved)
         self._tmp.cleanup()
@@ -478,6 +492,139 @@ class AnthropicFetcherTest(unittest.TestCase):
             "resets_at": None,
             "scope": {"model": {"display_name": name}},
         }
+
+    def test_plan_labels(self):
+        cases = (
+            ("claude_pro", "default_claude_ai", False, False, "Pro"),
+            ("claude_max", "default_claude_ai", False, False, "Max"),
+            ("claude_max", "default_claude_max_5x", False, False, "Max 5x"),
+            ("claude_max", "default_claude_max_20x", False, False, "Max 20x"),
+            ("claude_team", "", False, False, "Team"),
+            ("claude_enterprise", "", False, False, "Enterprise"),
+            ("claude_ultra", "", False, False, "Ultra"),
+            (None, None, True, False, "Pro"),
+            (None, None, False, True, "Max"),
+            (None, None, True, True, "Max"),
+            ("other", None, False, False, "Subscription"),
+        )
+        for organization_type, rate_limit_tier, has_pro, has_max, expected in cases:
+            with self.subTest(organization_type=organization_type):
+                self.assertEqual(
+                    API._plan_label(organization_type, rate_limit_tier, has_pro, has_max),
+                    expected,
+                )
+
+    def test_plan_local_wins_without_a_read(self):
+        self.claude_json.write_text(
+            '{"oauthAccount": {"organizationType": "claude_max",'
+            ' "organizationRateLimitTier": "default_claude_max_5x"}}'
+        )
+        self.calls.clear()
+        API._http_json = lambda *args, **kwargs: self.calls.append(ANTHROPIC_PROFILE_URL) or {}
+        self.assertEqual(API._anthropic_plan_tag(), "Max 5x")
+        self.assertEqual(self.calls, [])
+
+    def test_plan_error_keeps_cache_then_falls_back_after_seven_days(self):
+        self.claude_json.unlink()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        API._write_anthropic_plan_cache(
+            {"organization_type": "claude_pro", "has_claude_pro": True},
+            API.time.time() - 2 * API.ANTHROPIC_PLAN_READ_S,
+        )
+
+        def fail(url, headers, **kw):
+            self.calls.append(url)
+            raise RuntimeError("profile read failed")
+
+        API._http_json = fail
+        self.assertEqual(API._anthropic_plan_tag(), "Pro")
+        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
+
+        API._write_anthropic_plan_cache(
+            {"organization_type": "claude_pro", "has_claude_pro": True},
+            API.time.time() - 8 * API.ANTHROPIC_PLAN_READ_S,
+        )
+        API._anthropic_plan_attempt.clear()
+        self.assertEqual(API._anthropic_plan_tag(), "Subscription")
+        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL, ANTHROPIC_PROFILE_URL])
+
+    def test_no_token_or_cache_falls_back_without_a_read(self):
+        self.claude_json.unlink()
+        self.calls.clear()
+        API._http_json = lambda *args, **kwargs: self.calls.append(ANTHROPIC_PROFILE_URL) or {}
+        self.assertEqual(API._anthropic_plan_tag(), "Subscription")
+        self.assertEqual(self.calls, [])
+
+    def test_plan_profile_is_cached_and_keeps_only_plan_fields(self):
+        self.claude_json.unlink()
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self._mock_http(
+            {
+                "account": {
+                    "has_claude_pro": False,
+                    "has_claude_max": True,
+                    "email": "identity-value",
+                    "uuid": "identity",
+                },
+                "organization": {
+                    "organization_type": "claude_max",
+                    "rate_limit_tier": "default_claude_max_20x",
+                    "billing_type": "card",
+                },
+            }
+        )
+        self.assertEqual(API._anthropic_plan_tag(), "Max 20x")
+        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
+        plan = json.loads((self.home / "plan.json").read_text())
+        self.assertEqual(
+            set(plan),
+            {
+                "organization_type",
+                "rate_limit_tier",
+                "has_claude_pro",
+                "has_claude_max",
+                "fetched_at",
+            },
+        )
+        self.assertNotIn("identity-value", json.dumps(plan))
+        self.assertEqual(API._anthropic_plan_tag(), "Max 20x")
+        self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
+
+    def test_token_lookup_prefers_claude_code_then_hermes(self):
+        API._hermes_oauth_token = lambda: "hermes-token"
+        self._write_creds({"claudeAiOauth": {"accessToken": "claude-token"}})
+        self.assertEqual(API._anthropic_oauth_token(), "claude-token")
+        self.creds.unlink()
+        self.assertEqual(API._anthropic_oauth_token(), "hermes-token")
+        self._write_creds({"claudeAiOauth": {"accessToken": "expired", "expiresAt": 1000}})
+        self.assertEqual(API._anthropic_oauth_token(), "hermes-token")
+        API._hermes_oauth_token = lambda: None
+        self.assertIsNone(API._anthropic_oauth_token())
+
+    def test_hermes_oauth_file_is_the_second_token_source(self):
+        original_home = API._hermes_home
+        API._hermes_home = lambda: self.home
+        self.addCleanup(setattr, API, "_hermes_home", original_home)
+        path = self.home / ".anthropic_oauth.json"
+        path.write_text('{"accessToken": "hermes-file", "expiresAt": 9999999999999}')
+        self.assertEqual(API._read_hermes_oauth_file(), "hermes-file")
+        path.write_text('{"accessToken": "expired", "expiresAt": 1000}')
+        self.assertIsNone(API._read_hermes_oauth_file())
+
+    def test_snapshot_plan_wins(self):
+        from types import SimpleNamespace
+
+        snap = SimpleNamespace(
+            available=True,
+            windows=[SimpleNamespace(label="Current session", used_percent=10.0, reset_at=None)],
+            fetched_at=None,
+            plan="Max",
+        )
+        payload = API._snap_payload("anthropic", snap)
+        API._hermes_usage = lambda provider: payload if provider == "anthropic" else None
+        p = API.fetch_anthropic()
+        self.assertEqual(p["tag"], "Max")
+        self.assertEqual(self.calls, [])
 
     def test_extra_read_is_throttled_and_reuses_cached_rows(self):
         self._fresh_helper()

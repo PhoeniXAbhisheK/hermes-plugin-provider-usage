@@ -585,10 +585,13 @@ class DirectFallbackTest(Base):
         super().setUp()
         self.calls = []
         self._saved_claude = getattr(API, "_claude_code_oauth_token", None)
+        self._saved_plan = API._claude_json_plan
+        API._claude_json_plan = lambda: {"organization_type": "claude_pro"}
         API._direct_cooldown = {}
         API._HOST_WINNERS.clear()
 
     def tearDown(self):
+        API._claude_json_plan = self._saved_plan
         if self._saved_claude is not None:
             API._claude_code_oauth_token = self._saved_claude
         super().tearDown()

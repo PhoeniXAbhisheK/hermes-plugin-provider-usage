@@ -29,10 +29,10 @@ MINIMAX_GLOBAL_API = "https://api.minimax.io/v1/token_plan/remains"
 MINIMAX_GLOBAL_WWW = "https://www.minimax.io/v1/token_plan/remains"
 
 EXPECTED = [
-    ("opencode-go", "OpenCode Go", "Plan", "opencode"),
+    ("opencode-go", "OpenCode", "Go", "opencode"),
     ("openai-codex", "OpenAI Codex", "Plus", "codex"),
     ("openrouter", "OpenRouter", "Credits", "openrouter"),
-    ("anthropic", "Anthropic", "Claude Code", "claude"),
+    ("anthropic", "Anthropic", "Subscription", "claude"),
     ("copilot", "GitHub Copilot", "Quota", "copilot"),
     ("nous", "Nous", "Portal", "nous"),
     ("zai", "Z.AI", "GLM", "zai"),

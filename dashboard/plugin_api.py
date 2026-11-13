@@ -11,10 +11,10 @@ credential CLIs.
 
 Credential sources (read-only):
 
-- OpenCode Go: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
+- OpenCode: ``OPENCODE_GO_API_KEY`` from the Hermes secret scope, falling
   back to the ``opencode-go`` entry of ``~/.local/share/opencode/auth.json``
   (the OpenCode CLI's store; never the Zen key). A 403 on the usage endpoint
-  means the account has no Go plan: the provider stays hidden.
+  means the account has no Go plan: the provider stays hidden. The tag reads Go.
 - OpenAI Codex: Hermes' Codex sign-in via the account-usage helper, falling
   back to the OAuth access token in ``~/.codex/auth.json``. The
   ``OPENAI_API_KEY`` entry in that file is never read (an expired token
@@ -25,8 +25,10 @@ Credential sources (read-only):
   the ``claude-subscription-directsdk-experimental`` provider when Nous'
   claude-subscription-directsdk plugin is installed (it asks Claude Code for
   its plan limits; the token never reaches this plugin), then by the Claude
-  Code OAuth token in ``~/.claude/.credentials.json``. A refused helper read
-  keeps the last reading for up to six hours, marked stale.
+  Code OAuth token in ``~/.claude/.credentials.json``, then by Hermes' own
+  Anthropic OAuth grant. A refused helper read keeps the last reading for up
+  to six hours, marked stale. The plan tag comes from Claude Code's local
+  ``oauthAccount``, else the daily plan cache, else one profile read per day.
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
@@ -36,7 +38,8 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes, then DirectSDK, else the Claude Code token)
+- https://api.anthropic.com/api/oauth/usage (via Hermes, then DirectSDK, else the Claude Code or Hermes OAuth token)
+- https://api.anthropic.com/api/oauth/profile (only when the local plan is absent, at most once a day)
 - https://portal.nousresearch.com/api/oauth/account (via Hermes' Nous sign-in)
 - https://api.deepseek.com/user/balance
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
@@ -95,6 +98,9 @@ PROVIDER_BUDGET_S = 12.0  # one provider inside that collection, wall clock
 ANTHROPIC_LIMITS_READ_S = 900.0  # extra per-model limits read, at most once per 15 min
 ANTHROPIC_LIMITS_CACHE_S = 3600.0  # keep parsed limit rows for one hour without a success
 ANTHROPIC_LIMITS_MIN_LEFT_S = 0.5  # do not start the extra read with less budget than this
+ANTHROPIC_PLAN_READ_S = 86400.0  # profile plan read, at most once per day per HERMES_HOME
+ANTHROPIC_PLAN_KEEP_S = 604800.0  # keep a cached plan for seven days without a success
+ANTHROPIC_PLAN_MIN_LEFT_S = 0.5  # do not start the profile read with less budget than this
 HOME = Path.home()
 
 # Wall-clock budget for the provider currently running. Workers copy the caller's
@@ -206,6 +212,7 @@ _anthropic_limits = {  # extra per-model limits read state
     "attempt": 0.0,  # last attempt, successful or not
     "hold": 0.0,  # a 429 reset_at for the extra read only
 }
+_anthropic_plan_attempt = {}  # plan cache path -> last profile attempt
 _running = {"run": None}  # the collection in flight, if any (guarded by _lock)
 _inflight = {}  # provider id -> Event set when its last worker returned
 _HOST_WINNERS = {}  # family -> last host that answered, tried first next time
@@ -1067,29 +1074,81 @@ def _helper_or_direct(provider, direct, normalize=None, helper=None):
     return finish(result)
 
 
+def _oauth_token_usable(entry):
+    """The access token from a stored OAuth entry, or None when unusable."""
+    if not isinstance(entry, dict):
+        return None
+    token = entry.get("accessToken") or entry.get("access_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    expires = _num(entry.get("expiresAt", entry.get("expires_at")))
+    if expires is not None and expires > 0:
+        if expires > 100000000000:
+            expires = expires / 1000.0
+        if expires <= time.time() + 60:
+            return None
+    return token
+
+
 def _claude_code_oauth_token():
     """Claude Code OAuth access token from ~/.claude/.credentials.json.
 
     The file is written by ``claude login``: claudeAiOauth.accessToken is the
     token the Claude Code client itself sends to api.anthropic.com. Returns
-    None when the file is missing, malformed, or carries no token; the token
-    is never logged, echoed, or stored.
+    None when the file is missing, malformed, expired, or carries no token;
+    the token is never logged, echoed, or stored.
     """
     try:
         d = json.loads(_read_text(HOME / ".claude" / ".credentials.json"))
     except (OSError, ValueError):
         return None
-    entry = d.get("claudeAiOauth")
-    if not isinstance(entry, dict):
+    return _oauth_token_usable(d.get("claudeAiOauth"))
+
+
+def _hermes_home():
+    """The active Hermes home, with the plugin's own fallback."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return get_hermes_home()
+    except Exception:
+        raw = os.environ.get("HERMES_HOME")
+        return Path(raw).expanduser() if raw else HOME / ".hermes"
+
+
+def _read_hermes_oauth_file():
+    """The token file under HERMES_HOME, read without writing or refreshing."""
+    try:
+        data = json.loads(_read_text(_hermes_home() / ".anthropic_oauth.json"))
+    except (OSError, ValueError):
         return None
-    token = entry.get("accessToken")
-    if not isinstance(token, str) or not token:
+    return _oauth_token_usable(data)
+
+
+def _hermes_oauth_token():
+    """Hermes' own Anthropic OAuth token, when one is usable.
+
+    Reads the core credential helper when it is importable, otherwise the
+    documented token file under HERMES_HOME. Never refreshes or writes either
+    token store.
+    """
+    try:
+        from agent.anthropic_credentials import read_hermes_oauth_credentials
+    except Exception:
+        return _read_hermes_oauth_file()
+    try:
+        return _oauth_token_usable(read_hermes_oauth_credentials())
+    except Exception:
         return None
-    return token
+
+
+def _anthropic_oauth_token():
+    """The first usable Anthropic token: Claude Code, then Hermes' own grant."""
+    return _claude_code_oauth_token() or _hermes_oauth_token()
 
 
 def _anthropic_headers(token):
-    """The Claude Code OAuth request headers, shared by both Anthropic reads."""
+    """The Claude Code OAuth request headers, shared by every Anthropic read."""
     return {
         "Authorization": "Bearer " + token,
         "anthropic-beta": "oauth-2025-04-20",
@@ -1097,12 +1156,191 @@ def _anthropic_headers(token):
     }
 
 
-def _anthropic_request(token):
-    """One Anthropic usage request with the Claude Code OAuth token."""
+def _anthropic_request(token, path="/api/oauth/usage"):
+    """One Anthropic OAuth request with the shared token and headers."""
     return _http_json(
-        "https://api.anthropic.com/api/oauth/usage",
+        "https://api.anthropic.com" + path,
         _anthropic_headers(token),
     )
+
+
+def _plan_label(
+    organization_type=None, rate_limit_tier=None, has_claude_pro=False, has_claude_max=False
+):
+    """Map plan fields to the short provider tag."""
+    kind = str(organization_type or "").strip().lower()
+    tier = str(rate_limit_tier or "").strip().lower()
+    if kind == "claude_pro":
+        return "Pro"
+    if kind == "claude_max":
+        if "20x" in tier:
+            return "Max 20x"
+        if "5x" in tier:
+            return "Max 5x"
+        return "Max"
+    if kind == "claude_team":
+        return "Team"
+    if kind == "claude_enterprise":
+        return "Enterprise"
+    if kind.startswith("claude_") and len(kind) > len("claude_"):
+        return kind[len("claude_") :].replace("_", " ").title()
+    if has_claude_max:
+        return "Max"
+    if has_claude_pro:
+        return "Pro"
+    return "Subscription"
+
+
+def _plan_tag_for(plan):
+    """The tag for a plan mapping, ignoring bookkeeping fields such as fetched_at."""
+    plan = plan if isinstance(plan, dict) else {}
+    return _plan_label(
+        plan.get("organization_type"),
+        plan.get("rate_limit_tier"),
+        plan.get("has_claude_pro") is True,
+        plan.get("has_claude_max") is True,
+    )
+
+
+def _claude_json_plan():
+    """Plan fields from Claude Code's local oauthAccount, or None."""
+    try:
+        d = json.loads(_read_text(HOME / ".claude.json"))
+    except (OSError, ValueError):
+        return None
+    account = d.get("oauthAccount") if isinstance(d, dict) else None
+    if not isinstance(account, dict):
+        return None
+    organization_type = account.get("organizationType") or account.get("organization_type")
+    rate_limit_tier = account.get("organizationRateLimitTier") or account.get(
+        "organization_rate_limit_tier"
+    )
+    if not isinstance(organization_type, str):
+        organization_type = None
+    if not isinstance(rate_limit_tier, str):
+        rate_limit_tier = None
+    if not organization_type and not rate_limit_tier:
+        return None
+    return {
+        "organization_type": organization_type,
+        "rate_limit_tier": rate_limit_tier,
+    }
+
+
+def _anthropic_plan_path():
+    """The plan cache next to the plugin's history file, or None."""
+    history = _history_path()
+    return history.with_name("plan.json") if history is not None else None
+
+
+_PLAN_FIELDS = ("organization_type", "rate_limit_tier", "has_claude_pro", "has_claude_max")
+
+
+def _read_anthropic_plan_cache():
+    """Only the allowed plan fields plus fetched_at, or None."""
+    path = _anthropic_plan_path()
+    if path is None:
+        return None
+    try:
+        d = json.loads(_read_text(path))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    fetched = _num(d.get("fetched_at"))
+    if fetched is None or fetched <= 0:
+        return None
+    result = {"fetched_at": fetched}
+    for key in ("organization_type", "rate_limit_tier"):
+        value = d.get(key)
+        if isinstance(value, str):
+            result[key] = value
+    for key in ("has_claude_pro", "has_claude_max"):
+        value = d.get(key)
+        if isinstance(value, bool):
+            result[key] = value
+    return result
+
+
+def _write_anthropic_plan_cache(plan, now):
+    """Atomically store only the allowed plan fields and fetched_at."""
+    path = _anthropic_plan_path()
+    if path is None:
+        return False
+    payload = {key: plan.get(key) for key in _PLAN_FIELDS}
+    payload["fetched_at"] = now
+    temp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
+        handle, temp = tempfile.mkstemp(prefix=".plan.", suffix=".tmp", dir=path.parent)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, separators=(",", ":"), sort_keys=True)
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+        return True
+    except OSError:
+        logging.getLogger(__name__).debug("plan file is not writable; keeping memory only")
+        if temp is not None:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+        return False
+
+
+def _profile_anthropic_plan(token):
+    """Read only the plan fields from the OAuth profile endpoint."""
+    if not token or _run_closed():
+        return None
+    left = _time_left()
+    if left is not None and left <= ANTHROPIC_PLAN_MIN_LEFT_S:
+        return None
+    try:
+        d = _anthropic_request(token, "/api/oauth/profile")
+    except Exception as exc:  # noqa: BLE001 - a side read never breaks the card
+        logging.getLogger(__name__).debug("anthropic profile read failed (%s)", type(exc).__name__)
+        return None
+    if not isinstance(d, dict):
+        return None
+    account = d.get("account") if isinstance(d.get("account"), dict) else {}
+    organization = d.get("organization") if isinstance(d.get("organization"), dict) else {}
+    return {
+        "organization_type": organization.get("organization_type"),
+        "rate_limit_tier": organization.get("rate_limit_tier"),
+        "has_claude_pro": account.get("has_claude_pro") is True,
+        "has_claude_max": account.get("has_claude_max") is True,
+    }
+
+
+def _anthropic_plan_tag():
+    """Resolve the local, cached, or freshly read Anthropic plan tag."""
+    local = _claude_json_plan()
+    if local is not None:
+        return _plan_tag_for(local)
+    now = time.time()
+    cached = _read_anthropic_plan_cache()
+    if cached is not None and now - cached["fetched_at"] <= ANTHROPIC_PLAN_READ_S:
+        return _plan_tag_for(cached)
+    token = _anthropic_oauth_token()
+    if token and not _run_closed():
+        left = _time_left()
+        path = _anthropic_plan_path()
+        key = str(path) if path is not None else "default"
+        if (left is None or left > ANTHROPIC_PLAN_MIN_LEFT_S) and now - _anthropic_plan_attempt.get(
+            key, 0.0
+        ) >= ANTHROPIC_PLAN_READ_S:
+            _anthropic_plan_attempt[key] = now
+            plan = _profile_anthropic_plan(token)
+            if plan is not None:
+                _write_anthropic_plan_cache(plan, now)
+                return _plan_tag_for(plan)
+    if cached is not None and now - cached["fetched_at"] <= ANTHROPIC_PLAN_KEEP_S:
+        return _plan_tag_for(cached)
+    return "Subscription"
 
 
 def _anthropic_helper():
@@ -1131,7 +1369,8 @@ def fetch_anthropic():
 
     A helper payload does not carry the per-model limits[] rows. Read them
     separately at a throttled pace, or use the raw body when a helper snapshot
-    starts carrying one.
+    starts carrying one. A helper snapshot plan wins; otherwise the local plan,
+    the daily cache, or one profile read supplies the tag.
     """
     direct_ok = [False]
 
@@ -1143,6 +1382,12 @@ def fetch_anthropic():
     payload = _helper_or_direct("anthropic", direct, helper=_anthropic_helper)
     if not isinstance(payload, dict):
         return payload
+    if not payload.get("tag"):
+        try:
+            payload["tag"] = _anthropic_plan_tag()
+        except Exception:  # noqa: BLE001 - plan lookup never breaks the card
+            logging.getLogger(__name__).debug("anthropic plan lookup failed", exc_info=True)
+            payload["tag"] = "Subscription"
     if payload.pop("_anthropic_limits_raw", False):
         return payload
     if direct_ok[0]:
@@ -1191,7 +1436,7 @@ def _anthropic_limits_cached():
     left = _time_left()
     if left is not None and left <= ANTHROPIC_LIMITS_MIN_LEFT_S:
         return cached
-    token = _claude_code_oauth_token()
+    token = _anthropic_oauth_token()
     if not token:
         return cached
     state["attempt"] = now
@@ -1247,8 +1492,8 @@ def _anthropic_limit_rows(limits):
 
 
 def _anthropic_direct():
-    """One direct Anthropic read with the Claude Code OAuth token."""
-    token = _claude_code_oauth_token()
+    """One direct Anthropic read with the first usable OAuth token."""
+    token = _anthropic_oauth_token()
     if not token:
         raise _Skip("anthropic")
     d = _anthropic_request(token)
@@ -1861,8 +2106,8 @@ def fetch_minimax():
 # from it; runtime code reads those names, so a test can replace them.
 PROVIDERS = {
     "opencode-go": {
-        "name": "OpenCode Go",
-        "tag": "Plan",
+        "name": "OpenCode",
+        "tag": "Go",
         "code": "opencode",
         "fetch": fetch_opencode_go,
     },
@@ -1880,7 +2125,7 @@ PROVIDERS = {
     },
     "anthropic": {
         "name": "Anthropic",
-        "tag": "Claude Code",
+        "tag": "Subscription",
         "code": "claude",
         "fetch": fetch_anthropic,
     },
