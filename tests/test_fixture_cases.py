@@ -9,6 +9,7 @@ file on disk is missing from it, so an unused file cannot satisfy the meta-test.
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +112,7 @@ def snapshot_from(body):
 
 class FixtureCaseTest(unittest.TestCase):
     def setUp(self):
+        self._plan_tmp = tempfile.TemporaryDirectory()
         self._saved = {
             "_secret": API._secret,
             "_read_text": API._read_text,
@@ -119,6 +121,8 @@ class FixtureCaseTest(unittest.TestCase):
             "_fetch_usage": API._fetch_usage,
             "_hermes_usage": API._hermes_usage,
             "_claude_code_oauth_token": API._claude_code_oauth_token,
+            "_hermes_oauth_token": API._hermes_oauth_token,
+            "_anthropic_plan_path": API._anthropic_plan_path,
         }
         self._saved_modules = {
             name: sys.modules.get(name)
@@ -129,6 +133,7 @@ class FixtureCaseTest(unittest.TestCase):
     def tearDown(self):
         self._restore()
         self._clean_shared()
+        self._plan_tmp.cleanup()
 
     def _clean_shared(self):
         for bucket in (
@@ -147,6 +152,8 @@ class FixtureCaseTest(unittest.TestCase):
         API._read_text = lambda path: '{"tokens": {"access_token": "sentinel-token"}}'
         API._hermes_usage = lambda provider: None
         API._claude_code_oauth_token = lambda: None
+        API._hermes_oauth_token = lambda: None
+        API._anthropic_plan_path = lambda: Path(self._plan_tmp.name) / "plan.json"
         API._helper_cooldown.clear()
         API._holds.clear()
         API._last_good.clear()
