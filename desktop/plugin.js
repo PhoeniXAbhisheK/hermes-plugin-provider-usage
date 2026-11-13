@@ -273,7 +273,6 @@ export function checkAlerts(data) {
       if (p.status !== 'ok') continue
       for (const w of p.windows || []) {
         if (!w || w.indicative === true) continue
-        if (rowLevel(w, now) === 'watch') continue
         const at = alertThreshold($alertAt.get(), p.id, w)
         if (at === 'off') continue
         if (at === null) {
@@ -296,7 +295,6 @@ export function checkAlerts(data) {
         )
       }
       for (const m of p.money || []) {
-        if (rowLevel(m, now) === 'watch') continue
         if (m.warn !== true) continue
         const eta = Number(m.actionable_eta)
         const bits = []
@@ -547,6 +545,7 @@ export function attentionNote(p, nowMs) {
   }
   for (const w of p.windows || []) {
     if (!w || w.indicative === true) continue
+    if (rowLevel(w, now) !== 'attention') continue
     consider(w.actionable_eta, false)
     consider(projectedFull(w, now), false)
   }
@@ -1120,7 +1119,7 @@ export function barContent(model) {
             borderRadius: 2,
             display: 'inline-block',
             flex: 'none',
-            background: e.watch ? WATCH_COLOR : e.attention ? WARN_COLOR : ACCENT_COLOR
+            background: e.attention ? WARN_COLOR : e.watch ? WATCH_COLOR : ACCENT_COLOR
           }
         })),
         jsx('span', {
@@ -1139,7 +1138,7 @@ export function barContent(model) {
     if (i) parts.push(' · ')
     parts.push(jsx('span', {
       key: e.id,
-      style: { color: e.watch ? WATCH_COLOR : e.attention ? WARN_COLOR : undefined },
+      style: { color: e.attention ? WARN_COLOR : e.watch ? WATCH_COLOR : undefined },
       children: e.code + ' ' + barValue(e, layout.mode === 'bare')
     }))
   })
@@ -1160,13 +1159,13 @@ export function tipBody(lines, stamp) {
                 borderRadius: 2,
                 display: 'inline-block',
                 flex: 'none',
-                background: line.watch ? WATCH_COLOR : line.attention ? WARN_COLOR : ACCENT_COLOR
+                background: line.attention ? WARN_COLOR : line.watch ? WATCH_COLOR : ACCENT_COLOR
               }
             }),
             jsx('span', { style: { fontWeight: 500, whiteSpace: 'nowrap' }, children: line.name }),
             jsx('span', { style: { opacity: 0.6, whiteSpace: 'nowrap' }, children: line.label }),
             jsx('span', {
-              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap', color: line.watch ? WATCH_COLOR : line.attention ? WARN_COLOR : undefined },
+              style: { marginLeft: 'auto', fontSize: 11, fontWeight: 500, ...MONO, whiteSpace: 'nowrap', color: line.attention ? WARN_COLOR : line.watch ? WATCH_COLOR : undefined },
               children: line.value
             })
           ]
