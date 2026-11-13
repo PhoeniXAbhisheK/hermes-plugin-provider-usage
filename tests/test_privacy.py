@@ -236,8 +236,10 @@ class PrivacyHarness(unittest.TestCase):
             "cached": API._cached_snapshot,
             "fetch": API._fetch_usage,
             "client": httpx.Client,
+            "plan_path": API._anthropic_plan_path,
         }
         API.HOME = self.home
+        API._anthropic_plan_path = lambda: self.home / "plan.json"
         API._secret = self._secret
         API._cached_snapshot = lambda provider: None
         API._fetch_usage = lambda provider: None
@@ -254,6 +256,7 @@ class PrivacyHarness(unittest.TestCase):
     def tearDown(self):
         httpx.Client = self._saved["client"]
         API.HOME = self._saved["home"]
+        API._anthropic_plan_path = self._saved["plan_path"]
         API._secret = self._saved["secret"]
         API._cached_snapshot = self._saved["cached"]
         API._fetch_usage = self._saved["fetch"]
@@ -294,6 +297,7 @@ class PrivacyHarness(unittest.TestCase):
                 "https://openrouter.ai/api/v1/key": (200, fixture("openrouter_key")),
                 "https://openrouter.ai/api/v1/credits": (200, fixture("openrouter_credits")),
                 "https://api.anthropic.com/api/oauth/usage": (200, fixture("anthropic_usage")),
+                "https://api.anthropic.com/api/oauth/profile": (200, {}),
                 "https://api.github.com/copilot_internal/user": (200, fixture("copilot_user")),
                 "https://api.deepseek.com/user/balance": (200, fixture("deepseek_balance")),
                 "https://api.kimi.com/coding/v1/usages": (200, fixture("kimi_usages")),
