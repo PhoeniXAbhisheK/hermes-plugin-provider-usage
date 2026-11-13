@@ -14,6 +14,7 @@ repository; the date is the release date.
 - [behaviour] Kimi booster balance renders as an indicative row that never flags or alerts (#58).
 - [behaviour] When Hermes answers for Anthropic, read the per-model weekly limits from the OAuth usage endpoint at most once every 15 minutes, so model rows do not depend on the DirectSDK fallback.
 - [behaviour] Read the Anthropic plan from the OAuth profile at most once a day when `~/.claude.json` has no plan, and cache only the plan fields.
+- [behaviour] A yellow watch level marks a window on pace to run out before its reset but not yet close; amber stays for close run-outs and alert levels.
 
 ### Fixed
 

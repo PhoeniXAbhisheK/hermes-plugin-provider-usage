@@ -5,6 +5,7 @@ import { loadPlugin } from './load-plugin.mjs'
 
 const NOW = 1_700_000_000_000
 const WARN_COLOR = 'var(--color-amber-600, oklch(0.666 0.179 58.318))'
+const WATCH_COLOR = 'var(--color-yellow-500, oklch(0.795 0.184 86.047))'
 const ACCENT_COLOR = 'var(--ui-accent)'
 
 const isoAt = ms => new Date(ms).toISOString()
@@ -1612,7 +1613,7 @@ test('statsFor reads windows and money in both modes', async () => {
     ['window runs out', { ...row, resets_at: new Date(now + 360000 * 1000).toISOString() }, 'remaining', [
       { label: 'Burn', value: '1.0%/h' },
       { label: 'At reset', value: 'runs out', warn: true },
-      { label: 'Pace', value: '1.0×' }
+      { label: 'Pace', value: '1.00×' }
     ]],
     ['no rate', { kind: 'window', used_pct: 55, eta_seconds: 0 }, 'used', [
       { label: 'Burn', value: '-' },
@@ -1694,6 +1695,7 @@ test('statsFor prints pace below one tenth with two decimals', async () => {
     )[2].value
   assert.equal(paceAt(180), '0.05×')
   assert.equal(paceAt(1512), '0.4×')
+  assert.equal(paceAt(3744), '1.04×')
   assert.equal(paceAt(7.2), '0×')
 })
 
@@ -1839,7 +1841,7 @@ test('the tooltip and the dot follow the chosen bar quota', async () => {
   }
   const chosen = barModel([p], ['zai'], null, 'used', null, { zai: '5h' })
   assert.equal(chosen.entries[0].label, '5h')
-  assert.deepEqual(tipEntries(chosen.entries), [{ name: 'Zai', label: '5h', value: '20%', attention: false }])
+  assert.deepEqual(tipEntries(chosen.entries), [{ name: 'Zai', label: '5h', value: '20%', attention: false, watch: false }])
   const row = providerRowElement(p, { mode: 'used', pins: [], barIds: ['zai'], choice: { zai: '5h' } })
   const grid = row.props.children[1]
   const cells = grid.props.children
@@ -2474,21 +2476,31 @@ test('projectedFull flags a fast window only after the ten percent guard', async
   assert.equal(projectedFull({ ...base, eta_seconds: 3600 }, now), null)
 })
 
-test('rowAttention uses one rule for warn, actionable eta and projection', async () => {
-  const { rowAttention, projectedFull } = await loadPlugin()
+test('rowLevel classifies attention, watch and neutral rows', async () => {
+  const { rowLevel, rowAttention } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
-  assert.equal(rowAttention(null, now), false)
-  assert.equal(rowAttention({ warn: false, actionable_eta: null }, now), false)
-  assert.equal(rowAttention({ warn: true, actionable_eta: null }, now), true)
-  assert.equal(rowAttention({ warn: false, actionable_eta: 0 }, now), true)
-  const projected = {
+  const row = extra => ({
     kind: 'window',
-    used_pct: 78,
-    duration_seconds: 5 * 3600,
-    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+    used_pct: 10,
+    duration_seconds: 1000,
+    resets_at: new Date(now + 900 * 1000).toISOString(),
+    ...extra
+  })
+  const cases = [
+    ['warn', row({ warn: true }), 'attention'],
+    ['10% of duration', row({ actionable_eta: 100 }), 'attention'],
+    ['40% of duration', row({ actionable_eta: 400 }), 'watch'],
+    ['no duration', row({ duration_seconds: null, actionable_eta: 400 }), 'attention'],
+    ['indicative', row({ indicative: true, actionable_eta: 10 }), null],
+    ['not started', row({ used_pct: 0, resets_at: null, actionable_eta: 400 }), null],
+    ['no run-out', row(), null]
+  ]
+  assert.equal(rowLevel(null, now), null)
+  for (const [name, value, expected] of cases) {
+    assert.equal(rowLevel(value, now), expected, name)
   }
-  assert.ok(projectedFull(projected, now) > 0)
-  assert.equal(rowAttention(projected, now), true)
+  assert.equal(rowAttention(row({ actionable_eta: 100 }), now), true)
+  assert.equal(rowAttention(row({ actionable_eta: 400 }), now), false)
 })
 
 test('providerAttention and attentionNote see a projected run-out', async () => {
@@ -2512,11 +2524,6 @@ test('providerAttention and attentionNote see a projected run-out', async () => 
     windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 600 }]
   }
   assert.equal(attentionNote(withActionable, now), 'full ~10m')
-  const laterActionable = {
-    status: 'ok',
-    windows: [projected, { kind: 'window', used_pct: 10, actionable_eta: 3600 }]
-  }
-  assert.equal(attentionNote(laterActionable, now), 'full ~34m')
 })
 
 test('an indicative row is neutral while a normal row still flags', async () => {
@@ -2588,94 +2595,85 @@ test('an indicative row is neutral while a normal row still flags', async () => 
   assert.equal(findNodes(panel, n => n.type === 'button' && nodeText(n).includes('Alert')).length, 0)
 })
 
-test('a long low-use window is not in Needs attention and has no note', async () => {
-  const { providerAttention, attentionNote, groupProviders } = await loadPlugin()
+test('a watch row is yellow and an attention row stays amber', async () => {
+  const {
+    providerWatch,
+    providerAttention,
+    groupProviders,
+    providerRowElement,
+    barModel,
+    barContent,
+    expandedPanel,
+    checkAlerts,
+    setAlert,
+    default: plugin
+  } = await loadPlugin()
   const now = Date.parse('2026-11-01T00:00:00Z')
-  const p = {
-    id: 'x',
-    status: 'ok',
-    windows: [
-      {
-        key: 'monthly',
-        label: 'Monthly',
-        kind: 'window',
-        used_pct: 2,
-        warn: false,
-        actionable_eta: null,
-        duration_seconds: 30 * 86400,
-        resets_at: new Date(now + 20 * 86400 * 1000).toISOString()
-      }
-    ]
+  const watchRow = {
+    key: 'monthly',
+    label: 'Monthly',
+    kind: 'window',
+    used_pct: 90,
+    warn: false,
+    duration_seconds: 30 * 86400,
+    actionable_eta: 10 * 86400,
+    resets_at: new Date(now + 20 * 86400 * 1000).toISOString()
   }
-  assert.equal(providerAttention(p, now), false)
-  assert.equal(attentionNote(p, now), '')
-  assert.equal(groupProviders([p], 'all', [], now)[0].title, 'Providers')
-})
-
-test('a projected quota and the bar use the warn colour', async () => {
-  const { providerRowElement, barModel, barContent } = await loadPlugin()
-  const now = Date.now()
-  const row = {
+  const attentionRow = {
     key: '5h',
     label: '5h',
     kind: 'window',
-    used_pct: 78,
-    duration_seconds: 5 * 3600,
-    resets_at: new Date(now + 3 * 3600 * 1000).toISOString()
+    used_pct: 20,
+    warn: true
   }
-  const p = { id: 'x', name: 'X', status: 'ok', windows: [row] }
-  const node = providerRowElement(p, { mode: 'used', pins: [], barIds: [], now: now })
-  const value = findNodes(node, n => n.type === 'span' && nodeText(n) === '78%')
-  assert.equal(value.length, 1)
-  assert.equal(value[0].props.style.color, WARN_COLOR)
-  assert.equal(findNodes(node, n => n.type === 'span' && n.props.style && n.props.style.background === WARN_COLOR).length, 1)
-  const model = barModel([p], ['x'], null, 'used', null, {})
-  assert.equal(model.entries[0].attention, true)
-  const content = barContent(model)
-  assert.ok(findNodes(content, n => n.props && n.props.style && n.props.style.color === WARN_COLOR).length >= 1)
-})
+  const watchP = { id: 'watch', name: 'Watch', status: 'ok', windows: [watchRow] }
+  const mixed = { id: 'mixed', name: 'Mixed', status: 'ok', windows: [watchRow, attentionRow] }
+  const restore = frozen(now)
+  try {
+    assert.equal(providerWatch(watchP, now), true)
+    assert.equal(providerAttention(watchP, now), false)
+    assert.equal(groupProviders([watchP], 'all', [], now)[0].title, 'Providers')
+    assert.equal(groupProviders([mixed], 'all', [], now)[0].title, 'Needs attention')
+    const groups = groupProviders([watchP, mixed], 'all', [], now)
+    assert.deepEqual(groups.map(g => g.title), ['Needs attention', 'Everything else'])
+    assert.deepEqual(groups.map(g => g.rows.map(p => p.id)), [['mixed'], ['watch']])
 
-test('warn and accent bars and tip swatches use inline colours', async () => {
-  const { providerRowElement, tipBody } = await loadPlugin()
-  const loud = providerRowElement(
-    { id: 'zai', name: 'Zai', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20, warn: true }] },
-    { mode: 'used', pins: [], barIds: [], expanded: false }
-  )
-  const quiet = providerRowElement(
-    { id: 'zai', name: 'Zai', status: 'ok', windows: [{ key: '5h', label: '5h', used_pct: 20, warn: false }] },
-    { mode: 'used', pins: [], barIds: [], expanded: false }
-  )
-  const bars = node =>
-    findNodes(node, n => n.props && n.props.style && n.props.style.height === '100%' && n.props.style.background)
-  assert.equal(bars(loud)[0].props.style.background, WARN_COLOR)
-  assert.equal(bars(quiet)[0].props.style.background, ACCENT_COLOR)
-  const tip = tipBody(
-    [
-      { name: 'Zai', label: '5h', value: '20%', attention: false },
-      { name: 'Claude', label: 'Weekly', value: '95%', attention: true }
-    ],
-    '09:41'
-  )
-  const swatches = findNodes(tip, n => n.props && n.props.style && n.props.style.width === 4 && n.props.style.height === 10)
-  assert.deepEqual(swatches.map(node => node.props.style.background), [ACCENT_COLOR, WARN_COLOR])
-})
+    const node = providerRowElement(watchP, { mode: 'used', pins: [], barIds: [], now })
+    const value = findNodes(node, n => n.type === 'span' && nodeText(n) === '90%')
+    assert.equal(value[0].props.style.color, WATCH_COLOR)
+    const note = findNodes(node, n =>
+      n.type === 'span' && typeof n.props.children === 'string' && n.props.children.startsWith('on pace,')
+    )
+    assert.equal(note[0].props.children, 'on pace, full ~10d')
+    assert.equal(note[0].props.style.color, WATCH_COLOR)
+    const bars = findNodes(node, n => n.props && n.props.style && n.props.style.height === '100%')
+    assert.equal(bars[0].props.style.background, WATCH_COLOR)
 
-test('groupProviders puts attention first and keeps backend order', async () => {
-  const { groupProviders } = await loadPlugin()
-  const quiet = { id: 'a', status: 'ok', windows: [{ warn: false, actionable_eta: null }] }
-  const loud = { id: 'b', status: 'ok', windows: [{ warn: true }] }
-  const alsoLoud = { id: 'c', status: 'ok', money: [{ warn: false, actionable_eta: 60 }] }
-  const groups = groupProviders([quiet, loud, alsoLoud], 'all', null)
-  assert.deepEqual(groups.map(g => g.title), ['Needs attention', 'Everything else'])
-  assert.deepEqual(groups[0].rows.map(p => p.id), ['b', 'c'])
-  assert.deepEqual(groups[1].rows.map(p => p.id), ['a'])
-  const calm = groupProviders([quiet], 'all', null)
-  assert.deepEqual(calm.map(g => g.title), ['Providers'])
-  assert.deepEqual(calm[0].rows.map(p => p.id), ['a'])
-  const onlyLoud = groupProviders([loud], 'all', null)
-  assert.deepEqual(onlyLoud.map(g => g.title), ['Needs attention'])
-})
+    const model = barModel([watchP], ['watch'], null, 'used', null, {})
+    assert.equal(model.entries[0].watch, true)
+    assert.equal(model.entries[0].attention, false)
+    assert.ok(findNodes(barContent(model), n => n.props.style.color === WATCH_COLOR).length)
 
+    const panel = expandedPanel(watchP, { mode: 'used', choice: {}, barIds: [], now })
+    assert.equal(findNodes(panel, n => n.type === 'svg' && n.props.style.color === WATCH_COLOR).length, 1)
+    const reset = findNodes(panel, n => n.type === 'span' && nodeText(n) === 'runs out')
+    assert.equal(reset[0].props.style.color, WATCH_COLOR)
+    assert.equal(findNodes(panel, n => n.type === 'span' && nodeText(n) === '1.00×').length, 0)
+
+    const mixedNode = providerRowElement(mixed, { mode: 'used', pins: [], barIds: [], now })
+    assert.ok(findNodes(mixedNode, n => n.type === 'span' && nodeText(n) === '90%' && n.props.style.color === WATCH_COLOR).length)
+    assert.ok(findNodes(mixedNode, n => n.type === 'span' && nodeText(n) === '20%' && n.props.style.color === WARN_COLOR).length)
+    assert.ok(findNodes(mixedNode, n => n.props && n.props.style && n.props.style.background === WARN_COLOR).length)
+
+    const { ctx, notices } = fakeContext()
+    plugin.register(ctx)
+    setAlert('watch', 'monthly', 80)
+    checkAlerts({ providers: [watchP] })
+    assert.equal(notices.length, 0)
+  } finally {
+    restore()
+  }
+})
 test('groupProviders keeps only pinned ids in pinned view', async () => {
   const { groupProviders } = await loadPlugin()
   const a = { id: 'a', status: 'ok', windows: [] }
@@ -2890,8 +2888,8 @@ test('tipEntries lists one line per bar provider in bar order', async () => {
     { code: 'b', name: 'Beta', label: 'Weekly', value: '99%', used_pct: 99, attention: true }
   ]
   assert.deepEqual(tipEntries(entries), [
-    { name: 'Beta', label: 'Weekly', value: '99%', attention: true },
-    { name: 'Alpha', label: '5h', value: '1%', attention: false }
+    { name: 'Beta', label: 'Weekly', value: '99%', attention: true, watch: false },
+    { name: 'Alpha', label: '5h', value: '1%', attention: false, watch: false }
   ])
 })
 
