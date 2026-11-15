@@ -21,11 +21,11 @@ Credential sources (read-only):
   surfaces as unavailable; re-auth in the Codex CLI).
 - OpenRouter: ``OPENROUTER_API_KEY`` from the Hermes secret scope, with a
   read-only fallback to ``$HERMES_HOME/.env``.
-- Anthropic: resolved by Hermes' own read-only account-usage helper, then by
-  the ``claude-subscription-directsdk-experimental`` provider when Nous'
-  claude-subscription-directsdk plugin is installed (it asks Claude Code for
-  its plan limits; the token never reaches this plugin), then by the Claude
-  Code OAuth token in ``~/.claude/.credentials.json``, then by Hermes' own
+- Anthropic: resolved by the ``claude-subscription-directsdk-experimental``
+  provider when Nous' claude-subscription-directsdk plugin is installed (it
+  asks Claude Code for its plan limits under its current login; the token
+  never reaches this plugin), then by Hermes' own read-only account-usage
+  helper, then by the Claude Code OAuth token in ``~/.claude/.credentials.json``, then by Hermes' own
   Anthropic OAuth grant. A refused helper read keeps the last reading for up
   to six hours, marked stale. The plan tag comes from Claude Code's local
   ``oauthAccount``, else the daily plan cache, else one profile read per day.
@@ -38,7 +38,7 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via Hermes, then DirectSDK, else the Claude Code or Hermes OAuth token)
+- https://api.anthropic.com/api/oauth/usage (via DirectSDK, then Hermes, else the Claude Code or Hermes OAuth token)
 - https://api.anthropic.com/api/oauth/profile (only when the local plan is absent, at most once a day)
 - https://portal.nousresearch.com/api/oauth/account (via Hermes' Nous sign-in)
 - https://api.deepseek.com/user/balance
