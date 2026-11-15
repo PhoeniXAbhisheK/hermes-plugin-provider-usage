@@ -1344,34 +1344,49 @@ def _anthropic_plan_tag():
     return "Subscription"
 
 
-def _anthropic_helper():
-    """Hermes anthropic reading, then the DirectSDK provider.
+def _from_directsdk(payload):
+    """A DirectSDK reading under the Anthropic card id, marked by its source."""
+    return dict(payload, id="anthropic", _anthropic_via_directsdk=True)
 
-    A fresh anthropic reading wins without asking DirectSDK. Otherwise a fresh
-    DirectSDK reading replaces a stale anthropic one; when neither is fresh, the
-    anthropic reading is kept and DirectSDK is used only when it is absent.
+
+def _anthropic_helper():
+    """DirectSDK reading, then the Hermes anthropic provider.
+
+    DirectSDK asks the Claude Code CLI for its own plan limits, so it reports
+    the account that CLI is signed in to now. Hermes' anthropic helper resolves
+    a token from disk, which can still belong to an account the user has since
+    signed out of. A fresh DirectSDK reading therefore wins without asking the
+    anthropic helper. Otherwise a fresh anthropic reading replaces a stale
+    DirectSDK one; when neither is fresh, the DirectSDK reading is kept and the
+    anthropic one is used only when it is absent. Without the DirectSDK plugin
+    its helper answers None and the order is the anthropic helper alone.
     DirectSDK rows keep the Anthropic card id.
     """
+    direct = _hermes_usage(DIRECTSDK_PROVIDER)
+    if direct is not None and not direct.get("stale"):
+        return _from_directsdk(direct)
     anthropic = _hermes_usage("anthropic")
     if anthropic is not None and not anthropic.get("stale"):
         return anthropic
-    direct = _hermes_usage(DIRECTSDK_PROVIDER)
-    if direct is not None and not direct.get("stale"):
-        return dict(direct, id="anthropic")
+    if direct is not None:
+        return _from_directsdk(direct)
     if anthropic is not None:
         return anthropic
-    if direct is not None:
-        return dict(direct, id="anthropic")
     return None
 
 
 def fetch_anthropic():
-    """Anthropic quota windows: Hermes sign-in, DirectSDK, then the token on disk.
+    """Anthropic quota windows: DirectSDK, Hermes sign-in, then the token on disk.
 
     A helper payload does not carry the per-model limits[] rows. Read them
     separately at a throttled pace, or use the raw body when a helper snapshot
     starts carrying one. A helper snapshot plan wins; otherwise the local plan,
     the daily cache, or one profile read supplies the tag.
+
+    A DirectSDK reading already carries the per-model windows the CLI reports,
+    and the token on disk may belong to another account, so neither the extra
+    limits read nor the profile read uses that token for it: its tag comes from
+    the snapshot or the local plan only.
     """
     direct_ok = [False]
 
@@ -1383,15 +1398,20 @@ def fetch_anthropic():
     payload = _helper_or_direct("anthropic", direct, helper=_anthropic_helper)
     if not isinstance(payload, dict):
         return payload
+    via_directsdk = bool(payload.pop("_anthropic_via_directsdk", False))
     if not payload.get("tag"):
         try:
-            payload["tag"] = _anthropic_plan_tag()
+            if via_directsdk:
+                local = _claude_json_plan()
+                payload["tag"] = _plan_tag_for(local) if local is not None else "Subscription"
+            else:
+                payload["tag"] = _anthropic_plan_tag()
         except Exception:  # noqa: BLE001 - plan lookup never breaks the card
             logging.getLogger(__name__).debug("anthropic plan lookup failed", exc_info=True)
             payload["tag"] = "Subscription"
     if payload.pop("_anthropic_limits_raw", False):
         return payload
-    if direct_ok[0]:
+    if direct_ok[0] or via_directsdk:
         return payload
     _merge_anthropic_limit_rows(payload, _anthropic_limits_cached())
     return payload
