@@ -758,52 +758,33 @@ class AnthropicFetcherTest(unittest.TestCase):
                         p["windows"][0 if not base else 1]["resets_at"], expected_reset
                     )
 
-    def test_directsdk_wins_over_a_fresh_anthropic_reading(self):
-        # The anthropic helper resolves a token from disk that can belong to a
-        # signed-out account; DirectSDK asks the CLI's current login.
-        direct = self._reading("DirectSDK 5h")
-        direct["id"] = API.DIRECTSDK_PROVIDER
-        asked = self._hermes_answers(
-            {API.DIRECTSDK_PROVIDER: direct, "anthropic": self._reading("Hermes 5h")}
+    def test_helper_order_and_directsdk_tags(self):
+        ds = API.DIRECTSDK_PROVIDER
+        r = self._reading
+        D, H = "DirectSDK 5h", "Hermes 5h"
+        direct = r(D)
+        direct["id"] = ds
+        cases = (
+            ("fresh", direct, r(H), [ds], D, "Pro", False),
+            ("stale", r(D, stale=True), r(H), [ds, "anthropic"], H, "Pro", False),
+            ("absent", None, r(H), [ds, "anthropic"], H, "Pro", False),
+            ("no plan", direct, None, [ds], D, "Subscription", True),
         )
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
         self._mock_http({"limits": [self._limit()]})
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, [API.DIRECTSDK_PROVIDER])
-        self.assertEqual(p["id"], "anthropic")
-        self.assertEqual([w["label"] for w in p["windows"]], ["DirectSDK 5h"])
-        self.assertNotIn("_anthropic_via_directsdk", p)
-        # neither the extra limits read nor the profile read uses the disk token
-        self.assertEqual(self.calls, [])
-        self.assertEqual(p["tag"], "Pro")  # local ~/.claude.json plan
-
-    def test_directsdk_tag_without_local_plan_is_subscription(self):
-        self.claude_json.unlink()
-        self._hermes_answers({API.DIRECTSDK_PROVIDER: self._reading("DirectSDK 5h")})
-        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
-        self._mock_http({"organization": {"organization_type": "claude_max"}})
-        p = API.fetch_anthropic()
-        self.assertEqual(p["tag"], "Subscription")
-        self.assertEqual(self.calls, [])
-
-    def test_fresh_anthropic_replaces_a_stale_directsdk_reading(self):
-        asked = self._hermes_answers(
-            {
-                API.DIRECTSDK_PROVIDER: self._reading("DirectSDK 5h", stale=True),
-                "anthropic": self._reading("Hermes 5h"),
-            }
-        )
-        API._anthropic_limits.update(attempt=time.time())  # keep the extra read idle
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, [API.DIRECTSDK_PROVIDER, "anthropic"])
-        self.assertEqual([w["label"] for w in p["windows"]], ["Hermes 5h"])
-
-    def test_without_directsdk_the_anthropic_reading_answers(self):
-        asked = self._hermes_answers({"anthropic": self._reading("Hermes 5h")})
         API._anthropic_limits.update(attempt=time.time())
-        p = API.fetch_anthropic()
-        self.assertEqual(asked, [API.DIRECTSDK_PROVIDER, "anthropic"])
-        self.assertEqual([w["label"] for w in p["windows"]], ["Hermes 5h"])
+        for name, direct_reading, anthropic_reading, order, label, tag, no_plan in cases:
+            with self.subTest(name):
+                if no_plan:
+                    self.claude_json.unlink()
+                asked = self._hermes_answers({ds: direct_reading, "anthropic": anthropic_reading})
+                p = API.fetch_anthropic()
+                self.assertEqual(asked, order)
+                self.assertEqual(p["id"], "anthropic")
+                self.assertEqual([w["label"] for w in p["windows"]], [label])
+                self.assertNotIn("_anthropic_via_directsdk", p)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(p["tag"], tag)
 
     def test_oauth_fallback_ratio_windows(self):
         asked = self._hermes_answers({})
