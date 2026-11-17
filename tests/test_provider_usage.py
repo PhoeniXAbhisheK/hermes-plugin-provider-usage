@@ -772,11 +772,14 @@ class AnthropicFetcherTest(unittest.TestCase):
         )
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
         self._mock_http({"limits": [self._limit()]})
-        API._anthropic_limits.update(attempt=time.time())
         for name, direct_reading, anthropic_reading, order, label, tag, no_plan in cases:
             with self.subTest(name):
                 if no_plan:
                     self.claude_json.unlink()
+                if direct_reading is direct:
+                    API._anthropic_limits.update(attempt=0.0, hold=0.0)
+                else:
+                    API._anthropic_limits.update(attempt=time.time())
                 asked = self._hermes_answers({ds: direct_reading, "anthropic": anthropic_reading})
                 p = API.fetch_anthropic()
                 self.assertEqual(asked, order)
