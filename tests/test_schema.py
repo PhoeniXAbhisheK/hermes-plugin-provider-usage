@@ -212,7 +212,7 @@ def seed_fresh_history(test):
 
 
 class Base(unittest.TestCase):
-    NAMES = ("FETCHERS", "FETCH_ORDER", "_secret", "_http_json", "_read_text")
+    NAMES = ("FETCHERS", "FETCH_ORDER", "_secret", "_http_json", "_read_text", "_agy_binary")
 
     def setUp(self):
         self.saved = {name: getattr(API, name) for name in self.NAMES}
@@ -222,6 +222,7 @@ class Base(unittest.TestCase):
         self.saved_inflight = dict(API._inflight)
         for name in ("_holds", "_last_good", "_history"):
             getattr(API, name).clear()
+        API._agy_binary = lambda: None  # never run a real agy
         API._inflight.clear()
         API._HOST_WINNERS.clear()
         self.addCleanup(self.restore)

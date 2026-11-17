@@ -39,6 +39,7 @@ EXPECTED = [
     ("kimi-coding", "Kimi", "Coding", "kimi"),
     ("minimax", "MiniMax", "Coding", "minimax"),
     ("deepseek", "DeepSeek", "Balance", "deepseek"),
+    ("antigravity-oauth", "Google Antigravity", "agy", "agy"),
 ]
 
 

@@ -2635,6 +2635,8 @@ test('barProviderIds follows the session when nothing is pinned, and Unpin all r
   assert.deepEqual(barProviderIds([], ids, 'zai'), ['zai'])
   assert.deepEqual(barProviderIds(['nous'], ids, 'anthropic'), ['nous'])
   assert.deepEqual(barProviderIds(null, ids, 'gemini'), [])
+  assert.deepEqual(barProviderIds(null, ['zai', 'antigravity-oauth'], 'antigravity-oauth'), ['antigravity-oauth'])
+  assert.deepEqual(barProviderIds(null, ['zai', 'antigravity-oauth'], 'Antigravity-OAuth'), ['antigravity-oauth'])
   assert.deepEqual(barProviderIds(null, ids, null), [])
 })
 

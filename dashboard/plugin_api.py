@@ -7,7 +7,8 @@ bar; provider API calls happen here, on the user's machine.
 Providers appear only when their credentials are usable; unconfigured
 providers are omitted (never rendered as errors). Credential handling is
 read-only throughout: no writes, no token refresh, no browser cookies, no
-credential CLIs.
+credential CLIs (the one CLI it runs, ``agy``, reports quota and holds the
+sign-in itself; see Google Antigravity below).
 
 Credential sources (read-only):
 
@@ -30,6 +31,10 @@ Credential sources (read-only):
 - Nous: resolved by Hermes' own read-only account-usage helper.
 - DeepSeek / Kimi / Z.AI / MiniMax / GitHub Copilot: provider keys from the
   Hermes secret scope (never ``os.environ``), read-only.
+- Google Antigravity (``antigravity-oauth``): no credential is read. The
+  ``agy`` CLI (PATH, else ``~/.local/bin/agy``; ``agy.exe`` only on Windows)
+  answers ``agy --version`` and then, for 1.1.11 or newer only,
+  ``agy -p /usage --output-format json``.
 
 Endpoints hit (GET, machine credentials attached):
 
@@ -47,8 +52,9 @@ Endpoints hit (GET, machine credentials attached):
   subscription keys are region-bound
 - https://api.github.com/copilot_internal/user
 
-All provider HTTPS calls use httpx in-process; this plugin spawns no
-subprocesses. The DirectSDK provider's own usage hook runs the Claude Code CLI
+All provider HTTPS calls use httpx in-process. The one subprocess is ``agy``
+for Google Antigravity: fixed argv, no shell, no stdin, timeouts, output parsed
+and never logged. The DirectSDK provider's own usage hook runs the Claude Code CLI
 behind a zero-inference admission gate; that is the provider's code.
 
 Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
@@ -62,7 +68,11 @@ import contextvars
 import json
 import logging
 import math
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -91,6 +101,10 @@ HELPER_TIMEOUT_S = 10.0  # one account-usage helper read, wall clock
 DEADLINE_S = 30.0  # one collection, wall clock
 PROVIDER_BUDGET_S = 12.0  # one provider inside that collection, wall clock
 HOME = Path.home()
+_IS_WINDOWS = os.name == "nt"
+AGY_MIN_VERSION = (1, 1, 11)  # older agy treats /usage as an inference prompt
+AGY_VERSION_TIMEOUT_S = 3.0
+AGY_USAGE_TIMEOUT_S = 8.0  # both calls stay inside PROVIDER_BUDGET_S
 
 # Wall-clock budget for the provider currently running. Workers copy the caller's
 # context, so a value set per worker stays inside that worker.
@@ -1657,6 +1671,114 @@ def fetch_minimax():
     return {"id": "minimax", "status": "ok", "windows": windows}
 
 
+def _agy_binary():
+    """The official ``agy`` executable, or None. PATH first, then the installer's
+    user location on Unix. Windows takes ``agy.exe`` only, never a .cmd or .bat
+    wrapper (those would need a shell)."""
+    if _IS_WINDOWS:
+        found = shutil.which("agy.exe")
+        return found if found and found.lower().endswith(".exe") else None
+    found = shutil.which("agy")
+    if found:
+        return found
+    path = HOME / ".local" / "bin" / "agy"
+    return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+
+
+def _agy_run(argv, timeout):
+    """One fixed-argv agy call: no shell, no stdin, bounded, stderr dropped."""
+    try:
+        return subprocess.run(
+            argv,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=tempfile.gettempdir(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise _Timeout("timeout") from None
+    except OSError:
+        raise _ProviderError("agy could not run") from None
+
+
+_AGY_WINDOW_SECONDS = {"5h": 5 * 3600, "weekly": 7 * 86400}  # only lengths agy names
+
+
+def fetch_antigravity_oauth():
+    """Google Antigravity quota via ``agy -p /usage --output-format json``.
+
+    Reads no credential: agy holds the sign-in. The version gate comes first
+    because agy before 1.1.11 would send "/usage" to the model. Each quota group
+    stays its own set of rows; groups are never summed. Raw agy text is never
+    logged or shown.
+    """
+    agy = _agy_binary()
+    if not agy:
+        raise _Skip("antigravity-oauth")
+    try:
+        done = _agy_run([agy, "--version"], AGY_VERSION_TIMEOUT_S)
+    except (_Timeout, _ProviderError):
+        raise _Skip("antigravity-oauth") from None
+    found = re.fullmatch(
+        r"(?:agy\s+)?v?([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})", done.stdout.strip()
+    )
+    if done.returncode != 0 or not found or tuple(map(int, found.groups())) < AGY_MIN_VERSION:
+        raise _Skip("antigravity-oauth")  # unknown counts as too old
+    done = _agy_run([agy, "-p", "/usage", "--output-format", "json"], AGY_USAGE_TIMEOUT_S)
+    try:
+        body = json.loads(done.stdout)
+    except ValueError:
+        body = None
+    command = body.get("command") if isinstance(body, dict) else None
+    data = command.get("data") if isinstance(command, dict) else None
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if (
+        done.returncode != 0
+        or not isinstance(body, dict)
+        or body.get("status") != "SUCCESS"
+        or body.get("num_turns") != 0  # a model turn means /usage was not a command
+        or not isinstance(groups, list)
+        or command.get("name") != "usage"
+    ):
+        raise _ProviderError("agy /usage failed")
+    windows = []
+    for group in groups:
+        buckets = group.get("buckets") if isinstance(group, dict) else None
+        name = _clean_error_text(group.get("name") or "", cap=40) if buckets else ""
+        for bucket in buckets if isinstance(buckets, list) else ():
+            if not isinstance(bucket, dict):
+                continue
+            remaining = _num(bucket.get("remaining_fraction"))
+            span = str(bucket.get("window") or "").strip().lower()
+            if remaining is None or not span:
+                continue
+            seconds = _AGY_WINDOW_SECONDS.get(span)
+            reset = bucket.get("reset_time")
+            row = _window(
+                "%s %s"
+                % (
+                    name,
+                    _duration_match(seconds)[0] if seconds else _clean_error_text(span, cap=16),
+                ),
+                (1.0 - remaining) * 100.0,
+                reset if _epoch_from_iso(reset) is not None else None,
+                duration=seconds,
+                scope="model",
+                model=name,
+            )
+            if row is not None:
+                windows.append(row)
+    if not windows:
+        raise _ProviderError("agy /usage returned no quota groups")
+    return {"id": "antigravity-oauth", "status": "ok", "windows": windows}
+
+
 # Every provider the panel knows, in display order. The three names below derive
 # from it; runtime code reads those names, so a test can replace them.
 PROVIDERS = {
@@ -1709,6 +1831,12 @@ PROVIDERS = {
         "tag": "Balance",
         "code": "deepseek",
         "fetch": fetch_deepseek,
+    },
+    "antigravity-oauth": {
+        "name": "Google Antigravity",
+        "tag": "agy",
+        "code": "agy",
+        "fetch": fetch_antigravity_oauth,
     },
 }
 
