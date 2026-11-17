@@ -3,6 +3,13 @@
 Notable changes to the Provider Usage plugin. Versions follow the tags in this
 repository; the date is the release date.
 
+## 0.4.3
+
+- Google Antigravity (`antigravity-oauth`): quota groups such as Gemini and
+  Claude/GPT, read with `agy -p /usage --output-format json` after an
+  `agy --version` check (1.1.11 or newer). This is the plugin's only
+  subprocess; the privacy notes in the README say so.
+
 ## 0.4.2 (2026-11-18)
 
 Panel:
