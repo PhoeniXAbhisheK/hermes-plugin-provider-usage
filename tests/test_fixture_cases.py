@@ -8,6 +8,7 @@ file on disk is missing from it, so an unused file cannot satisfy the meta-test.
 
 import importlib.util
 import json
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -79,6 +80,10 @@ CASES = {
         ("ok_multi_currency.json", "http", "ok"),
         ("skip_no_key.json", "no_key", "skip"),
     ],
+    "antigravity-oauth": [
+        ("ok.json", "agy", "ok"),
+        ("error_not_success.json", "agy", "error"),
+    ],
 }
 
 
@@ -118,7 +123,9 @@ class FixtureCaseTest(unittest.TestCase):
             "_fetch_usage": API._fetch_usage,
             "_hermes_usage": API._hermes_usage,
             "_claude_code_oauth_token": API._claude_code_oauth_token,
+            "_agy_binary": API._agy_binary,
         }
+        self._saved_run = subprocess.run
         self._saved_modules = {
             name: sys.modules.get(name)
             for name in ("agent.account_usage", "hermes_cli.copilot_auth")
@@ -146,6 +153,7 @@ class FixtureCaseTest(unittest.TestCase):
         API._read_text = lambda path: '{"tokens": {"access_token": "sentinel-token"}}'
         API._hermes_usage = lambda provider: None
         API._claude_code_oauth_token = lambda: None
+        API._agy_binary = lambda: None  # no case may reach a real agy
         API._helper_cooldown.clear()
         API._holds.clear()
         API._last_good.clear()
@@ -159,6 +167,7 @@ class FixtureCaseTest(unittest.TestCase):
     def _restore(self):
         for name, value in self._saved.items():
             setattr(API, name, value)
+        subprocess.run = self._saved_run
         for name, module in self._saved_modules.items():
             if module is None:
                 sys.modules.pop(name, None)
@@ -201,6 +210,14 @@ class FixtureCaseTest(unittest.TestCase):
             API._claude_code_oauth_token = lambda: None
             if pid == "copilot":
                 self._copilot_stub(token=None)
+        elif mode == "agy":
+            API._agy_binary = lambda: "agy"
+
+            def run(argv, **kwargs):
+                out = "1.5.10" if argv[1:] == ["--version"] else json.dumps(body)
+                return subprocess.CompletedProcess(argv, 0, out, "")
+
+            subprocess.run = run
         elif mode == "snapshot":
             API._hermes_usage = REAL_HERMES_USAGE
             API._cached_snapshot = lambda provider: snapshot_from(body)
