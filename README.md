@@ -34,7 +34,10 @@ providers are omitted from the panel entirely.
 - **Expanded row**: click a provider for one tab per window, a usage chart over
   the whole window (now marker, projected path, alert line), and Burn, At reset
   and Pace figures.
-- **Near-limit tint**: yellow means on pace to run out before the reset but not close; amber means close to the run-out, at the alert level, or a row with no known duration. Yellow never enters Needs attention or fires an alert.
+- **Near-limit tint**: yellow means a window is on pace to run out before its
+  reset but is not close yet; amber means it is close to the run-out, at the
+  alert level, or has a run-out with no known duration. Yellow never enters
+  Needs attention or fires an alert.
 - **Alerts**: one desktop notification when a window crosses its alert level,
   set per window with "Alert at" (50, 70, 80, 90, 95 or off; 80 by default).
   Deduped per window cycle (keyed by the reset time) and once a day for the key
@@ -57,7 +60,7 @@ providers are omitted from the panel entirely.
 | OpenCode | `OPENCODE_GO_API_KEY` via the Hermes secret scope, else the `opencode-go` entry of `~/.local/share/opencode/auth.json` (never the Zen key; without a Go plan the card stays hidden; the tag reads Go) | `https://opencode.ai/zen/go/v1/usage` |
 | OpenAI Codex | Hermes' Codex sign-in (account-usage helper), else the OAuth access token in `~/.codex/auth.json`; the `OPENAI_API_KEY` entry in that file is never used. A reading more than ten minutes old is refreshed with that token, at most once per five minutes | `https://chatgpt.com/backend-api/wham/usage` |
 | OpenRouter | `OPENROUTER_API_KEY` via the Hermes secret scope; a balance read needs a management key, so a normal key shows the key cap only | `https://openrouter.ai/api/v1/key`, `https://openrouter.ai/api/v1/credits` |
-| Anthropic | Nous' [Claude Subscription DirectSDK] plugin when installed (Claude Code reports its own plan limits for the account it is signed in to now), then Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`, then Hermes' own Anthropic OAuth grant (`~/.hermes/.anthropic_oauth.json`); a refused helper read keeps the last reading for up to six hours, marked stale, and once that reading is more than ten minutes old the direct token is tried at most once per five minutes. The tag comes from Claude Code's local `oauthAccount`, else a cached profile plan, else one profile read per day: Pro, Max, Max 5x, Max 20x, Team, Enterprise, Ultra or Subscription. When Hermes answers for Anthropic, the backend also reads the same OAuth usage endpoint at most once every 15 minutes for per-model weekly limits; a DirectSDK reading carries its own per-model rows, so it gets no extra read and its tag comes from the local `oauthAccount` only. Per-model weekly limits in the OAuth reply render as model rows, for example Fable | `https://api.anthropic.com/api/oauth/usage`, `https://api.anthropic.com/api/oauth/profile` |
+| Anthropic | Nous' [Claude Subscription DirectSDK] plugin when installed (Claude Code reports its own plan limits for the account it is signed in to now), then Hermes' Claude Code sign-in (account-usage helper), else the Claude Code OAuth token in `~/.claude/.credentials.json`, then Hermes' own Anthropic OAuth grant (`<HERMES_HOME>/.anthropic_oauth.json`); a refused helper read keeps the last reading for up to six hours, marked stale, and once that reading is more than ten minutes old the direct token is tried at most once per five minutes. The tag comes from Claude Code's local `oauthAccount`, else a cached profile plan, else one profile read per day: Pro, Max, Max 5x, Max 20x, Team, Enterprise, other plan names or Subscription. When Hermes answers for Anthropic, the backend also reads the same OAuth usage endpoint at most once every 15 minutes for per-model weekly limits; a DirectSDK reading carries its own per-model rows, so it gets no extra read and its tag comes from the local `oauthAccount` only. Per-model weekly limits in the OAuth reply render as model rows, for example Fable | `https://api.anthropic.com/api/oauth/usage`, `https://api.anthropic.com/api/oauth/profile` |
 | GitHub Copilot | Hermes' Copilot token resolver, on Hermes 0.22.5 or older only. Hermes 0.22.6 moved Copilot out of core into the `github-copilot` plugin, which does not report usage, so the card stays hidden there | `https://api.github.com/copilot_internal/user` |
 | Nous | Hermes' Nous Portal sign-in | `https://portal.nousresearch.com/api/oauth/account` (subscription windows, else the credit balance as money rows) |
 | Z.AI / GLM | `ZAI_API_KEY` or `GLM_API_KEY` | `https://api.z.ai/api/monitor/usage/quota/limit` |
@@ -90,7 +93,7 @@ OpenCode Zen (the metered API) is not tracked yet; this card covers the Go subsc
   check queries GitHub's internal Copilot usage endpoint presenting the VS Code /
   Copilot client identity (`Editor-Version`, `User-Agent`), the same identity the
   Copilot editor plugin presents.
-- **Anthropic plan tag.** The local `~/.claude.json` `oauthAccount` plan wins with no network. Without it, the backend calls `https://api.anthropic.com/api/oauth/profile` at most once a day per HERMES_HOME. The cache stores only `organization_type`, `rate_limit_tier`, `has_claude_pro`, `has_claude_max` and `fetched_at`; a failed read keeps the last plan for up to seven days and leaves the usage card unchanged.
+- **Anthropic plan tag.** For a Hermes reading, the local `~/.claude.json` `oauthAccount` plan wins with no network. Without it, the backend calls `https://api.anthropic.com/api/oauth/profile` at most once a day per HERMES_HOME. The cache stores only `organization_type`, `rate_limit_tier`, `has_claude_pro`, `has_claude_max` and `fetched_at`; a failed read keeps the last plan for up to seven days and leaves the usage card unchanged. A DirectSDK reading uses the local plan only and otherwise shows Subscription.
 - **Anthropic per-model limits.** When Hermes answers for Anthropic, the backend also reads `https://api.anthropic.com/api/oauth/usage` with the first usable Anthropic OAuth token, at most once every 15 minutes, only for per-model weekly limits. It keeps parsed rows for one hour, and a failed side read leaves the main Anthropic card unchanged.
 - **All provider calls happen on your machine**, from the plugin's own backend
   half. The only network peers are the provider endpoints listed above.
@@ -137,9 +140,11 @@ rate limited, the older reading is kept instead of an error card.
 ## Notes on projections
 
 Projections need at least 30 minutes of observed history inside the last 6
-hours. The backend samples history in memory whenever it refreshes; a restart
-pauses projections until samples reaccumulate. The payload carries
-`eta_seconds` on short windows and `depletes_in_seconds` on money rows, and the
+hours. The backend samples history on every refresh and persists it at
+`<HERMES_HOME>/plugin-data/provider-usage/history.json`; after a restart it
+reloads the current window, so projections resume once enough samples are
+present. The payload carries `eta_seconds` on short windows and
+`depletes_in_seconds` on money rows, and the
 UI only surfaces them when they are actionable (window hits 100% before its
 reset; cap depletes within 14 days). Windows longer than a day are judged by
 the window average instead of the 6-hour rate, because a short burst is not a
