@@ -3,24 +3,47 @@
 Notable changes to the Provider Usage plugin. Versions follow the tags in this
 repository; the date is the release date.
 
-## 0.4.2 (unreleased)
+## 0.4.2 (2026-11-18)
 
-### Added
+Panel:
 
-- [behaviour] OpenCode's tag reads Go instead of Plan; the provider name is OpenCode.
-- [behaviour] Anthropic's tag shows the real plan: Pro, Max, Max 5x, Max 20x, Team, Enterprise, Ultra or Subscription.
-- [behaviour] Usage history covers the whole current window and survives restarts in `<HERMES_HOME>/plugin-data/provider-usage/history.json`.
-- [behaviour] Anthropic weekly plan limits render per model, such as Fable, when the OAuth reply carries them.
-- [behaviour] Kimi booster balance renders as an indicative row that never flags or alerts (#58).
-- [behaviour] When Hermes answers for Anthropic, read the per-model weekly limits from the OAuth usage endpoint at most once every 15 minutes, so model rows do not depend on the DirectSDK fallback.
-- [behaviour] Read the Anthropic plan from the OAuth profile at most once a day when `~/.claude.json` has no plan, and cache only the plan fields.
-- [behaviour] A yellow watch level marks a window on pace to run out before its reset but not yet close; amber stays for close run-outs and alert levels.
+- [behaviour] A yellow watch level marks a window on pace to run out before
+  its reset but not yet close; amber stays for close run-outs, alert levels,
+  and run-outs on rows with no known duration. Yellow never enters Needs
+  attention or fires an alert.
+- [behaviour] A window with a known length, no reset and no use yet shows an
+  idle note instead of an empty chart and dash stats.
+- [behaviour] Expanded rows chart history over the whole current window,
+  including samples that survive a restart.
+- [behaviour] Pace values near 1x use two decimals, such as 1.00x or 1.04x, so
+  on-pace rows do not look flat next to a yellow row.
 
-### Fixed
+Providers and backend:
 
-- [behaviour] Weekly and monthly windows are judged by the window average, not a six-hour trailing burst, so low use no longer lands in Needs attention before the reset.
-- [behaviour] A window with a known length, no reset and no use yet shows an idle note instead of an empty chart and dash stats.
-- [behaviour] Anthropic asks the DirectSDK provider before Hermes' anthropic helper. The helper resolves a token from `~/.claude/.credentials.json`, which can still belong to a signed-out account after a Claude Code re-login, so the card showed the old account's quota. A DirectSDK reading no longer uses the disk token for the per-model extra read or the plan read.
+- [behaviour] Weekly and monthly windows are judged by the window average,
+  not a six-hour trailing burst, so low use no longer lands in Needs
+  attention before the reset.
+- [behaviour] Usage history is persisted at
+  `<HERMES_HOME>/plugin-data/provider-usage/history.json` and survives
+  restarts.
+- [behaviour] Anthropic weekly plan limits render per model, such as Fable,
+  when the OAuth reply carries them. When Hermes answers for Anthropic, the
+  backend reads the per-model limits from the OAuth usage endpoint at most
+  once every 15 minutes; Hermes' own Anthropic sign-in now supplies the token
+  for that side read and the plan read.
+- [behaviour] The Anthropic tag shows Pro, Max, Max 5x, Max 20x, Team,
+  Enterprise or another plan name from `~/.claude.json` first. Without a
+  local plan, it reads the OAuth profile at most once a day and caches only
+  the plan fields; otherwise it shows Subscription.
+- [behaviour] Anthropic asks the DirectSDK provider before Hermes' anthropic
+  helper (#69). DirectSDK asks Claude Code for the current login, while the
+  helper resolves a token from `~/.claude/.credentials.json` that can still
+  belong to a signed-out account. A DirectSDK reading no longer uses the disk
+  token for the per-model extra read or the plan read.
+- [behaviour] OpenCode's tag reads Go instead of Plan; the provider name is
+  OpenCode.
+- [behaviour] Kimi booster balance renders as an indicative row that never
+  flags or alerts (#58).
 
 ## 0.4.1 (2026-11-09)
 
