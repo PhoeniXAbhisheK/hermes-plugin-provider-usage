@@ -1,3 +1,20 @@
+# PR labeler rules for actions/labeler v5.
+#
+# Groups:
+#   dashboard/desktop  changed code in the matching surface.
+#   documentation      only when every changed file is documentation.
+#   ci                 repo automation under .github.
+#   tests              test suite files.
+#   schema             usage payload schema.
+#   release            release branch or a version-file change.
+#   bug/enhancement    fix/ and feat/ branches.
+#   provider:<name>    fixture or test files for one provider. A new provider
+#                      adds one provider: entry with its fixture and test globs.
+#
+# A label config is a list of match objects. Top-level objects AND together;
+# options inside one `any` object OR together; options inside one `all` object
+# AND together.
+
 dashboard:
   - changed-files:
       - any-glob-to-any-file: "dashboard/**"
@@ -7,7 +24,109 @@ desktop:
       - any-glob-to-any-file: "desktop/**"
 
 documentation:
+  - all:
+      - changed-files:
+          - any-glob-to-any-file:
+              - "README.md"
+              - "CHANGELOG.md"
+              - "docs/**"
+              - "media/**"
+              - "*.md"
+              - ".github/pull_request_template.md"
+          - all-globs-to-all-files:
+              - "{README.md,CHANGELOG.md,docs/**,media/**,*.md,.github/pull_request_template.md}"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: "tests/**"
+
+schema:
+  - changed-files:
+      - any-glob-to-any-file: "schema/**"
+
+release:
+  - any:
+      - head-branch:
+          - "^release/"
+          - "^chore/release"
+      - changed-files:
+          - any-glob-to-any-file:
+              - "plugin.yaml"
+              - "dashboard/manifest.json"
+
+bug:
+  - head-branch: "^fix/"
+
+enhancement:
+  - head-branch: "^feat/"
+
+provider:anthropic:
   - changed-files:
       - any-glob-to-any-file:
-          - "README.md"
-          - "docs/**"
+          - "tests/fixtures/anthropic/**"
+          - "tests/test_anthropic*.py"
+
+provider:codex:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/codex/**"
+          - "tests/fixtures/openai-codex/**"
+          - "tests/test_codex*.py"
+
+provider:copilot:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/copilot/**"
+          - "tests/test_copilot*.py"
+
+provider:deepseek:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/deepseek/**"
+          - "tests/test_deepseek*.py"
+
+provider:kimi:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/kimi*/**"
+          - "tests/test_kimi*.py"
+
+provider:minimax:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/minimax/**"
+          - "tests/test_minimax*.py"
+
+provider:nous:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/nous/**"
+          - "tests/test_nous*.py"
+
+provider:opencode:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/opencode*/**"
+          - "tests/test_opencode*.py"
+
+provider:openrouter:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/openrouter/**"
+          - "tests/test_openrouter*.py"
+
+provider:zai:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/zai/**"
+          - "tests/test_zai*.py"
+
+provider:antigravity:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/fixtures/antigravity*/**"
+          - "tests/test_antigravity*.py"
