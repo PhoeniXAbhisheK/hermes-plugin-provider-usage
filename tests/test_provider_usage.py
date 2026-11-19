@@ -2,10 +2,12 @@
 
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -388,8 +390,6 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.HOME = self.home
         self._orig_http = API._http_json
         self._orig_hermes = API._hermes_usage
-        self._orig_hermes_token = API._hermes_oauth_token
-        API._hermes_oauth_token = lambda: None
         self._orig_plan_path = API._anthropic_plan_path
         API._anthropic_plan_path = lambda: self.home / "plan.json"
         self._plan_attempts = dict(API._anthropic_plan_attempt)
@@ -406,7 +406,6 @@ class AnthropicFetcherTest(unittest.TestCase):
         API.HOME = self._orig_home
         API._http_json = self._orig_http
         API._hermes_usage = self._orig_hermes
-        API._hermes_oauth_token = self._orig_hermes_token
         API._anthropic_plan_path = self._orig_plan_path
         API._anthropic_plan_attempt.clear()
         API._anthropic_plan_attempt.update(self._plan_attempts)
@@ -555,8 +554,20 @@ class AnthropicFetcherTest(unittest.TestCase):
                 self.assertEqual(len(self.calls), call_count)
 
     def test_plan_profile_is_cached_and_keeps_only_plan_fields(self):
-        self.claude_json.unlink()
+        self.assertIsNone(API._anthropic_oauth_token())
+        hermes_home = self.home / "hermes-home"
+        hermes_home.mkdir()
+        (hermes_home / ".anthropic_oauth.json").write_text(
+            '{"accessToken": "hermes-file", "expiresAt": 9999999999999}'
+        )
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
+            self.assertIsNone(API._anthropic_oauth_token())
         self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self.assertEqual(API._anthropic_oauth_token(), "test-token")
+        self.creds.unlink()
+        self.assertIsNone(API._anthropic_oauth_token())
+        self._write_creds({"claudeAiOauth": {"accessToken": "test-token"}})
+        self.claude_json.unlink()
         self._mock_http(
             {
                 "account": {
@@ -588,31 +599,6 @@ class AnthropicFetcherTest(unittest.TestCase):
         self.assertNotIn("identity-value", json.dumps(plan))
         self.assertEqual(API._anthropic_plan_tag(), "Max 20x")
         self.assertEqual(self.calls, [ANTHROPIC_PROFILE_URL])
-
-    def test_token_lookup(self):
-        API._hermes_oauth_token = lambda: "hermes-token"
-        cases = (
-            (None, "hermes-token"),
-            ({"accessToken": "claude-token"}, "claude-token"),
-            ({"accessToken": "expired", "expiresAt": 1000}, "hermes-token"),
-        )
-        for payload, expected in cases:
-            if payload is None:
-                self.creds.unlink(missing_ok=True)
-            else:
-                self._write_creds({"claudeAiOauth": payload})
-            self.assertEqual(API._anthropic_oauth_token(), expected)
-        API._hermes_oauth_token = lambda: None
-        self.assertIsNone(API._anthropic_oauth_token())
-
-        original_home = API._hermes_home
-        API._hermes_home = lambda: self.home
-        self.addCleanup(setattr, API, "_hermes_home", original_home)
-        path = self.home / ".anthropic_oauth.json"
-        path.write_text('{"accessToken": "hermes-file", "expiresAt": 9999999999999}')
-        self.assertEqual(API._read_hermes_oauth_file(), "hermes-file")
-        path.write_text('{"accessToken": "expired", "expiresAt": 1000}')
-        self.assertIsNone(API._read_hermes_oauth_file())
 
     def test_snapshot_plan_wins(self):
         from types import SimpleNamespace
