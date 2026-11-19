@@ -29,8 +29,7 @@ Providers and backend:
 - [behaviour] Anthropic weekly plan limits render per model, such as Fable,
   when the OAuth reply carries them. When Hermes answers for Anthropic, the
   backend reads the per-model limits from the OAuth usage endpoint at most
-  once every 15 minutes; Hermes' own Anthropic sign-in now supplies the token
-  for that side read and the plan read.
+  once every 15 minutes.
 - [behaviour] The Anthropic tag shows Pro, Max, Max 5x, Max 20x, Team,
   Enterprise or another plan name from `~/.claude.json` first. Without a
   local plan, it reads the OAuth profile at most once a day and caches only

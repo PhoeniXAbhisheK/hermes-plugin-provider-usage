@@ -121,7 +121,6 @@ class FixtureCaseTest(unittest.TestCase):
             "_fetch_usage": API._fetch_usage,
             "_hermes_usage": API._hermes_usage,
             "_claude_code_oauth_token": API._claude_code_oauth_token,
-            "_hermes_oauth_token": API._hermes_oauth_token,
             "_anthropic_plan_path": API._anthropic_plan_path,
         }
         self._saved_modules = {
@@ -152,7 +151,6 @@ class FixtureCaseTest(unittest.TestCase):
         API._read_text = lambda path: '{"tokens": {"access_token": "sentinel-token"}}'
         API._hermes_usage = lambda provider: None
         API._claude_code_oauth_token = lambda: None
-        API._hermes_oauth_token = lambda: None
         API._anthropic_plan_path = lambda: Path(self._plan_tmp.name) / "plan.json"
         API._helper_cooldown.clear()
         API._holds.clear()

@@ -25,8 +25,8 @@ Credential sources (read-only):
   provider when Nous' claude-subscription-directsdk plugin is installed (it
   asks Claude Code for its plan limits under its current login; the token
   never reaches this plugin), then by Hermes' own read-only account-usage
-  helper, then by the Claude Code OAuth token in ``~/.claude/.credentials.json``, then by Hermes' own
-  Anthropic OAuth grant. A refused helper read keeps the last reading for up
+  helper, then by the Claude Code OAuth token in ``~/.claude/.credentials.json``.
+  A refused helper read keeps the last reading for up
   to six hours, marked stale. The plan tag comes from Claude Code's local
   ``oauthAccount``, else the daily plan cache, else one profile read per day.
 - Nous: resolved by Hermes' own read-only account-usage helper.
@@ -38,7 +38,7 @@ Endpoints hit (GET, machine credentials attached):
 - https://opencode.ai/zen/go/v1/usage
 - https://chatgpt.com/backend-api/wham/usage
 - https://openrouter.ai/api/v1/key and https://openrouter.ai/api/v1/credits
-- https://api.anthropic.com/api/oauth/usage (via DirectSDK, then Hermes, else the Claude Code or Hermes OAuth token)
+- https://api.anthropic.com/api/oauth/usage (via DirectSDK, then Hermes, else the Claude Code OAuth token)
 - https://api.anthropic.com/api/oauth/profile (only when the local plan is absent, at most once a day)
 - https://portal.nousresearch.com/api/oauth/account (via Hermes' Nous sign-in)
 - https://api.deepseek.com/user/balance
@@ -1105,46 +1105,9 @@ def _claude_code_oauth_token():
     return _oauth_token_usable(d.get("claudeAiOauth"))
 
 
-def _hermes_home():
-    """The active Hermes home, with the plugin's own fallback."""
-    try:
-        from hermes_constants import get_hermes_home
-
-        return get_hermes_home()
-    except Exception:
-        raw = os.environ.get("HERMES_HOME")
-        return Path(raw).expanduser() if raw else HOME / ".hermes"
-
-
-def _read_hermes_oauth_file():
-    """The token file under HERMES_HOME, read without writing or refreshing."""
-    try:
-        data = json.loads(_read_text(_hermes_home() / ".anthropic_oauth.json"))
-    except (OSError, ValueError):
-        return None
-    return _oauth_token_usable(data)
-
-
-def _hermes_oauth_token():
-    """Hermes' own Anthropic OAuth token, when one is usable.
-
-    Reads the core credential helper when it is importable, otherwise the
-    documented token file under HERMES_HOME. Never refreshes or writes either
-    token store.
-    """
-    try:
-        from agent.anthropic_credentials import read_hermes_oauth_credentials
-    except Exception:
-        return _read_hermes_oauth_file()
-    try:
-        return _oauth_token_usable(read_hermes_oauth_credentials())
-    except Exception:
-        return None
-
-
 def _anthropic_oauth_token():
-    """The first usable Anthropic token: Claude Code, then Hermes' own grant."""
-    return _claude_code_oauth_token() or _hermes_oauth_token()
+    """The Claude Code OAuth token, the only Anthropic token the plugin reads itself."""
+    return _claude_code_oauth_token()
 
 
 def _anthropic_headers(token):
@@ -1513,7 +1476,7 @@ def _anthropic_limit_rows(limits):
 
 
 def _anthropic_direct():
-    """One direct Anthropic read with the first usable OAuth token."""
+    """One direct Anthropic read with the Claude Code OAuth token."""
     token = _anthropic_oauth_token()
     if not token:
         raise _Skip("anthropic")
