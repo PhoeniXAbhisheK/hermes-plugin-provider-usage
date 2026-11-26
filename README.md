@@ -33,7 +33,8 @@ providers are omitted from the panel entirely.
   Pinned filters, Pin all / Unpin all, and a manual refresh button sit at the top.
 - **Expanded row**: click a provider for one tab per window, a usage chart over
   the whole window (now marker, projected path, alert line), and Burn, At reset
-  and Pace figures.
+  and Pace figures. Click the reset text to switch between the countdown and the
+  local reset date and time; hovering a quota in the rows shows both.
 - **Near-limit tint**: yellow means a window is on pace to run out before its
   reset but is not close yet; amber means it is close to the run-out, at the
   alert level, or has a run-out with no known duration. Yellow never enters
