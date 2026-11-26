@@ -57,6 +57,9 @@ const $barProviders = atom(null)
 /* Which quota the bar shows per provider: { providerId: rowKey }. Empty means
  * the default (highest used_pct row). Persisted like the other atoms. */
 const $barQuota = atom({})
+/* Reset text form: false = countdown ("resets in 5d"), true = the local date
+ * and time ("resets Tue 2 Dec, 11:02"). One choice for every provider (#75). */
+const $resetAbsolute = atom(false)
 
 const STORE_INTERVAL = 'intervalMs'
 const STORE_MODE = 'valueMode'
@@ -64,6 +67,7 @@ const STORE_ALERTS = 'alerts'
 const STORE_ALERT_AT = 'alertAt'
 const STORE_BAR = 'barProviders'
 const STORE_BAR_QUOTA = 'barQuota'
+const STORE_RESET_ABSOLUTE = 'resetAbsolute'
 
 let storage = null
 let osNotify = null
@@ -90,6 +94,7 @@ function bindStorage(s) {
     const quota = storage.get(STORE_BAR_QUOTA, null)
     if (quota && typeof quota === 'object' && !Array.isArray(quota)) $barQuota.set(quota)
     $alertAt.set(cleanAlertMap(storage.get(STORE_ALERT_AT, null)))
+    if (storage.get(STORE_RESET_ABSOLUTE, null) === true) $resetAbsolute.set(true)
   } catch {
     /* ignore malformed persisted state */
   }
@@ -98,6 +103,7 @@ function bindStorage(s) {
   $barProviders.listen(v => persist(STORE_BAR, v))
   $barQuota.listen(v => persist(STORE_BAR_QUOTA, v))
   $alertAt.listen(v => persist(STORE_ALERT_AT, v))
+  $resetAbsolute.listen(v => persist(STORE_RESET_ABSOLUTE, v))
 }
 
 async function fetchUsage(manual) {
@@ -170,6 +176,39 @@ export function etaText(iso) {
   const hours = Math.floor(mins / 60)
   if (hours < 36) return 'resets in ' + hours + 'h ' + (mins % 60) + 'm'
   return 'resets in ' + Math.round(hours / 24) + 'd'
+}
+
+/* The reset as local wall-clock time, in the viewer's own locale and 12/24h
+ * setting. Weekday and date are included so a weekly reset is exact (#75). */
+export function resetAtText(iso) {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (!isFinite(t)) return ''
+  if (t <= Date.now()) return 'resets now'
+  return 'resets ' + new Date(t).toLocaleString([], {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
+
+export function flipResetForm() {
+  $resetAbsolute.set(!$resetAbsolute.get())
+}
+
+export function resetText(iso, absolute) {
+  return absolute ? resetAtText(iso) : etaText(iso)
+}
+
+/* Hover text for a quota cell: both forms, so the exact time is one hover
+ * away even where the row has no room to print a reset. */
+export function resetTitle(iso) {
+  const rel = etaText(iso)
+  const at = resetAtText(iso)
+  if (!rel || rel === at) return rel
+  return rel + ' \u00b7 ' + at.slice('resets '.length)
 }
 
 export function fmtEta(sec) {
@@ -1314,7 +1353,8 @@ function quotaCell(row, ctx) {
    * row has no room for it, so the window keeps label and value only. */
   const extra = isMoney
     ? Number(row.total) > 0 ? '/ ' + money(row.total, row.cur) : ''
-    : ctx.columns === 1 ? etaText(row.resets_at) : ''
+    : ctx.columns === 1 ? resetText(row.resets_at, ctx.resetAbsolute) : ''
+  const title = isMoney ? '' : resetTitle(row.resets_at)
   const dot = ctx.barHere && row.key === ctx.barKey
   const hasWidth = row.used_pct !== null && row.used_pct !== undefined
   const ellipsis = {
@@ -1325,6 +1365,7 @@ function quotaCell(row, ctx) {
   }
   return jsxs('div', {
     key: 'q' + (row.key || row.label),
+    title: title || undefined,
     style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
     children: [
       jsxs('div', {
@@ -1553,6 +1594,34 @@ function actionButtonStyle(active) {
 
 /* The open row's detail panel: tabs per quota, chart, three stats, and the
  * "show this quota in the status bar" action. Hook-free for tests. */
+/* The expanded panel's reset text: a click flips countdown and local time for
+ * every provider; the dotted underline and the hover text say so (#75). */
+function resetFlipButton(row, shown, ctx) {
+  const other = resetText(row.resets_at, !ctx.resetAbsolute)
+  const hint = ctx.resetAbsolute ? 'Click to show countdown' : 'Click to show local time'
+  return jsx('button', {
+    type: 'button',
+    onClick: ctx.onResetFlip,
+    title: other + '. ' + hint,
+    'aria-label': shown + '. ' + hint,
+    style: {
+      marginLeft: 'auto',
+      padding: 0,
+      border: 0,
+      background: 'transparent',
+      cursor: 'pointer',
+      fontFamily: 'inherit',
+      fontSize: 10.5,
+      lineHeight: 'inherit',
+      color: 'var(--ui-text-secondary)',
+      whiteSpace: 'nowrap',
+      textDecoration: 'underline dotted',
+      textUnderlineOffset: 2
+    },
+    children: shown
+  })
+}
+
 export function expandedPanel(p, ctx) {
   const quotas = rowsOf(p)
   if (!quotas.length) return null
@@ -1566,7 +1635,8 @@ export function expandedPanel(p, ctx) {
       ? Number(tabRow.total) > 0
         ? money(tabRow.left, tabRow.cur) + ' of ' + money(tabRow.total, tabRow.cur) + ' left'
         : money(tabRow.left, tabRow.cur) + ' left'
-      : etaText(tabRow.resets_at)
+      : resetText(tabRow.resets_at, ctx.resetAbsolute)
+  const flippable = tabRow.kind !== 'money' && extra !== '' && extra !== 'resets now'
   const threshold = alertThreshold(ctx.alertAt, p.id, tabRow)
   const alertable = tabRow.kind !== 'money' && tabRow.indicative !== true
   const notStarted = windowNotStarted(tabRow)
@@ -1598,15 +1668,17 @@ export function expandedPanel(p, ctx) {
             label: p.name + ' quotas',
             tabs: true
           }),
-          jsx('span', {
-            style: {
-              marginLeft: 'auto',
-              fontSize: 10.5,
-              color: 'var(--ui-text-secondary)',
-              whiteSpace: 'nowrap'
-            },
-            children: extra
-          })
+          flippable
+            ? resetFlipButton(tabRow, extra, ctx)
+            : jsx('span', {
+                style: {
+                  marginLeft: 'auto',
+                  fontSize: 10.5,
+                  color: 'var(--ui-text-secondary)',
+                  whiteSpace: 'nowrap'
+                },
+                children: extra
+              })
         ]
       }),
       notStarted
@@ -1793,7 +1865,7 @@ export function providerRowElement(p, ctx) {
       header,
       jsx('div', {
         style: { display: 'grid', gridTemplateColumns: 'repeat(' + cols + ', minmax(0, 1fr))', gap: 12, paddingLeft: 16, paddingRight: 30 },
-        children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols, now: ctx.now }))
+        children: shown.map(row => quotaCell(row, { mode: ctx.mode, barKey: barKey, barHere: barHere, columns: cols, now: ctx.now, resetAbsolute: ctx.resetAbsolute }))
       }),
       open ? expandedPanel(p, ctx) : null
     ]
@@ -1838,6 +1910,7 @@ function UsagePanel() {
   const sessionProvider = useValue($sessionProvider)
   const choice = useValue($barQuota)
   const alertAt = useValue($alertAt)
+  const resetAbsolute = useValue($resetAbsolute)
   const [view, setView] = useState('all')
   const [openId, setOpenId] = useState(null)
   const [tabs, setTabs] = useState({})
@@ -1903,6 +1976,8 @@ function UsagePanel() {
             onAlertClose: () => setAlertFor(null),
             onAlert: (rowKey, value) => setAlert(p.id, rowKey, value),
             onPin: () => $barProviders.set(togglePin($barProviders.get(), p.id)),
+            resetAbsolute: resetAbsolute,
+            onResetFlip: flipResetForm,
             now: now
           }))
         ]

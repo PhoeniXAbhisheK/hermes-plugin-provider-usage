@@ -70,10 +70,23 @@ test('pct rounds and treats a non-number as zero', async () => {
   assert.equal(pct(undefined), '0%')
 })
 
-test('etaText handles the minute and hour boundaries', async () => {
+test('reset text: countdown boundaries, local time and the hover form', async () => {
   const restore = frozen(NOW)
   try {
-    const { etaText } = await loadPlugin()
+    const { etaText, resetAtText, resetText, resetTitle } = await loadPlugin()
+    const later = NOW + 5 * 86400000 + 13 * 3600000
+    const clock = new Date(later).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    for (const bad of ['', 'not a date']) {
+      assert.equal(resetAtText(bad), '')
+      assert.equal(resetTitle(bad), '')
+    }
+    assert.equal(resetAtText(isoAt(NOW - 1000)), 'resets now')
+    assert.equal(resetTitle(isoAt(NOW - 1000)), 'resets now')
+    assert.ok(resetAtText(isoAt(later)).startsWith('resets '))
+    assert.ok(resetAtText(isoAt(later)).includes(clock))
+    assert.equal(resetText(isoAt(later), false), 'resets in 6d')
+    assert.equal(resetText(isoAt(later), true), resetAtText(isoAt(later)))
+    assert.equal(resetTitle(isoAt(later)), 'resets in 6d \u00b7 ' + resetAtText(isoAt(later)).slice(7))
     assert.equal(etaText(''), '')
     assert.equal(etaText('not a date'), '')
     assert.equal(etaText(isoAt(NOW)), 'resets now')
@@ -1001,6 +1014,11 @@ test('a single quota shows the reset text and several quotas do not', async () =
   }
   const twoRow = providerRowElement(multi, { mode: 'used', pins: [], barIds: [], expanded: false })
   assert.equal(nodeText(twoRow).includes('resets in '), false)
+  const cells = twoRow.props.children[1].props.children
+  assert.deepEqual(cells.map(c => c.props.title.startsWith('resets in 30m \u00b7 ')), [true, true])
+  const atRow = providerRowElement(single, { mode: 'used', pins: [], barIds: [], expanded: false, resetAbsolute: true })
+  assert.equal(nodeText(atRow).includes('resets in '), false)
+  assert.ok(nodeText(atRow).includes('resets '))
 })
 
 test('a warned quota value is amber and a quiet one is not', async () => {
@@ -1679,7 +1697,23 @@ test('expandedPanel opens on the bar quota and lists every quota tab', async () 
       { key: 'monthly', label: 'Monthly', kind: 'window', used_pct: 10 }
     ]
   }
-  const panel = expandedPanel(p, { mode: 'used', choice: { zai: 'weekly' }, barIds: ['zai'], now: now })
+  const flips = []
+  const onResetFlip = () => flips.push(1)
+  const restore = frozen(now)
+  const atFive = expandedPanel(p, { mode: 'used', choice: { zai: '5h' }, barIds: ['zai'], now: now, onResetFlip })
+  const flip = findNodes(atFive, n => n.type === 'button' && n.props.onClick === onResetFlip)
+  assert.equal(flip.length, 1)
+  assert.ok(nodeText(flip[0]).startsWith('resets in '))
+  assert.ok(flip[0].props.title.endsWith('. Click to show local time'))
+  flip[0].props.onClick()
+  assert.equal(flips.length, 1)
+  const atLocal = expandedPanel(p, { mode: 'used', choice: { zai: '5h' }, barIds: ['zai'], now: now, onResetFlip, resetAbsolute: true })
+  const back = findNodes(atLocal, n => n.type === 'button' && n.props.onClick === onResetFlip)[0]
+  assert.equal(nodeText(back).includes('resets in '), false)
+  assert.ok(back.props.title.startsWith('resets in '))
+  restore()
+  const panel = expandedPanel(p, { mode: 'used', choice: { zai: 'weekly' }, barIds: ['zai'], now: now, onResetFlip })
+  assert.equal(findNodes(panel, n => n.type === 'button' && n.props.onClick === onResetFlip).length, 0)
   const tabs = findNodes(panel, n => n.type === 'div' && n.props && n.props.role === 'tablist')
   assert.equal(tabs.length, 1)
   const triggers = findNodes(panel, n => n.type === 'button' && n.props && n.props.role === 'tab')
@@ -1833,13 +1867,16 @@ test('nextOpenId keeps one provider open at a time', async () => {
   assert.equal(nextOpenId('a', 'a'), null)
 })
 
-test('the bar quota choice persists under barQuota', async () => {
-  const { default: plugin, setBarQuota } = await loadPlugin()
+test('the bar quota and reset form persist under barQuota and resetAbsolute', async () => {
+  const { default: plugin, setBarQuota, flipResetForm } = await loadPlugin()
   const { ctx, data } = fakeContext()
   data.barQuota = { zai: 'weekly' }
+  data.resetAbsolute = true
   plugin.register(ctx)
   setBarQuota('nous', '5h')
   assert.deepEqual(data.barQuota, { zai: 'weekly', nous: '5h' })
+  flipResetForm()
+  assert.equal(data.resetAbsolute, false)
 })
 
 test('the tooltip and the dot follow the chosen bar quota', async () => {
