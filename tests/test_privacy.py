@@ -237,7 +237,9 @@ class PrivacyHarness(unittest.TestCase):
             "fetch": API._fetch_usage,
             "client": httpx.Client,
             "plan_path": API._anthropic_plan_path,
+            "agy": API._agy_binary,
         }
+        API._agy_binary = lambda: None  # never run a real agy
         API.HOME = self.home
         API._anthropic_plan_path = lambda: self.home / "plan.json"
         API._secret = self._secret
@@ -255,6 +257,7 @@ class PrivacyHarness(unittest.TestCase):
 
     def tearDown(self):
         httpx.Client = self._saved["client"]
+        API._agy_binary = self._saved["agy"]
         API.HOME = self._saved["home"]
         API._anthropic_plan_path = self._saved["plan_path"]
         API._secret = self._saved["secret"]

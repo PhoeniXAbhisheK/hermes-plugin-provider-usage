@@ -4,7 +4,8 @@
 
 Per-provider quota and balance readout in the Hermes desktop status bar:
 **OpenCode** (Go plan), **OpenAI Codex**, **OpenRouter**, plus **Anthropic**,
-**Nous**, **Z.AI**, **Kimi**, **MiniMax**, and **DeepSeek** when configured.
+**Nous**, **Z.AI**, **Kimi**, **MiniMax**, **DeepSeek**, and **Google Antigravity**
+(Gemini and Claude/GPT quota groups) when configured.
 
 Providers appear only when their credentials are usable; unconfigured
 providers are omitted from the panel entirely.
@@ -67,6 +68,7 @@ providers are omitted from the panel entirely.
 | Kimi | `KIMI_API_KEY` or `MOONSHOT_API_KEY` | `https://api.kimi.com/coding/v1/usages` (the booster balance is an indicative row and never flags or alerts; falls back to the Moonshot balance at `https://api.moonshot.ai/v1/users/me/balance`, then `https://api.moonshot.cn/v1/users/me/balance`) |
 | MiniMax | `MINIMAX_CN_API_KEY` (mainland) or `MINIMAX_API_KEY` (global); the CN key is tried first and both are probed when both are set, since M Plan subscription keys are region-bound | `https://api.minimaxi.com/v1/token_plan/remains` then `https://www.minimax.cn/v1/token_plan/remains` for mainland, `https://api.minimax.io/v1/token_plan/remains` then `https://www.minimax.io/v1/token_plan/remains` for global |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/user/balance` |
+| Google Antigravity (`antigravity-oauth`) | None read by the plugin. The Antigravity CLI `agy` holds the sign-in; the plugin finds `agy` on `PATH`, then at `~/.local/bin/agy` on Linux and macOS (`agy.exe` only on Windows) and runs `agy --version`, then `agy -p /usage --output-format json` only when the version is 1.1.11 or newer. The card stays hidden when `agy` is missing or older | No plugin request; `agy` talks to Google itself |
 
 [Claude Subscription DirectSDK]: https://github.com/NousResearch/hermes-official-plugins/tree/main/claude-subscription-directsdk
 
@@ -79,8 +81,15 @@ OpenCode Zen (the metered API) is not tracked yet; this card covers the Go subsc
   credential CLIs. Providers marked as resolved by Hermes use the app's own
   account-usage helpers (the same code path as Hermes' `/usage` surfaces,
   including Hermes' normal credential upkeep).
-- **No subprocesses of its own.** Every call this plugin makes is an
-  in-process `httpx` request. Hermes helpers it uses may run their own tools:
+- **One subprocess, for Antigravity only.** Every provider call except that one
+  is an in-process `httpx` request. For Google Antigravity the plugin runs the
+  `agy` CLI with a fixed argument list (no shell, no stdin, a timeout): first
+  `--version`, then `-p /usage --output-format json`, which `agy` 1.1.11 and
+  newer answer as a command with no model turn. The reply is checked for that
+  shape, and its text is never logged or shown; only the group name (cleaned and
+  capped at 40 characters) and the numbers are used. Groups such as Gemini and
+  Claude/GPT stay separate rows and are never summed. Hermes helpers it uses may
+  run their own tools:
   the Copilot token resolver on older Hermes can call `gh auth token`, and the
   DirectSDK provider runs the Claude Code CLI behind a zero-inference gate.
 - **Sanitized error text.** A provider failure shown in the panel is short and
@@ -136,6 +145,15 @@ For Anthropic and Codex, a last reading up to six hours old is still served when
 the helper refuses. Once that reading is more than ten minutes old, the backend
 tries the provider's own token once per five minutes; if that read fails or is
 rate limited, the older reading is kept instead of an error card.
+
+## Google Antigravity
+
+The provider id is `antigravity-oauth`, so the status bar follows an
+Antigravity chat when nothing is pinned. Each quota group `agy` reports gets its
+own 5h and Weekly rows (for example `Gemini Models Weekly`); a window length
+the plugin does not know is shown without a duration. If the dashboard service
+has no `agy` on its `PATH`, install it to `~/.local/bin` (the official location)
+or add its directory to the service's `PATH`.
 
 ## Notes on projections
 
