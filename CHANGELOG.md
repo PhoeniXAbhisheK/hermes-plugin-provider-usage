@@ -3,6 +3,15 @@
 Notable changes to the Provider Usage plugin. Versions follow the tags in this
 repository; the date is the release date.
 
+## 0.4.3 (2026-11-27)
+
+Panel:
+
+- [behaviour] The reset text in an expanded row switches between the
+  countdown and the local reset date and time with a click (#75). The choice
+  applies to every provider and survives restarts. Hovering a quota in the
+  rows shows both forms.
+
 ## 0.4.2 (2026-11-18)
 
 Panel:
